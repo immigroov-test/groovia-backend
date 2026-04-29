@@ -1,0 +1,11 @@
+1. Cost perspective: Deploy in AWS or hit API
+2. How to scrape from blocked websites (linkedIn)
+3. How to get more specific data (either web scraping or using API) - Data collection model
+4 categories:
+
+1. Only background. No idea
+2. Idea about job/study, but which country?
+3. Specific country - How to get in
+4. All plans done. What are the pre-requisites (documentation, housing etc...)
+
+First two are the major clients
