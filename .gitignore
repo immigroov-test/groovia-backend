@@ -1,0 +1,36 @@
+# Claude Code internal files
+.claude/
+
+# Secrets
+*.env
+.env*
+!.env.example
+Google Auth keys.txt
+Meeting_1_feedback.txt
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+Lib/
+Scripts/
+Include/
+pyvenv.cfg
+*.egg-info/
+dist/
+build/
+
+# Node
+node_modules/
+.next/
+.turbo/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

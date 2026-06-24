@@ -1,0 +1,20 @@
+# docker-compose.yaml — local dev only.
+# Use this if you want to test the Docker build before pushing to Render.
+# Run the frontend separately via `npm run dev` inside groovia-frontend/.
+services:
+  api:
+    build: .
+    image: groovia-api:dev
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    environment:
+      - PORT=8000
+      - CORS_ORIGINS=http://localhost:3000
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
