@@ -47,7 +47,7 @@ def list_mentors_grouped_by_country(limit_per_country: int = 2) -> dict[str, lis
     Default is 2 — the report ends with a Mentor Directory link so users can browse more."""
     rows = (
         _supabase.table("mentors")
-        .select("display_name, headline, slug, expertise_country_codes, booking_url")
+        .select("display_name, headline, slug, expertise_country_codes")
         .eq("status", "approved")
         .eq("is_active", True)
         .execute()
@@ -55,10 +55,7 @@ def list_mentors_grouped_by_country(limit_per_country: int = 2) -> dict[str, lis
     )
     grouped: dict[str, list[dict[str, Any]]] = {}
     for r in rows:
-        if r.get("booking_url"):
-            url = f"{config.CAL_BASE_URL}/{r['booking_url']}"
-        else:
-            url = f"{config.FRONTEND_URL}/mentors/{r['slug']}"
+        url = f"{config.FRONTEND_URL}/mentors/{r['slug']}"
         for code in (r.get("expertise_country_codes") or []):
             bucket = grouped.setdefault(code, [])
             if len(bucket) < limit_per_country:
@@ -502,21 +499,3 @@ def upsert_ai_event(
         logger.exception("Failed to log ai_event (thread=%s)", thread_id)
 
 
-def find_mentor_by_cal_path(path_or_username: str) -> Optional[dict[str, Any]]:
-    """Resolve a mentor from a Cal.com organizer username or booking path.
-    mentors.booking_url stores 'username/event-slug', so a prefix match works
-    for both 'username' and 'username/30min'."""
-    if not path_or_username:
-        return None
-    try:
-        res = (
-            _supabase.table("mentors")
-            .select("id, display_name, booking_url")
-            .ilike("booking_url", f"{path_or_username}%")
-            .limit(1)
-            .execute()
-        )
-        return res.data[0] if res.data else None
-    except Exception:
-        logger.exception("Mentor lookup failed for cal path %r", path_or_username)
-        return None

@@ -2,10 +2,11 @@
 
 import React, { useState, useEffect, useRef } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
+import Link from 'next/link';
 import { v4 as uuidv4 } from 'uuid';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Paperclip, Send, Sparkles, Lock } from 'lucide-react';
+import { Paperclip, Send, Sparkles, Lock, SquarePen } from 'lucide-react';
 import { UI_CONTENT, INTENT_OPTIONS } from '../lib/content';
 import { createClient } from '../lib/supabase/client';
 import { FEATURES } from '../lib/features';
@@ -22,15 +23,29 @@ interface ChatMessage {
   content: string;
 }
 
+const LINK_CLASS = '!text-brand-700 !underline !underline-offset-4 hover:!text-brand-900 font-medium';
+
 const MD_COMPONENTS: React.ComponentProps<typeof ReactMarkdown>['components'] = {
-  a: (props) => (
-    <a
-      {...props}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="!text-brand-700 !underline !underline-offset-4 hover:!text-brand-900 font-medium"
-    />
-  ),
+  a: ({ href, children, node: _node, ...rest }) => {
+    const isInternal = (() => {
+      if (!href) return false;
+      try {
+        const url = new URL(href, typeof window !== 'undefined' ? window.location.origin : 'http://localhost');
+        return url.hostname === (typeof window !== 'undefined' ? window.location.hostname : 'localhost');
+      } catch {
+        return href.startsWith('/');
+      }
+    })();
+
+    if (isInternal && href) {
+      return <Link href={href} className={LINK_CLASS} {...(rest as object)}>{children}</Link>;
+    }
+    return (
+      <a href={href} target="_blank" rel="noopener noreferrer" className={LINK_CLASS} {...rest}>
+        {children}
+      </a>
+    );
+  },
 };
 
 async function authHeaders(): Promise<Record<string, string>> {
@@ -186,6 +201,16 @@ export default function ChatInterface({ authed }: Props) {
     })();
   }, [hydrated, authed, resumeUploaded, messages.length, threadId]);
 
+  function handleNewChat() {
+    clearLocalChat();
+    const fresh = uuidv4();
+    window.localStorage.setItem(LS_KEYS.threadId, JSON.stringify(fresh));
+    setThreadId(fresh);
+    setMessages([{ role: 'assistant', content: UI_CONTENT.welcomeMessage }]);
+    setResumeUploaded(false);
+    setIntentSelected(false);
+  }
+
   const fileInputRef = useRef<HTMLInputElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const chatStartRef = useRef<HTMLDivElement>(null);
@@ -305,6 +330,19 @@ export default function ChatInterface({ authed }: Props) {
         {/* Hero shown only before the conversation starts. */}
         {!resumeUploaded && messages.length <= 1 && (
           <ChatIntro onStart={() => chatStartRef.current?.scrollIntoView({ behavior: 'smooth' })} />
+        )}
+
+        {messages.length > 1 && (
+          <div className="flex justify-end px-4 pt-3 max-w-3xl mx-auto">
+            <button
+              onClick={handleNewChat}
+              className="flex items-center gap-1.5 text-xs text-muted hover:text-foreground transition-colors"
+              title="Start a new chat"
+            >
+              <SquarePen className="h-3.5 w-3.5" />
+              New chat
+            </button>
+          </div>
         )}
 
         <div ref={chatStartRef} className="mx-auto max-w-3xl px-4 pt-8 pb-44 space-y-6">

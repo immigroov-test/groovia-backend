@@ -15,7 +15,12 @@ export function GoogleButton({ label = 'Continue with Google', next }: { label?:
     const redirectTo = `${window.location.origin}/auth/callback${next ? `?next=${encodeURIComponent(next)}` : ''}`;
     const { error } = await supabase.auth.signInWithOAuth({
       provider: 'google',
-      options: { redirectTo },
+      options: {
+        redirectTo,
+        // Show the Google account chooser so the user can confirm which account
+        // to use; Google shows its consent screen automatically on first authorization.
+        queryParams: { prompt: 'select_account' },
+      },
     });
     if (error) {
       setLoading(false);

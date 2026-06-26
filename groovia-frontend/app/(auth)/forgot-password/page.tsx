@@ -32,7 +32,7 @@ export default function ForgotPasswordPage() {
           <div className="text-center">
             <h1 className="text-2xl font-semibold tracking-tight text-brand-900">Check your inbox</h1>
             <p className="text-sm text-muted mt-2">If <span className="font-medium text-foreground">{email}</span> matches an account, a reset link is on its way.</p>
-            <div className="mt-6"><Link href="/chat?auth=open&mode=login"><Button variant="outline">Back to sign in</Button></Link></div>
+            <div className="mt-6"><Link href="/chat?auth=open&mode=login"><Button variant="outline">Back to login</Button></Link></div>
           </div>
         ) : (
           <>
@@ -53,7 +53,7 @@ export default function ForgotPasswordPage() {
               <Button type="submit" loading={loading}>Send reset link</Button>
             </form>
             <p className="mt-4 text-xs text-muted text-center">
-              <Link href="/chat?auth=open&mode=login" className="hover:text-foreground">← Back to sign in</Link>
+              <Link href="/chat?auth=open&mode=login" className="hover:text-foreground">← Back to login</Link>
             </p>
           </>
         )}

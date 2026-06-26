@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Optional
 
 import jwt
+from jwt import PyJWKClient
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
@@ -16,6 +17,12 @@ logger = logging.getLogger("immigroov.auth")
 
 # auto_error=False so we can build optional-auth endpoints (guest mode still works)
 _bearer = HTTPBearer(auto_error=False)
+
+# Supabase publishes its asymmetric signing keys (ES256/RS256) here. New projects
+# sign tokens with these by default; older projects use the shared HS256 secret.
+# PyJWKClient is lazy + caches the key set, so HS256-only setups never hit the network.
+_JWKS_URL = f"{config.SUPABASE_URL}/auth/v1/.well-known/jwks.json"
+_jwks_client = PyJWKClient(_JWKS_URL, cache_keys=True, lifespan=3600)
 
 
 @dataclass(frozen=True)
@@ -27,14 +34,22 @@ class AuthUser:
 
 
 def _decode(token: str) -> dict:
-    """Verify JWT signature + claims with the project's JWT secret."""
-    return jwt.decode(
-        token,
-        config.SUPABASE_JWT_SECRET,
-        algorithms=["HS256"],
-        audience="authenticated",  # Supabase issues tokens with this audience for logged-in users
-        options={"require": ["exp", "sub", "email"]},
+    """Verify a Supabase JWT, supporting BOTH signing schemes:
+      - HS256: legacy shared secret (SUPABASE_JWT_SECRET)
+      - ES256/RS256: asymmetric keys fetched from the project JWKS endpoint
+    The algorithm is read from the (unverified) token header and the matching
+    verification path is chosen, so the same backend works regardless of whether
+    the project has migrated to asymmetric JWT signing keys."""
+    alg = jwt.get_unverified_header(token).get("alg", "HS256")
+    common = dict(
+        audience="authenticated",   # Supabase tags logged-in users with this audience
+        options={"require": ["exp", "sub"]},
     )
+    if alg.startswith("HS"):
+        return jwt.decode(token, config.SUPABASE_JWT_SECRET, algorithms=["HS256"], **common)
+    # Asymmetric: verify against the project's published public key.
+    signing_key = _jwks_client.get_signing_key_from_jwt(token).key
+    return jwt.decode(token, signing_key, algorithms=["ES256", "RS256"], **common)
 
 
 def get_current_user(
@@ -48,13 +63,21 @@ def get_current_user(
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token expired")
     except jwt.InvalidTokenError as e:
-        logger.warning("Invalid JWT: %s", e)
+        logger.warning("Invalid JWT (alg=%s): %s", _safe_alg(creds.credentials), e)
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token")
     return AuthUser(
         id=payload["sub"],
-        email=payload["email"],
+        email=payload.get("email", ""),
         role=payload.get("role", "authenticated"),
     )
+
+
+def _safe_alg(token: str) -> str:
+    """Best-effort read of the token's alg for diagnostics — never raises."""
+    try:
+        return jwt.get_unverified_header(token).get("alg", "?")
+    except Exception:
+        return "?"
 
 
 def get_current_user_optional(
@@ -70,7 +93,7 @@ def get_current_user_optional(
         return None
     return AuthUser(
         id=payload["sub"],
-        email=payload["email"],
+        email=payload.get("email", ""),
         role=payload.get("role", "authenticated"),
     )
 

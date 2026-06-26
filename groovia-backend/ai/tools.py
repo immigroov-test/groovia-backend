@@ -11,7 +11,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_excep
 
 import db
 from config import (
-    EXA_API_KEY, CAL_BASE_URL,
+    EXA_API_KEY, FRONTEND_URL,
     TAVILY_MAX_RESULTS, EXA_NUM_RESULTS, EXA_HIGHLIGHT_MAX_CHARS,
 )
 
@@ -105,7 +105,7 @@ def retrieve_matching_mentors(target_country: str, profile_keyword: str = "") ->
             {
                 "name": r["display_name"],
                 "headline": r.get("headline") or "",
-                "booking_url": f"{CAL_BASE_URL}/{r['booking_url']}" if r.get("booking_url") else "No booking link available",
+                "booking_url": f"{FRONTEND_URL}/mentors/{r['slug']}",
             }
             for r in rows
         ]

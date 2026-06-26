@@ -27,7 +27,7 @@ export default async function VerifyEmailPage({
         </p>
         <div className="mt-6">
           <Link href="/login">
-            <Button variant="outline">Back to sign in</Button>
+            <Button variant="outline">Back to login</Button>
           </Link>
         </div>
       </CardBody>

@@ -53,6 +53,10 @@ export function MultiSelect({
       if (maxSelected && value.length >= maxSelected) return;
       onChange([...value, v]);
     }
+    // Clear the filter text after a pick so leftover query ("Mala") doesn't linger
+    // in the input next to the freshly-added chip.
+    setQuery('');
+    inputRef.current?.focus();
   }
 
   function remove(v: string, e: React.MouseEvent) {

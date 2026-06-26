@@ -18,10 +18,12 @@ import config
 import db
 from core.rate_limit import limiter
 from routers import admin as admin_router
+from routers import availability as availability_router
+from routers import booking as booking_router
 from routers import chat as chat_router
 from routers import mentor as mentor_router
 from routers import mentors as mentors_router
-from routers import webhooks as webhooks_router
+from routers import services as services_router
 
 if config.MOCK_SERVICES:
     from routers import dev as dev_router
@@ -104,10 +106,12 @@ async def health_full():
 
 
 api.include_router(admin_router.router)
+api.include_router(availability_router.router)
+api.include_router(booking_router.router)
 api.include_router(chat_router.router)
 api.include_router(mentor_router.router)
 api.include_router(mentors_router.router)
-api.include_router(webhooks_router.router)
+api.include_router(services_router.router)
 
 if config.MOCK_SERVICES:
     api.include_router(dev_router.router)

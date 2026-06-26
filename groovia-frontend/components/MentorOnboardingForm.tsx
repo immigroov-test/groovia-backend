@@ -92,7 +92,7 @@ export function MentorOnboardingForm({ defaultName = '', userId = '' }: Props) {
     try {
       const supabase = createClient();
       const { data: { session } } = await supabase.auth.getSession();
-      if (!session?.access_token) { setError('Session expired. Please sign in again.'); return; }
+      if (!session?.access_token) { setError('Session expired. Please log in again.'); return; }
 
       const res = await fetch('/api/mentor/signup', {
         method: 'POST',
@@ -266,7 +266,7 @@ export function MentorOnboardingForm({ defaultName = '', userId = '' }: Props) {
             options={LANGUAGE_OPTIONS}
             value={languages}
             onChange={setLanguages}
-            placeholder="Type to search (e.g. "Ja" → Japanese)…"
+            placeholder={'Type to search (e.g. "Ja" → Japanese)…'}
             hint="Start typing to filter; select to add."
           />
         </CardBody>

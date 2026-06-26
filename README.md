@@ -17,10 +17,11 @@ Both services deploy independently and communicate over HTTPS.
 | Layer | Technology |
 |---|---|
 | Frontend | Next.js 16 (App Router), React 19, Tailwind v4, Supabase SSR |
-| Backend | FastAPI, LangGraph, Groq (Llama-4), Supabase |
+| Backend | FastAPI, LangGraph, Groq (Llama), Supabase |
 | AI | Groq Llama-3.3-70b (agent) + Llama-3.1-8b (reviewer) |
 | Search tools | Tavily (broad web), Exa (neural / precise) |
 | Database | Supabase Postgres + Auth + Storage |
+| Email | Resend (transactional) |
 | Deployment | Fly.io (backend), Vercel (frontend) |
 
 ## Quick start
@@ -53,11 +54,20 @@ no_resume → awaiting_intent → report | mentor | qna
 
 Each real LLM response goes through a reflection loop (reviewer LLM audits, revises up to N times). Short-circuit gates handle trivial turns with zero LLM cost.
 
+Mentor booking is fully in-app:
+- Mentors set a weekly schedule + session types; candidates book slots directly.
+- A full lifecycle follows each booking — cancel, reschedule (with mentor approval
+  for late changes), and no-show handling — surfaced in the Account and Mentor Hub views.
+
 Run `python groovia-backend/generate_architecture.py` to regenerate `system_architecture.png` (requires `pip install diagrams` and Graphviz on PATH).
 
-## Database migrations
+## Database setup
 
-Run SQL files from `groovia-backend/migrations/` sequentially in the Supabase SQL editor (001 → 014).
+**Fresh Supabase project:** Run `groovia-backend/migrations/production_db_setup.sql` in the SQL Editor (single file, complete schema).
+
+**Existing database (incremental):** Run SQL files from `groovia-backend/migrations/` sequentially: `001` → `015` (skip `002` on production — seed data only).
+
+**Local testing project:** Run `groovia-backend/migrations/testing_db_setup.sql` (schema + seed mentors). Between test runs, use `testing_db_reset.sql` to clear test data without re-creating the schema.
 
 ## Roadmap
 

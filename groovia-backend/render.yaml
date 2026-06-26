@@ -4,11 +4,13 @@
 # Docs: https://render.com/docs/blueprint-spec
 
 services:
+  # ── Production (tracks `main`) ───────────────────────────────────────────────
   - type: web
     name: groovia-api
     runtime: docker
     plan: starter            # free tier; cold-starts after 15 min idle. Upgrade to "standard" once live.
     region: frankfurt        # EU — keeps data near Supabase EU West and stays GDPR-friendly.
+    branch: main             # pinned so prod only rebuilds on main.
     dockerfilePath: ./Dockerfile
     healthCheckPath: /health
     autoDeploy: true         # Render rebuilds on every push to the watched branch.
@@ -61,11 +63,67 @@ services:
         sync: false
       - key: DATABASE_URL
         sync: false           # Supabase Connection string > URI (Transaction pooler port 6543)
-      - key: CAL_WEBHOOK_SECRET
-        sync: false           # same value as configured in Cal.com → Settings → Developer → Webhooks
-      - key: NYLAS_API_KEY
-        sync: false           # from https://dashboard-v3.nylas.com → your app → API keys
-      - key: NYLAS_CLIENT_ID
-        sync: false           # from https://dashboard-v3.nylas.com → your app → Authentication
-      - key: NYLAS_WEBHOOK_SECRET
-        sync: false           # shown once when you create the webhook destination (see below)
+      - key: RESEND_API_KEY
+        sync: false           # transactional email; optional
+
+  # ── Staging (tracks `staging` branch) ────────────────────────────────────────
+  # Point ALL Supabase secrets below at the SEPARATE staging Supabase project,
+  # and CORS_ORIGINS / FRONTEND_URL at the staging Vercel URL. See STAGING_SETUP.md.
+  - type: web
+    name: groovia-api-staging
+    runtime: docker
+    plan: starter
+    region: frankfurt
+    branch: staging
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: HOST
+        value: 0.0.0.0
+      - key: CORS_ORIGINS
+        sync: false           # the staging Vercel URL, e.g. https://groovia-frontend-git-staging-<scope>.vercel.app
+      - key: FRONTEND_URL
+        sync: false           # same staging Vercel URL
+
+      - key: MAIN_MODEL_NAME
+        value: llama-3.3-70b-versatile
+      - key: REVIEW_MODEL_NAME
+        value: llama-3.1-8b-instant
+
+      - key: FEATURE_CHAT_HISTORY
+        value: "true"
+      - key: FEATURE_GUEST_MODE
+        value: "true"
+      - key: FEATURE_MENTORS_PUBLIC
+        value: "true"
+      - key: FEATURE_WEB_SEARCH_TOOL
+        value: "true"
+      - key: FEATURE_MENTOR_TOOL
+        value: "true"
+      - key: FEATURE_RESUME_UPLOAD
+        value: "true"
+      - key: FEATURE_GOOGLE_OAUTH
+        value: "true"
+
+      # Secrets — STAGING Supabase project + shared LLM/search keys.
+      - key: GROQ_API_KEY
+        sync: false
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: EXA_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false           # staging Supabase project URL
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false           # staging Supabase service role key
+      - key: SUPABASE_JWT_SECRET
+        sync: false           # staging Supabase JWT secret (Settings → API → JWT Settings)
+      - key: DATABASE_URL
+        sync: false           # staging Supabase connection string (Transaction pooler, port 6543)
+      - key: RESEND_API_KEY
+        sync: false           # optional — leave unset to skip real emails
+      - key: MOCK_SERVICES
+        value: "false"        # set "true" to mock Resend/webhooks on staging instead

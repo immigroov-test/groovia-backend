@@ -4,6 +4,9 @@ import { createClient } from '../../../lib/supabase/server';
 import { backendBaseUrl } from '../../../lib/backend';
 import { Card, CardBody } from '../../../components/ui/Card';
 import { MentorLanding } from '../../../components/MentorLanding';
+import { ServicesManager } from '../../../components/ServicesManager';
+import { AvailabilityManagerV2 } from '../../../components/AvailabilityManagerV2';
+import { BookingManager } from '../../../components/BookingManager';
 
 export const metadata = { title: 'Mentor Hub — Immigroov' };
 
@@ -133,6 +136,48 @@ export default async function MentorPage() {
               </p>
             </CardBody>
           </Card>
+        )}
+
+        {mentor.status === 'approved' && (
+          <Card>
+            <CardBody className="pt-6 flex flex-col gap-4">
+              <div>
+                <h2 className="text-base font-semibold text-foreground">Your sessions</h2>
+                <p className="text-sm text-muted mt-0.5">
+                  Upcoming and past bookings. Approve requests, propose reschedules, or report a no-show.
+                </p>
+              </div>
+              <BookingManager role="mentor" />
+            </CardBody>
+          </Card>
+        )}
+
+        {(mentor.status === 'approved' || mentor.status === 'pending_review') && (
+          <>
+            <Card>
+              <CardBody className="pt-6 flex flex-col gap-4">
+                <div>
+                  <h2 className="text-base font-semibold text-foreground">Session types</h2>
+                  <p className="text-sm text-muted mt-0.5">
+                    Define the sessions mentees can book with you — duration, price, and intake questions.
+                  </p>
+                </div>
+                <ServicesManager />
+              </CardBody>
+            </Card>
+
+            <Card>
+              <CardBody className="pt-6 flex flex-col gap-4">
+                <div>
+                  <h2 className="text-base font-semibold text-foreground">Schedule & availability</h2>
+                  <p className="text-sm text-muted mt-0.5">
+                    Set your weekly hours, block days off, and configure booking rules.
+                  </p>
+                </div>
+                <AvailabilityManagerV2 />
+              </CardBody>
+            </Card>
+          </>
         )}
       </div>
     </div>

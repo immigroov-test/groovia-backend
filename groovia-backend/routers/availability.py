@@ -1,0 +1,212 @@
+import logging
+from datetime import date, time
+from typing import Optional
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, field_validator
+
+import db
+from core.auth import AuthUser, get_current_user
+
+logger = logging.getLogger("immigroov.routers.availability")
+
+router = APIRouter(prefix="/mentor/availability-v2", tags=["mentor-availability"])
+
+_DAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+
+
+def _get_mentor_id(user: AuthUser) -> str:
+    mentor = db.get_mentor_by_profile_id(user.id)
+    if not mentor:
+        raise HTTPException(status_code=404, detail="No mentor profile for this account")
+    if mentor.get("status") not in ("approved", "pending_review"):
+        raise HTTPException(status_code=403, detail="Mentor profile not active")
+    return mentor["id"]
+
+
+# ── Booking rules ──────────────────────────────────────────────────────────────
+
+class BookingRulesBody(BaseModel):
+    days_ahead: int = 30
+    min_notice_hours: float = 2.0
+    cancel_hours: Optional[int] = None
+
+    @field_validator("days_ahead")
+    @classmethod
+    def validate_days(cls, v: int) -> int:
+        if v < 1 or v > 365:
+            raise ValueError("days_ahead must be between 1 and 365")
+        return v
+
+    @field_validator("min_notice_hours")
+    @classmethod
+    def validate_notice(cls, v: float) -> float:
+        if v < 0 or v > 168:
+            raise ValueError("min_notice_hours must be between 0 and 168")
+        return v
+
+
+@router.get("/rules")
+def get_rules(user: AuthUser = Depends(get_current_user)):
+    mentor_id = _get_mentor_id(user)
+    try:
+        return db.get_availability_rules(mentor_id)
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to load booking rules")
+
+
+@router.post("/rules")
+def set_rules(body: BookingRulesBody, user: AuthUser = Depends(get_current_user)):
+    mentor_id = _get_mentor_id(user)
+    try:
+        db.set_availability_rules(
+            mentor_id=mentor_id,
+            days_ahead=body.days_ahead,
+            min_notice_hours=body.min_notice_hours,
+            cancel_hours=body.cancel_hours,
+        )
+        return {"updated": True}
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to update booking rules")
+
+
+# ── Weekly schedule ────────────────────────────────────────────────────────────
+
+class WeeklySlotBody(BaseModel):
+    weekday: str
+    start_time: str   # "HH:MM"
+    end_time: str     # "HH:MM"
+
+    @field_validator("weekday")
+    @classmethod
+    def validate_day(cls, v: str) -> str:
+        if v not in _DAYS:
+            raise ValueError(f"weekday must be one of: {', '.join(_DAYS)}")
+        return v
+
+    @field_validator("start_time", "end_time")
+    @classmethod
+    def validate_time(cls, v: str) -> str:
+        parts = v.split(":")
+        if len(parts) != 2:
+            raise ValueError("time must be HH:MM")
+        h, m = parts
+        if not (0 <= int(h) <= 23 and 0 <= int(m) <= 59):
+            raise ValueError("Invalid time")
+        return v
+
+
+@router.get("/weekly")
+def list_weekly(user: AuthUser = Depends(get_current_user)):
+    mentor_id = _get_mentor_id(user)
+    try:
+        return db.list_weekly_availability(mentor_id)
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to load weekly schedule")
+
+
+@router.post("/weekly")
+def add_weekly(body: WeeklySlotBody, user: AuthUser = Depends(get_current_user)):
+    mentor_id = _get_mentor_id(user)
+    try:
+        db.add_weekly_availability(
+            mentor_id=mentor_id,
+            weekday=body.weekday,
+            start_time=body.start_time,
+            end_time=body.end_time,
+        )
+        return {"added": True}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        logger.exception("add_weekly failed mentor=%s", mentor_id)
+        raise HTTPException(status_code=500, detail="Failed to add weekly slot")
+
+
+@router.post("/weekly/{slot_id}/delete")
+def delete_weekly(slot_id: str, user: AuthUser = Depends(get_current_user)):
+    _get_mentor_id(user)
+    try:
+        db.remove_weekly_availability(slot_id)
+        return {"deleted": True}
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to delete weekly slot")
+
+
+# ── Specific overrides ─────────────────────────────────────────────────────────
+
+class BlockDateBody(BaseModel):
+    slot_date: date
+
+
+@router.post("/block-date")
+def block_date(body: BlockDateBody, user: AuthUser = Depends(get_current_user)):
+    mentor_id = _get_mentor_id(user)
+    try:
+        db.block_date(mentor_id=mentor_id, slot_date=str(body.slot_date))
+        return {"blocked": True}
+    except Exception:
+        logger.exception("block_date failed mentor=%s date=%s", mentor_id, body.slot_date)
+        raise HTTPException(status_code=500, detail="Failed to block date")
+
+
+class OverrideDateBody(BaseModel):
+    slot_date: date
+    start_time: str
+    end_time: str
+
+    @field_validator("start_time", "end_time")
+    @classmethod
+    def validate_time(cls, v: str) -> str:
+        parts = v.split(":")
+        if len(parts) != 2:
+            raise ValueError("time must be HH:MM")
+        return v
+
+
+@router.post("/override-date")
+def override_date(body: OverrideDateBody, user: AuthUser = Depends(get_current_user)):
+    mentor_id = _get_mentor_id(user)
+    try:
+        db.override_date(
+            mentor_id=mentor_id,
+            slot_date=str(body.slot_date),
+            start_time=body.start_time,
+            end_time=body.end_time,
+        )
+        return {"overridden": True}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to override date")
+
+
+@router.get("/specific")
+def list_specific(user: AuthUser = Depends(get_current_user)):
+    mentor_id = _get_mentor_id(user)
+    try:
+        return db.list_specific_availability(mentor_id)
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to load specific availability")
+
+
+@router.post("/specific/{entry_id}/delete")
+def delete_specific(entry_id: str, user: AuthUser = Depends(get_current_user)):
+    _get_mentor_id(user)
+    try:
+        db.remove_specific_availability(entry_id)
+        return {"deleted": True}
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to delete entry")
+
+
+# ── Mentor sessions ────────────────────────────────────────────────────────────
+
+@router.get("/sessions")
+def get_sessions(user: AuthUser = Depends(get_current_user)):
+    mentor_id = _get_mentor_id(user)
+    try:
+        return db.list_mentor_sessions(mentor_id)
+    except Exception:
+        logger.exception("get_sessions failed mentor=%s", mentor_id)
+        raise HTTPException(status_code=500, detail="Failed to load sessions")

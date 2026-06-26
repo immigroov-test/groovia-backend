@@ -42,12 +42,6 @@ TAVILY_MAX_RESULTS       = 5
 EXA_NUM_RESULTS          = 3
 EXA_HIGHLIGHT_MAX_CHARS  = 1000
 
-# Mentor booking
-MENTOR_BOOKING_COL = "booking_url"
-CAL_BASE_URL       = "https://cal.com"
-# Optional HMAC secret for inbound Cal.com webhooks — /webhooks/cal returns 503 until set.
-CAL_WEBHOOK_SECRET = os.getenv("CAL_WEBHOOK_SECRET")
-
 # Resend transactional email
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 EMAIL_FROM     = os.getenv("EMAIL_FROM", "Immigroov <noreply@immigroov.com>")

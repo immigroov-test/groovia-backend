@@ -127,7 +127,7 @@ MENTOR_REVIEWER_PROMPT = """Audit one mentor recommendation. Apply each check; s
 
 Checks:
 1. NAMES — at least one real mentor name (not "[Mentor Name]" placeholder)?
-2. LINKS — every mentor has a markdown link of the form [Book ...](https://cal.com/...)? Placeholders like "(booking_url)" fail.
+2. LINKS — every mentor has a markdown link of the form [Book ...](https://.../mentors/...)? Placeholders like "(booking_url)" fail.
 3. RELEVANCE — mentors are for TARGET_COUNTRY (no off-topic suggestions)?
 4. CTA — the Mentor Directory link appears at the bottom?
 5. CLARITY — each entry shows headline / domain so the user can pick?

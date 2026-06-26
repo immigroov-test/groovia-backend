@@ -95,7 +95,7 @@ export function MentorRegisterForm() {
           href="/?auth=open&role=mentor&mode=login"
           className="text-sm text-brand-700 hover:underline"
         >
-          Already verified? Sign in →
+          Already verified? Login →
         </Link>
       </div>
     );
@@ -150,7 +150,7 @@ export function MentorRegisterForm() {
             {error}{' '}
             {error.includes('already exists') && (
               <Link href="/?auth=open&role=mentor&mode=login" className="underline font-medium">
-                Sign in instead
+                Login instead
               </Link>
             )}
           </p>
@@ -164,7 +164,7 @@ export function MentorRegisterForm() {
       <p className="text-xs text-muted text-center">
         Already have an account?{' '}
         <Link href="/?auth=open&role=mentor&mode=login" className="text-brand-700 hover:underline">
-          Sign in
+          Login
         </Link>
       </p>
     </div>

@@ -26,7 +26,7 @@ export function Sidebar({ authed, role }: Props) {
     { href: '/chat',    label: UI_CONTENT.sidebar.chat,    icon: MessagesSquare, gated: false },
     { href: '/mentors', label: UI_CONTENT.sidebar.mentors, icon: Users,          gated: true  },
     { href: '/account', label: UI_CONTENT.sidebar.account, icon: UserCircle,     gated: true  },
-    { href: '/mentor',  label: UI_CONTENT.sidebar.mentorPortal, icon: CalendarCheck, gated: false },
+    ...(role !== 'admin' ? [{ href: '/mentor', label: UI_CONTENT.sidebar.mentorPortal, icon: CalendarCheck, gated: false }] : []),
     ...(role === 'admin' ? [{ href: '/admin', label: UI_CONTENT.sidebar.admin, icon: ShieldCheck, gated: false }] : []),
   ];
 

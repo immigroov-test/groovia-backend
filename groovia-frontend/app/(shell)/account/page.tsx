@@ -2,6 +2,7 @@ import { createClient } from '../../../lib/supabase/server';
 import { Card, CardBody } from '../../../components/ui/Card';
 import { Badge } from '../../../components/ui/Badge';
 import { ProfileEditor } from '../../../components/ProfileEditor';
+import { BookingManager } from '../../../components/BookingManager';
 
 export const metadata = { title: 'Account — Immigroov' };
 
@@ -45,6 +46,18 @@ export default async function AccountPage() {
           initialPhone={profile?.phone ?? ''}
           initialSummary={profile?.profile_summary ?? ''}
         />
+
+        <Card>
+          <CardBody className="pt-6 flex flex-col gap-4">
+            <div>
+              <h2 className="text-base font-semibold text-foreground">Your sessions</h2>
+              <p className="text-sm text-muted mt-0.5">
+                Manage your bookings — reschedule, cancel, or report a no-show.
+              </p>
+            </div>
+            <BookingManager role="mentee" />
+          </CardBody>
+        </Card>
       </div>
     </div>
   );

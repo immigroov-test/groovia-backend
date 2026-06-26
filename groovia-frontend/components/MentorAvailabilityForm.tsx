@@ -35,7 +35,7 @@ export function MentorAvailabilityForm({ initialSlots, initialDuration }: Props)
     try {
       const supabase = createClient();
       const { data: { session } } = await supabase.auth.getSession();
-      if (!session?.access_token) { setError('Session expired. Please sign in again.'); return; }
+      if (!session?.access_token) { setError('Session expired. Please log in again.'); return; }
       const res = await fetch('/api/mentor/availability', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },

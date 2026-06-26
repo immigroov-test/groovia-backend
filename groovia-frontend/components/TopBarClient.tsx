@@ -61,7 +61,7 @@ export function TopBarClient({ email }: { email: string | null }) {
             onClick={openSignIn}
           >
             <LogIn className="h-4 w-4" />
-            Sign in
+            Login
           </Button>
         )}
       </div>

@@ -41,7 +41,7 @@ export function MobileNav({ authed, email, role }: Props) {
     { href: '/chat',    label: UI_CONTENT.sidebar.chat,         icon: MessagesSquare, gated: false },
     { href: '/mentors', label: UI_CONTENT.sidebar.mentors,      icon: Users,          gated: true  },
     { href: '/account', label: UI_CONTENT.sidebar.account,      icon: UserCircle,     gated: true  },
-    { href: '/mentor',  label: UI_CONTENT.sidebar.mentorPortal, icon: CalendarCheck,  gated: false },
+    ...(role !== 'admin' ? [{ href: '/mentor', label: UI_CONTENT.sidebar.mentorPortal, icon: CalendarCheck, gated: false }] : []),
     ...(role === 'admin' ? [{ href: '/admin', label: UI_CONTENT.sidebar.admin, icon: ShieldCheck, gated: false }] : []),
   ];
 
@@ -82,7 +82,7 @@ export function MobileNav({ authed, email, role }: Props) {
               className="h-9 px-3 rounded-full bg-white/15 text-xs font-semibold flex items-center gap-1.5 hover:bg-white/25 active:scale-95 transition-transform"
             >
               <LogIn className="h-3.5 w-3.5" />
-              Sign in
+              Login
             </Link>
           )}
         </div>

@@ -308,6 +308,90 @@ def _mentor_application_received(d: dict) -> tuple[str, str]:
     return "We've received your Immigroov mentor application", _base(body)
 
 
+# ── Lifecycle v2 templates (cancel / reschedule / no-show) ──────────────────────
+
+def _booking_cancelled(d: dict) -> tuple[str, str]:
+    name = _e(d.get("recipient_name", "there"))
+    other = d.get("other_name", "the other party")
+    body = (
+        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Your session was cancelled</h1>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {name},</p>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
+        f"Your session with <strong>{_e(other)}</strong> has been cancelled.</p>"
+        + _info_row("Was scheduled for", d.get("session_time", ""))
+        + '<p style="margin:0;font-size:15px;color:#444;line-height:1.6">'
+        "You can book another session any time from the mentor directory.</p>"
+    )
+    return "Your Immigroov session was cancelled", _base(body)
+
+
+def _booking_rescheduled(d: dict) -> tuple[str, str]:
+    name = _e(d.get("recipient_name", "there"))
+    other = d.get("other_name", "the other party")
+    body = (
+        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Your session was rescheduled ✓</h1>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {name},</p>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
+        f"Your session with <strong>{_e(other)}</strong> has a new time.</p>"
+        + _info_row("New date & time", d.get("session_time", ""))
+    )
+    return f"Rescheduled: your session with {other}", _base(body)
+
+
+def _reschedule_proposed(d: dict) -> tuple[str, str]:
+    name = _e(d.get("recipient_name", "there"))
+    mentor = d.get("other_name", "your mentor")
+    body = (
+        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Your mentor proposed a new time</h1>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {name},</p>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
+        f"<strong>{_e(mentor)}</strong> proposed a new time range for your session. "
+        "Open your sessions to pick a slot that works, or decline.</p>"
+        + _btn(config.FRONTEND_URL + "/account", "Review proposal")
+    )
+    return f"{mentor} proposed a new time for your session", _base(body)
+
+
+def _reschedule_requested(d: dict) -> tuple[str, str]:
+    mentor = _e(d.get("recipient_name", "there"))
+    attendee = d.get("other_name", "An attendee")
+    body = (
+        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">A reschedule was requested</h1>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {mentor},</p>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
+        f"<strong>{_e(attendee)}</strong> requested to reschedule a session within 24 hours of the start. "
+        "Approve or decline it from your Mentor Hub — if you don't respond in time it auto-approves.</p>"
+        + _btn(config.FRONTEND_URL + "/mentor", "Review request")
+    )
+    return "A reschedule was requested", _base(body)
+
+
+def _cancel_requested(d: dict) -> tuple[str, str]:
+    mentor = _e(d.get("recipient_name", "there"))
+    attendee = d.get("other_name", "An attendee")
+    body = (
+        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">A cancellation was requested</h1>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {mentor},</p>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
+        f"<strong>{_e(attendee)}</strong> requested to cancel a session within 24 hours of the start. "
+        "Approve or decline it from your Mentor Hub — if you don't respond in time it auto-approves.</p>"
+        + _btn(config.FRONTEND_URL + "/mentor", "Review request")
+    )
+    return "A cancellation was requested", _base(body)
+
+
+def _no_show_reported(d: dict) -> tuple[str, str]:
+    name = _e(d.get("recipient_name", "there"))
+    body = (
+        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Session marked as a no-show</h1>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {name},</p>'
+        '<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
+        "A session you were part of was reported as a no-show. Open your sessions to see the options for resolving it.</p>"
+        + _btn(config.FRONTEND_URL + "/account", "View session")
+    )
+    return "A session was marked as a no-show", _base(body)
+
+
 _TEMPLATES = {
     "mentor_application_received": _mentor_application_received,
     "mentor_approved": _mentor_approved,
@@ -320,6 +404,12 @@ _TEMPLATES = {
     "review_request": _review_request,
     "welcome_candidate": _welcome_candidate,
     "welcome_mentor": _welcome_mentor,
+    "booking_cancelled": _booking_cancelled,
+    "booking_rescheduled": _booking_rescheduled,
+    "reschedule_proposed": _reschedule_proposed,
+    "reschedule_requested": _reschedule_requested,
+    "cancel_requested": _cancel_requested,
+    "no_show_reported": _no_show_reported,
 }
 
 

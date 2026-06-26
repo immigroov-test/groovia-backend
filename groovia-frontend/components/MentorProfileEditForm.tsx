@@ -87,7 +87,7 @@ export function MentorProfileEditForm({ mentor }: Props) {
     setSavingNonCritical(true);
     try {
       const token = await getToken();
-      if (!token) { setNonCriticalError('Session expired. Please sign in again.'); return; }
+      if (!token) { setNonCriticalError('Session expired. Please log in again.'); return; }
       const res = await fetch('/api/mentor/profile', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
@@ -123,7 +123,7 @@ export function MentorProfileEditForm({ mentor }: Props) {
     setSavingCritical(true);
     try {
       const token = await getToken();
-      if (!token) { setCriticalError('Session expired. Please sign in again.'); return; }
+      if (!token) { setCriticalError('Session expired. Please log in again.'); return; }
       const res = await fetch('/api/mentor/profile/critical', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },

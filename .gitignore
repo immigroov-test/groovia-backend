@@ -8,6 +8,9 @@
 Google Auth keys.txt
 Meeting_1_feedback.txt
 
+# Third-party reference code — never push
+immigroov-main/
+
 # Python
 __pycache__/
 *.py[cod]

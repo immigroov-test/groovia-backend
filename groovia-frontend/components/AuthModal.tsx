@@ -112,10 +112,19 @@ function AuthModalInner() {
     setLoading(false);
     if (signUpError) {
       if (/already (registered|in use)/i.test(signUpError.message)) {
-        setError('An account with this email already exists. Sign in instead?');
+        setError('An account with this email already exists. Login instead?');
         return;
       }
       setError(signUpError.message);
+      return;
+    }
+    // Anti-enumeration: when the email already belongs to a (confirmed) account,
+    // Supabase returns no error and a user object with an EMPTY identities array
+    // instead of a real "already registered" error. Detect that and steer to login,
+    // otherwise the user is wrongly shown the "verify your email" screen forever.
+    const identities = data.user?.identities;
+    if (data.user && Array.isArray(identities) && identities.length === 0) {
+      setError('An account with this email already exists. Login instead?');
       return;
     }
     if (data.session) {
@@ -216,7 +225,7 @@ function AuthModalInner() {
                 onClick={() => { setPendingVerification(false); switchMode('login'); }}
                 className="text-xs text-muted hover:text-foreground text-left"
               >
-                ← Back to sign in
+                ← Back to login
               </button>
             </div>
           ) : mode === 'forgot' ? (
@@ -233,7 +242,7 @@ function AuthModalInner() {
                     few minutes.
                   </p>
                   <Button variant="outline" onClick={() => switchMode('login')}>
-                    Back to sign in
+                    Back to login
                   </Button>
                 </div>
               ) : (
@@ -253,7 +262,7 @@ function AuthModalInner() {
                     onClick={() => switchMode('login')}
                     className="text-xs text-muted text-center hover:text-foreground"
                   >
-                    ← Back to sign in
+                    ← Back to login
                   </button>
                 </form>
               )}
@@ -269,7 +278,7 @@ function AuthModalInner() {
                     ? (isMentor
                         ? <span className="text-muted">Join Immigroov as a mentor.</span>
                         : <span className="font-semibold text-emerald-600">Free to start. No card required.</span>)
-                    : <span className="text-muted">Sign in to continue your journey.</span>}
+                    : <span className="text-muted">Login to continue your journey.</span>}
                 </p>
               </div>
 
@@ -307,13 +316,21 @@ function AuthModalInner() {
                           : 'bg-white text-brand-800 hover:bg-brand-50 hover:text-brand-900',
                       )}
                     >
-                      {m === 'signup' ? 'Sign up' : 'Sign in'}
+                      {m === 'signup' ? 'Sign up' : 'Login'}
                     </button>
                   ))}
                 </div>
               )}
 
               <GoogleButton label="Continue with Google" next={googleNext} />
+              {mode === 'signup' && (
+                <p className="mt-2 text-[11px] leading-snug text-muted text-center">
+                  By continuing with Google, you agree to our{' '}
+                  <Link href="/terms" className="underline hover:text-foreground">Terms</Link> and{' '}
+                  <Link href="/privacy" className="underline hover:text-foreground">Privacy Policy</Link>
+                  {isMentor ? ' and the Mentor Agreement' : ''}.
+                </p>
+              )}
 
               <div className="my-4 flex items-center gap-3 text-xs text-muted">
                 <div className="h-px flex-1 bg-[--color-border]" />
@@ -361,7 +378,7 @@ function AuthModalInner() {
                       {error}{' '}
                       {error.includes('already exists') && (
                         <button type="button" onClick={() => switchMode('login')}
-                          className="underline font-medium">Switch to sign in</button>
+                          className="underline font-medium">Switch to login</button>
                       )}
                     </p>
                   )}
@@ -376,7 +393,7 @@ function AuthModalInner() {
                   <Input label="Password" type="password" required value={password}
                     onChange={(e) => setPassword(e.target.value)} autoComplete="current-password" />
                   {error && <p className="text-xs text-red-600">{error}</p>}
-                  <Button type="submit" loading={loading}>Sign in</Button>
+                  <Button type="submit" loading={loading}>Login</Button>
                   <button
                     type="button"
                     onClick={() => switchMode('forgot')}

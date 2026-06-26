@@ -11,7 +11,7 @@ from content import (
 
 MENTOR_ANSWER = (
     "- **Maya Singh** — Software Engineer (NL Blue Card)\n"
-    "  [Book a 1-on-1 Session](https://cal.com/maya/30min)\n"
+    "  [Book a 1-on-1 Session](http://localhost:3000/mentors/maya-singh)\n"
     "To explore other mentors, please visit the [Mentor Directory](http://localhost:3000/mentors)."
 )
 

@@ -25,7 +25,7 @@ export function MentorAuthTrigger() {
         </p>
         <div className="mt-4 flex items-center gap-3">
           <Button variant="accent" onClick={openSignup}>Create mentor account</Button>
-          <Button variant="outline" onClick={openLogin}>Sign in</Button>
+          <Button variant="outline" onClick={openLogin}>Login</Button>
         </div>
       </CardBody>
     </Card>
