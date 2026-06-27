@@ -1,4 +1,4 @@
-// Supabase session refresh helper — runs on every request via middleware.ts.
+// Supabase session refresh helper — runs on every matched request via proxy.ts.
 import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
 
