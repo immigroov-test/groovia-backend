@@ -11,19 +11,13 @@ Meeting_1_feedback.txt
 # Third-party reference code — never push
 immigroov-main/
 
-# Python
+# Python (venv lives at groovia-backend/.venv — covered by .venv/)
 __pycache__/
 *.py[cod]
 .venv/
 venv/
 env/
-Lib/
-Scripts/
-Include/
-pyvenv.cfg
 *.egg-info/
-dist/
-build/
 
 # Node
 node_modules/
