@@ -3,16 +3,34 @@ import { createServerClient } from '@supabase/ssr';
 import { NextResponse, type NextRequest } from 'next/server';
 
 export async function updateSession(request: NextRequest) {
+  // The whole body is wrapped: a middleware throw becomes a site-wide 500
+  // (MIDDLEWARE_INVOCATION_FAILED) on EVERY matched route. We never want that —
+  // worst case we degrade to "guest" and let page-level guards handle auth.
+  try {
+    return await refreshSession(request);
+  } catch (err) {
+    console.error('[middleware] fatal error; passing request through as guest:', err);
+    return NextResponse.next({ request });
+  }
+}
+
+async function refreshSession(request: NextRequest) {
   let response = NextResponse.next({ request });
 
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
   const supabaseAnonKey = process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
 
-  // Without Supabase config we can't refresh a session. Degrade to guest instead of
-  // 500-ing every matched route (MIDDLEWARE_INVOCATION_FAILED). Logs surface the cause.
+  // One-line diagnostic (no secrets) — confirms whether the Edge bundle actually
+  // inlined the env vars at build time. Shows up in Vercel → Runtime Logs.
+  console.log(
+    `[middleware] env check: url=${supabaseUrl ? 'set' : 'MISSING'} ` +
+      `anonKey=${supabaseAnonKey ? `set(len ${supabaseAnonKey.length})` : 'MISSING'}`,
+  );
+
+  // Without Supabase config we can't refresh a session. Degrade to guest.
   if (!supabaseUrl || !supabaseAnonKey) {
     console.error(
-      '[middleware] Missing Supabase env vars — NEXT_PUBLIC_SUPABASE_URL/ANON_KEY not set at build time. Treating request as guest.',
+      '[middleware] Missing Supabase env vars — NEXT_PUBLIC_SUPABASE_URL/ANON_KEY not inlined at build time. Treating request as guest.',
     );
     return response;
   }
@@ -33,15 +51,7 @@ export async function updateSession(request: NextRequest) {
   });
 
   // IMPORTANT: call getUser() (not getSession) — it revalidates the token with Supabase Auth.
-  // A transient Auth/network failure must not take down every route, so treat it as guest.
-  let user: Awaited<ReturnType<typeof supabase.auth.getUser>>['data']['user'] = null;
-  try {
-    const { data } = await supabase.auth.getUser();
-    user = data.user;
-  } catch (err) {
-    console.error('[middleware] supabase.auth.getUser() failed; treating as guest:', err);
-    return response;
-  }
+  const { data: { user } } = await supabase.auth.getUser();
 
   const path = request.nextUrl.pathname;
 
