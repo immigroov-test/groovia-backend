@@ -1,37 +1,46 @@
 # Claude Code internal files
 .claude/
 
-# Secrets
-*.env
+# Secrets — never commit. Ignore all .env* except the placeholder template.
 .env*
 !.env.example
-Google Auth keys.txt
+*.key
+*Auth keys.txt
+*auth keys.txt
+secrets.json
 Meeting_1_feedback.txt
 
 # Third-party reference code — never push
 immigroov-main/
 
-# Frontend is now its own repo (immigroov-test/groovia-frontend) living here
-# temporarily as a separate git checkout — never track it from the backend repo.
+# Frontend is now its own repo (immigroov-test/groovia-frontend); never track it here.
 groovia-frontend/
 
-# Python (venv lives at groovia-backend/.venv — covered by .venv/)
+# Python
 __pycache__/
 *.py[cod]
+*.pyc
 .venv/
 venv/
 env/
 *.egg-info/
+.ipynb_checkpoints/
 
-# Node
+# Local data & generated artifacts
+data/
+etc/
+*visualization.png
+graph.png
+system_architecture.png
+_dev_emails.jsonl
+
+# Node (none here now; harmless)
 node_modules/
 .next/
 .turbo/
 
-# OS
+# OS / IDE
 .DS_Store
 Thumbs.db
-
-# IDE
 .vscode/
 .idea/
