@@ -62,7 +62,7 @@ services:
       - key: SUPABASE_JWT_SECRET
         sync: false
       - key: DATABASE_URL
-        sync: false           # Supabase Connection string > URI (Transaction pooler port 6543)
+        sync: false           # Supabase SESSION pooler URI, port 5432 (NOT 6543 — LangGraph uses prepared statements)
       - key: RESEND_API_KEY
         sync: false           # transactional email; optional
 
@@ -122,7 +122,7 @@ services:
       - key: SUPABASE_JWT_SECRET
         sync: false           # staging Supabase JWT secret (Settings → API → JWT Settings)
       - key: DATABASE_URL
-        sync: false           # staging Supabase connection string (Transaction pooler, port 6543)
+        sync: false           # staging Supabase SESSION pooler URI, port 5432 (NOT 6543 — LangGraph uses prepared statements)
       - key: RESEND_API_KEY
         sync: false           # optional — leave unset to skip real emails
       - key: MOCK_SERVICES

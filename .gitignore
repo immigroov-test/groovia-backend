@@ -11,6 +11,10 @@ Meeting_1_feedback.txt
 # Third-party reference code — never push
 immigroov-main/
 
+# Frontend is now its own repo (immigroov-test/groovia-frontend) living here
+# temporarily as a separate git checkout — never track it from the backend repo.
+groovia-frontend/
+
 # Python (venv lives at groovia-backend/.venv — covered by .venv/)
 __pycache__/
 *.py[cod]
