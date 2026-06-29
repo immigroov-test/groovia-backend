@@ -835,6 +835,10 @@ TO authenticated;
 -- ============================================================================
 -- mentor_sessions (from 015)
 -- ============================================================================
+-- DROP first: the lifecycle-v2 block further down redefines this with a different
+-- TABLE return type. CREATE OR REPLACE cannot change a return type, so re-running
+-- the setup on an existing DB needs an explicit drop here.
+DROP FUNCTION IF EXISTS mentor_sessions(UUID);
 CREATE OR REPLACE FUNCTION mentor_sessions(p_mentor_id UUID)
 RETURNS TABLE (
   id                  UUID,
