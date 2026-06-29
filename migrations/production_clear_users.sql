@@ -20,6 +20,13 @@
 -- then run step 2 (delete). Both use the exact same WHERE clause.
 -- =============================================================================
 
+-- 0) SET ADMIN — promote the admin account BEFORE the delete below, so it is
+--    classified as 'admin' and preserved (a fresh signup defaults to 'candidate',
+--    which would otherwise be deleted). The admin must have signed up at least once.
+--    Idempotent — safe to run every time.
+UPDATE profiles SET role = 'admin'
+WHERE email = 'yokeshmd99@gmail.com';
+
 -- 1) PREVIEW — who will be deleted. Run this on its own first.
 SELECT u.id, u.email, p.role, p.created_at
 FROM auth.users u
