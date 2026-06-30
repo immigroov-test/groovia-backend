@@ -82,7 +82,9 @@ def _base(content: str) -> str:
         '<table width="560" cellpadding="0" cellspacing="0" role="presentation"'
         ' style="background:#ffffff;border-radius:10px;padding:40px 48px;max-width:560px">'
         "<tr><td>"
-        '<p style="margin:0 0 28px;font-size:18px;font-weight:700;color:#0a0a0a;letter-spacing:-0.3px">Immigroov</p>'
+        # Immigroov logo (served from the frontend's public/ — absolute URL so email clients can load it).
+        f'<p style="margin:0 0 28px"><img src="{config.FRONTEND_URL.rstrip("/")}/Immigroov_Transparent_Logo.png"'
+        ' alt="Immigroov" height="28" style="height:28px;width:auto;display:block;border:0"></p>'
         + content
         + '<hr style="border:none;border-top:1px solid #e8e8e8;margin:32px 0">'
         '<p style="margin:0;font-size:12px;color:#999">'
@@ -392,7 +394,26 @@ def _no_show_reported(d: dict) -> tuple[str, str]:
     return "A session was marked as a no-show", _base(body)
 
 
+def _booking_admin_notice(d: dict) -> tuple[str, str]:
+    """Ops/admin copy for every booking, reschedule, and cancellation."""
+    event = d.get("event", "updated")
+    titles = {"booked": "New booking", "cancelled": "Booking cancelled", "rescheduled": "Booking rescheduled"}
+    title = titles.get(event, "Booking update")
+    mentor = d.get("mentor_name") or "—"
+    candidate = d.get("candidate_name") or "—"
+    candidate_email = d.get("candidate_email") or ""
+    body = (
+        f'<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">{_e(title)}</h1>'
+        '<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Admin notification — a booking event occurred.</p>'
+        + _info_row("Mentor", mentor)
+        + _info_row("Candidate", f"{candidate} ({candidate_email})" if candidate_email else candidate)
+        + _info_row("When", d.get("session_time", "—"))
+    )
+    return f"[Admin] {title}: {candidate} × {mentor}", _base(body)
+
+
 _TEMPLATES = {
+    "booking_admin_notice": _booking_admin_notice,
     "mentor_application_received": _mentor_application_received,
     "mentor_approved": _mentor_approved,
     "mentor_rejected": _mentor_rejected,

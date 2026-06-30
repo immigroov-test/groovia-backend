@@ -65,6 +65,8 @@ services:
         sync: false           # Supabase SESSION pooler URI, port 5432 (NOT 6543 — LangGraph uses prepared statements)
       - key: RESEND_API_KEY
         sync: false           # transactional email; optional
+      - key: ADMIN_EMAIL
+        sync: false           # ops inbox copied on booking/reschedule/cancel (e.g. yokeshmd99@gmail.com)
 
   # ── Staging (tracks `staging` branch) ────────────────────────────────────────
   # Point ALL Supabase secrets below at the SEPARATE staging Supabase project,
@@ -125,5 +127,7 @@ services:
         sync: false           # staging Supabase SESSION pooler URI, port 5432 (NOT 6543 — LangGraph uses prepared statements)
       - key: RESEND_API_KEY
         sync: false           # optional — leave unset to skip real emails
+      - key: ADMIN_EMAIL
+        sync: false           # ops inbox copied on booking/reschedule/cancel (e.g. yokeshmd99@gmail.com)
       - key: MOCK_SERVICES
         value: "false"        # set "true" to mock Resend/webhooks on staging instead

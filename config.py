@@ -45,6 +45,8 @@ EXA_HIGHLIGHT_MAX_CHARS  = 1000
 # Resend transactional email
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 EMAIL_FROM     = os.getenv("EMAIL_FROM", "Immigroov <noreply@immigroov.com>")
+# Ops inbox copied on every booking / reschedule / cancellation. Empty = no admin copy.
+ADMIN_EMAIL    = os.getenv("ADMIN_EMAIL", "")
 
 # Feature flags, default ON. Keep in sync with groovia-frontend/lib/features.ts.
 def _flag(name: str, default: bool = True) -> bool:
