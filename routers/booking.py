@@ -491,7 +491,10 @@ def _send_booking_confirmation(
     mailer failure never affects the booking response."""
     try:
         times = db.get_booking_times_display(booking_id)
-        mentor_name, mentor_email = db.get_mentor_email(mentor_id)
+        info = db.get_booking_notify_info(booking_id) or {}
+        mentor_name = info.get("mentor_name")
+        mentor_email = info.get("mentor_email")
+        service_title = info.get("service_title") or "1-on-1 session"
 
         # booking_times_display returns a per-party local timestamp + IANA tz name.
         def _fmt(local_key: str, tz_key: str) -> str:
@@ -507,6 +510,7 @@ def _send_booking_confirmation(
             {
                 "candidate_name": candidate_name or "there",
                 "mentor_name": mentor_name or "your mentor",
+                "service_title": service_title,
                 "session_time": _fmt("customer_local", "customer_tz"),
             },
         )
@@ -519,6 +523,7 @@ def _send_booking_confirmation(
                     "mentor_name": mentor_name or "there",
                     "candidate_name": candidate_name or "A candidate",
                     "candidate_email": candidate_email,
+                    "service_title": service_title,
                     "session_time": _fmt("mentor_local", "mentor_tz"),
                     "notes": notes or "",
                 },
@@ -534,6 +539,7 @@ def _send_booking_confirmation(
                     "candidate_name": candidate_name or "",
                     "candidate_email": candidate_email,
                     "session_time": _fmt("mentor_local", "mentor_tz"),
+                    "service_title": service_title,
                 },
             )
     except Exception:

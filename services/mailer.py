@@ -117,6 +117,23 @@ def _info_row(label: str, value: str) -> str:
     )
 
 
+def _details_card(rows: list[tuple[str, str]]) -> str:
+    """A single cal.com-style card with What / When / Who / Where label+value rows."""
+    inner = ""
+    for label, value in rows:
+        if not value:
+            continue
+        inner += (
+            f'<p style="margin:0 0 4px;font-size:12px;font-weight:600;color:#999;text-transform:uppercase;letter-spacing:.6px">{_e(label)}</p>'
+            f'<p style="margin:0 0 18px;font-size:15px;font-weight:600;color:#0a0a0a;line-height:1.4">{_e(value)}</p>'
+        )
+    return (
+        '<table cellpadding="0" cellspacing="0" role="presentation"'
+        ' style="background:#f8f8fc;border-radius:8px;padding:22px 24px 6px;margin:8px 0 20px;width:100%">'
+        "<tr><td>" + inner + "</td></tr></table>"
+    )
+
+
 # ── Templates ─────────────────────────────────────────────────────────────────
 
 def _mentor_approved(d: dict) -> tuple[str, str]:
@@ -173,18 +190,24 @@ def _mentor_suspended(d: dict) -> tuple[str, str]:
 def _booking_confirmed_candidate(d: dict) -> tuple[str, str]:
     candidate = _e(d.get("candidate_name", ""))
     mentor = d.get("mentor_name", "your mentor")
+    service = d.get("service_title", "1-on-1 session")
     url = d.get("meeting_url", "")
     body = (
         '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Your session is confirmed ✓</h1>'
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {candidate},</p>'
-        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Your session with <strong>{_e(mentor)}</strong> is confirmed.</p>'
-        + _info_row("Date & Time", d.get("session_time", ""))
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Your session with <strong>{_e(mentor)}</strong> is confirmed. Here are the details.</p>'
+        + _details_card([
+            ("What", service),
+            ("When", d.get("session_time", "")),
+            ("Who", f"{mentor} (mentor) and you"),
+            ("Where", "Video call — link shared before the session"),
+        ])
         + '<p style="margin:0;font-size:15px;color:#444;line-height:1.6">'
         "You'll receive a reminder 24 hours and 1 hour before the session."
         "</p>"
         + (_btn(url, "Join Video Call") if url else "")
         + '<p style="margin:20px 0 0;font-size:14px;color:#444;line-height:1.6">'
-        f'Need to change it? <a href="{config.FRONTEND_URL}/account" style="color:#6b7fff">Reschedule or cancel</a>'
+        f'Need to change it? <a href="{config.FRONTEND_URL}/account/sessions" style="color:#6b7fff">Reschedule or cancel</a>'
         " anytime from your account.</p>"
     )
     return f"Confirmed: your session with {mentor}", _base(body)
@@ -193,20 +216,27 @@ def _booking_confirmed_candidate(d: dict) -> tuple[str, str]:
 def _booking_confirmed_mentor(d: dict) -> tuple[str, str]:
     mentor = _e(d.get("mentor_name", ""))
     candidate = d.get("candidate_name", "a candidate")
-    candidate_email = _e(d.get("candidate_email", ""))
+    candidate_email = d.get("candidate_email", "")
+    service = d.get("service_title", "1-on-1 session")
     url = d.get("meeting_url", "")
     notes = d.get("notes", "")
     notes_html = (
         f'<p style="margin:16px 0 0;font-size:14px;color:#444;line-height:1.6">'
-        f"<strong>Notes from {_e(candidate)}:</strong><br>{_e(notes)}</p>"
+        f"<strong>What to prepare (from {_e(candidate)}):</strong><br>{_e(notes)}</p>"
     ) if notes else ""
+    who = f"{candidate}" + (f" ({candidate_email})" if candidate_email else "")
     body = (
         f'<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">New booking from {_e(candidate)}</h1>'
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {mentor},</p>'
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
-        f"<strong>{_e(candidate)}</strong> ({candidate_email}) has booked a session with you."
+        f"<strong>{_e(candidate)}</strong> has booked a session with you. Here are the details."
         "</p>"
-        + _info_row("Date & Time", d.get("session_time", ""))
+        + _details_card([
+            ("What", service),
+            ("When", d.get("session_time", "")),
+            ("Who", who),
+            ("Where", "Video call — link shared before the session"),
+        ])
         + notes_html
         + (_btn(url, "Join Video Call") if url else "")
     )
