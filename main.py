@@ -18,6 +18,7 @@ import config
 import db
 from core.rate_limit import limiter
 from routers import admin as admin_router
+from routers import auth as auth_router
 from routers import availability as availability_router
 from routers import booking as booking_router
 from routers import chat as chat_router
@@ -107,6 +108,7 @@ async def health_full():
 
 
 api.include_router(admin_router.router)
+api.include_router(auth_router.router)
 api.include_router(availability_router.router)
 api.include_router(booking_router.router)
 api.include_router(chat_router.router)

@@ -111,6 +111,45 @@ def get_mentor_by_profile_id(profile_id: str) -> Optional[dict[str, Any]]:
     return res.data[0] if res.data else None
 
 
+def link_mentor_by_email(profile_id: str, email: str) -> Optional[dict[str, Any]]:
+    """Link a pre-approved mentor (created by an admin, matched by email, not yet
+    attached to any account) to this user's profile, and grant the mentor role.
+    Idempotent: if the user is already a mentor, returns that row. Returns None when
+    there is nothing to link. Safe by design — email ownership is proven by the login."""
+    if not profile_id or not email:
+        return None
+    email = email.strip().lower()
+    try:
+        already = (
+            _supabase.table("mentors")
+            .select("id, slug, display_name, status, profile_id")
+            .eq("profile_id", profile_id)
+            .limit(1)
+            .execute()
+        )
+        if already.data:
+            return already.data[0]
+
+        candidates = (
+            _supabase.table("mentors")
+            .select("id, slug, display_name, status, profile_id")
+            .ilike("email", email)
+            .execute()
+        )
+        mentor = next((m for m in (candidates.data or []) if not m.get("profile_id")), None)
+        if not mentor:
+            return None
+
+        _supabase.table("mentors").update({"profile_id": profile_id}).eq("id", mentor["id"]).execute()
+        _supabase.table("profiles").update({"role": "mentor"}).eq("id", profile_id).execute()
+        mentor["profile_id"] = profile_id
+        logger.info("Linked pre-approved mentor %s to profile %s by email match", mentor["id"], profile_id)
+        return mentor
+    except Exception:
+        logger.exception("link_mentor_by_email failed (profile=%s)", profile_id)
+        return None
+
+
 def get_mentor_by_id(mentor_id: str) -> Optional[dict[str, Any]]:
     """Fetch a mentor row by primary key — used internally (never exposed to browser)."""
     if not mentor_id:
