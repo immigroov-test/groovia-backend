@@ -92,6 +92,7 @@ CREATE TABLE IF NOT EXISTS mentors (
   country                 TEXT,
   public_notes            TEXT,
   booking_url             TEXT,
+  email                   TEXT,  -- contact email for pre-approved / seed mentors with no linked account yet
   status                  mentor_status NOT NULL DEFAULT 'approved',
   is_active               BOOLEAN NOT NULL DEFAULT TRUE,
   availability_type       TEXT,
@@ -113,6 +114,8 @@ CREATE TABLE IF NOT EXISTS mentors (
 );
 
 CREATE INDEX IF NOT EXISTS idx_mentors_status_active ON mentors(status, is_active);
+-- Fast case-insensitive lookup for pre-approved mentor linking on login (link_mentor_by_email).
+CREATE INDEX IF NOT EXISTS idx_mentors_email_lower ON mentors(lower(email)) WHERE email IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_mentors_countries     ON mentors USING GIN (expertise_country_codes);
 CREATE INDEX IF NOT EXISTS idx_mentors_categories    ON mentors USING GIN (expertise_categories);
 
