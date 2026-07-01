@@ -56,6 +56,7 @@ class BookSessionBody(BaseModel):
     slot_time: datetime
     email: str
     name: Optional[str] = None
+    notes: Optional[str] = None
     timezone: str = "UTC"
     answers: list[BookingAnswerItem] = []
     specific_availability_id: Optional[str] = None
@@ -72,6 +73,11 @@ class BookSessionBody(BaseModel):
     @classmethod
     def strip_name(cls, v: Optional[str]) -> Optional[str]:
         return (v or "").strip() or None
+
+    @field_validator("notes")
+    @classmethod
+    def strip_notes(cls, v: Optional[str]) -> Optional[str]:
+        return (v or "").strip()[:500] or None
 
 
 @router.post("")
@@ -98,7 +104,7 @@ def book_session(
         if result and result[0]:
             booking_id = result[0]["booking_id"]
             background_tasks.add_task(
-                _send_booking_confirmation, booking_id, body.mentor_id, body.email, body.name
+                _send_booking_confirmation, booking_id, body.mentor_id, body.email, body.name, body.notes
             )
         return result[0] if result else {"booking_id": None, "status": "unknown"}
     except Exception as e:
@@ -478,7 +484,8 @@ def list_requests(booking_id: str, user: AuthUser = Depends(get_current_user)):
 # ── Background helpers ─────────────────────────────────────────────────────────
 
 def _send_booking_confirmation(
-    booking_id: str, mentor_id: str, candidate_email: str, candidate_name: Optional[str]
+    booking_id: str, mentor_id: str, candidate_email: str, candidate_name: Optional[str],
+    notes: Optional[str] = None,
 ):
     """Notify both parties that a session was booked. Runs in a BackgroundTask so a
     mailer failure never affects the booking response."""
@@ -513,6 +520,7 @@ def _send_booking_confirmation(
                     "candidate_name": candidate_name or "A candidate",
                     "candidate_email": candidate_email,
                     "session_time": _fmt("mentor_local", "mentor_tz"),
+                    "notes": notes or "",
                 },
             )
 

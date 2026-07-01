@@ -183,6 +183,9 @@ def _booking_confirmed_candidate(d: dict) -> tuple[str, str]:
         "You'll receive a reminder 24 hours and 1 hour before the session."
         "</p>"
         + (_btn(url, "Join Video Call") if url else "")
+        + '<p style="margin:20px 0 0;font-size:14px;color:#444;line-height:1.6">'
+        f'Need to change it? <a href="{config.FRONTEND_URL}/account" style="color:#6b7fff">Reschedule or cancel</a>'
+        " anytime from your account.</p>"
     )
     return f"Confirmed: your session with {mentor}", _base(body)
 
@@ -457,9 +460,16 @@ def send_transactional(
         logger.warning("RESEND_API_KEY not set — skipping %s to %s", template, to)
         return
 
+    # Testing without a verified domain: route everything to one inbox, tagged with the
+    # intended recipient so it's clear who each email was really for.
+    recipient = to
+    if config.EMAIL_TEST_REDIRECT:
+        subject = f"[to: {to}] {subject}"
+        recipient = config.EMAIL_TEST_REDIRECT
+
     payload: dict = {
         "from": config.EMAIL_FROM,
-        "to": [to],
+        "to": [recipient],
         "subject": subject,
         "html": html,
     }
@@ -475,7 +485,14 @@ def send_transactional(
             json=payload,
             timeout=15,
         )
+        if resp.status_code >= 400:
+            # Surface Resend's actual reason (unverified domain, sandbox recipient, etc.)
+            logger.error(
+                "Resend rejected %s to %s (from=%r): HTTP %s — %s",
+                template, recipient, config.EMAIL_FROM, resp.status_code, resp.text,
+            )
         resp.raise_for_status()
+        logger.info("Sent %s to %s", template, recipient)
     except Exception:
-        logger.exception("Resend API call failed (template=%s, to=%s)", template, to)
+        logger.exception("Resend API call failed (template=%s, to=%s)", template, recipient)
         raise

@@ -42,11 +42,19 @@ TAVILY_MAX_RESULTS       = 5
 EXA_NUM_RESULTS          = 3
 EXA_HIGHLIGHT_MAX_CHARS  = 1000
 
-# Resend transactional email
+# Resend transactional email.
+# NOTE: EMAIL_FROM must be a Resend-verified sender — either "onboarding@resend.dev"
+# (Resend's shared sandbox, which only delivers to the Resend account owner) or an
+# address at a domain you've verified in Resend (e.g. noreply@immigroov.com).
+# A personal gmail/outlook address will be REJECTED by Resend (every send fails).
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
-EMAIL_FROM     = os.getenv("EMAIL_FROM", "Immigroov <noreply@immigroov.com>")
+EMAIL_FROM     = os.getenv("EMAIL_FROM", "Immigroov <onboarding@resend.dev>")
 # Ops inbox copied on every booking / reschedule / cancellation. Empty = no admin copy.
 ADMIN_EMAIL    = os.getenv("ADMIN_EMAIL", "")
+# Testing without a verified domain: when set, ALL transactional emails are routed to
+# this one inbox (tagged with the intended recipient) instead of the real mentor/
+# mentee/admin. Set it to the Resend account owner's email so sandbox delivers. Empty = live.
+EMAIL_TEST_REDIRECT = os.getenv("EMAIL_TEST_REDIRECT", "").strip()
 
 # Feature flags, default ON. Keep in sync with groovia-frontend/lib/features.ts.
 def _flag(name: str, default: bool = True) -> bool:
