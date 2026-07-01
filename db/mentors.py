@@ -379,7 +379,7 @@ def get_mentor_email(mentor_id: str) -> tuple[Optional[str], Optional[str]]:
     Used by admin endpoints to address transactional emails after status changes."""
     res = (
         _supabase.table("mentors")
-        .select("display_name, profile_id")
+        .select("display_name, profile_id, email")
         .eq("id", mentor_id)
         .limit(1)
         .execute()
@@ -389,8 +389,9 @@ def get_mentor_email(mentor_id: str) -> tuple[Optional[str], Optional[str]]:
     row = res.data[0]
     display_name: Optional[str] = row.get("display_name")
     profile_id: Optional[str] = row.get("profile_id")
+    fallback_email: Optional[str] = row.get("email")  # seed/dummy mentors have no profile
     if not profile_id:
-        return display_name, None
+        return display_name, fallback_email
     res2 = (
         _supabase.table("profiles")
         .select("email")
@@ -399,7 +400,7 @@ def get_mentor_email(mentor_id: str) -> tuple[Optional[str], Optional[str]]:
         .execute()
     )
     email: Optional[str] = res2.data[0].get("email") if res2.data else None
-    return display_name, email
+    return display_name, email or fallback_email
 
 
 def get_booking_candidate_info(external_id: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
