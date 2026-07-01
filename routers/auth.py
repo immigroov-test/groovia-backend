@@ -1,9 +1,24 @@
 from fastapi import APIRouter, Depends
+from pydantic import BaseModel
 
 import db
 from core.auth import AuthUser, get_current_user
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+class CheckEmailBody(BaseModel):
+    email: str
+
+
+@router.post("/check-email")
+def check_email(body: CheckEmailBody):
+    """Pre-login check: does an account already exist for this email? Lets the popup
+    send existing users straight to the login link and only ask new users for a name.
+    Sends no email, so it never trips Supabase's OTP rate limit."""
+    email = (body.email or "").strip().lower()
+    exists = bool(email) and db.get_profile_id_by_email(email) is not None
+    return {"exists": exists}
 
 
 @router.post("/sync")
