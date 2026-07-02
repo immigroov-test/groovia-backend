@@ -200,12 +200,12 @@ def _booking_confirmed_candidate(d: dict) -> tuple[str, str]:
             ("What", service),
             ("When", d.get("session_time", "")),
             ("Who", f"{mentor} (mentor) and you"),
-            ("Where", "Video call — link shared before the session"),
+            ("Where", "Video call — use the Join meeting button below"),
         ])
         + '<p style="margin:0;font-size:15px;color:#444;line-height:1.6">'
         "You'll receive a reminder 24 hours and 1 hour before the session."
         "</p>"
-        + (_btn(url, "Join Video Call") if url else "")
+        + (_btn(url, "Join meeting") if url else "")
         + '<p style="margin:20px 0 0;font-size:14px;color:#444;line-height:1.6">'
         f'Need to change it? <a href="{config.FRONTEND_URL}/account/sessions" style="color:#6b7fff">Reschedule or cancel</a>'
         " anytime from your account.</p>"
@@ -235,10 +235,10 @@ def _booking_confirmed_mentor(d: dict) -> tuple[str, str]:
             ("What", service),
             ("When", d.get("session_time", "")),
             ("Who", who),
-            ("Where", "Video call — link shared before the session"),
+            ("Where", "Video call — use the Join meeting button below"),
         ])
         + notes_html
-        + (_btn(url, "Join Video Call") if url else "")
+        + (_btn(url, "Join meeting") if url else "")
     )
     return f"New booking: {candidate}", _base(body)
 
@@ -254,7 +254,7 @@ def _session_reminder_24h(d: dict) -> tuple[str, str]:
         f"Just a reminder that your session with <strong>{_e(other)}</strong> is tomorrow."
         "</p>"
         + _info_row("Date & Time", d.get("session_time", ""))
-        + (_btn(url, "Join Video Call") if url else "")
+        + (_btn(url, "Join meeting") if url else "")
     )
     return f"Reminder: your session with {other} is tomorrow", _base(body)
 
@@ -269,7 +269,7 @@ def _session_reminder_1h(d: dict) -> tuple[str, str]:
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
         f"Your session with <strong>{_e(other)}</strong> starts in 1 hour. Make sure you're ready!"
         "</p>"
-        + (_btn(url, "Join Video Call") if url else "")
+        + (_btn(url, "Join meeting") if url else "")
     )
     return f"Your session with {other} starts in 1 hour", _base(body)
 

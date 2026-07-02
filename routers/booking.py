@@ -495,6 +495,7 @@ def _send_booking_confirmation(
         mentor_name = info.get("mentor_name")
         mentor_email = info.get("mentor_email")
         service_title = info.get("service_title") or "1-on-1 session"
+        meeting_url = f"{config.FRONTEND_URL}/meeting/{booking_id}"
 
         # booking_times_display returns a per-party local timestamp + IANA tz name.
         def _fmt(local_key: str, tz_key: str) -> str:
@@ -512,6 +513,7 @@ def _send_booking_confirmation(
                 "mentor_name": mentor_name or "your mentor",
                 "service_title": service_title,
                 "session_time": _fmt("customer_local", "customer_tz"),
+                "meeting_url": meeting_url,
             },
         )
 
@@ -526,6 +528,7 @@ def _send_booking_confirmation(
                     "service_title": service_title,
                     "session_time": _fmt("mentor_local", "mentor_tz"),
                     "notes": notes or "",
+                    "meeting_url": meeting_url,
                 },
             )
 
