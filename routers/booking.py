@@ -43,6 +43,47 @@ def get_slots(
         raise HTTPException(status_code=500, detail="Failed to fetch slots")
 
 
+# ── Reschedule slot picker (booking owner) ─────────────────────────────────────
+
+@router.get("/{booking_id}/reschedule-slots")
+def reschedule_slots(
+    booking_id: str,
+    from_date: Optional[date] = None,
+    to_date: Optional[date] = None,
+    user: AuthUser = Depends(get_current_user),
+):
+    """Available slots for rescheduling a booking (its own mentor + service), plus the
+    current slot and deadline state. Owner-only."""
+    from datetime import date as _date, timedelta, timezone as _tz
+    target = db.get_booking_reschedule_target(booking_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    if target.get("candidate_id") != user.id:
+        raise HTTPException(status_code=403, detail="Only the booking owner can reschedule")
+
+    today = _date.today()
+    p_from = from_date or today
+    p_to = to_date or (today + timedelta(days=30))
+
+    slot_iso = target.get("slot_time")
+    deadline: Optional[str] = None
+    if slot_iso:
+        try:
+            st = datetime.fromisoformat(str(slot_iso).replace("Z", "+00:00"))
+            hours = (st - datetime.now(_tz.utc)).total_seconds() / 3600
+            deadline = "buffer" if hours < 2 else "late" if hours < 24 else "free"
+        except Exception:
+            deadline = None
+    try:
+        slots = db.get_available_slots(target["mentor_id"], target["service_id"], str(p_from), str(p_to))
+        return {"slots": slots, "current_slot": slot_iso, "deadline_state": deadline}
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception:
+        logger.exception("reschedule_slots failed booking=%s", booking_id)
+        raise HTTPException(status_code=500, detail="Failed to fetch slots")
+
+
 # ── Book a session ─────────────────────────────────────────────────────────────
 
 class BookingAnswerItem(BaseModel):

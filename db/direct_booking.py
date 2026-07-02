@@ -74,6 +74,22 @@ def get_booking_principals(booking_id: str) -> Optional[dict[str, Any]]:
         return None
 
 
+def get_booking_reschedule_target(booking_id: str) -> Optional[dict[str, Any]]:
+    """mentor_id + service_id + candidate_id + current slot_time for a booking — used
+    to load the reschedule slot picker for its owner."""
+    try:
+        res = (
+            _supabase.table("bookings")
+            .select("candidate_id, mentor_id, service_id, slot_time")
+            .eq("id", booking_id)
+            .single()
+            .execute()
+        )
+        return res.data or None
+    except Exception:
+        return None
+
+
 def get_booking_notify_info(booking_id: str) -> Optional[dict[str, Any]]:
     """Everything needed to email both parties about a booking lifecycle event:
     mentor name/email, candidate name/email, service title, and the slot time."""
