@@ -375,7 +375,14 @@ def get_profile_id_by_email(email: str) -> Optional[str]:
     if not email:
         return None
     try:
-        res = _supabase.table("profiles").select("id").eq("email", email.lower()).limit(1).execute()
+        res = (
+            _supabase.table("profiles")
+            .select("id")
+            .eq("email", email.lower())
+            .is_("deleted_at", "null")  # a soft-deleted account must not count as existing
+            .limit(1)
+            .execute()
+        )
         return res.data[0]["id"] if res.data else None
     except Exception:
         logger.exception("Profile lookup by email failed")
