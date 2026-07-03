@@ -400,6 +400,24 @@ def set_profile_role_guest(profile_id: str) -> None:
         logger.exception("set_profile_role_guest failed for %s", profile_id)
 
 
+def get_email_account_status(email: str) -> dict:
+    """Return {exists, has_password} for an email by inspecting auth.users. Lets the
+    popup route unconfirmed / passwordless accounts (signInWithOtp creates the row with
+    no password) to verify+setup instead of the password login screen."""
+    email = (email or "").strip().lower()
+    if not email:
+        return {"exists": False, "has_password": False}
+    try:
+        res = _supabase.rpc("email_account_status", {"p_email": email}).execute()
+        if not res.data:
+            return {"exists": False, "has_password": False}
+        return {"exists": True, "has_password": bool(res.data[0].get("has_password"))}
+    except Exception:
+        logger.exception("email_account_status RPC failed; falling back to profiles")
+        pid = get_profile_id_by_email(email)
+        return {"exists": pid is not None, "has_password": pid is not None}
+
+
 def get_profile_role(profile_id: str) -> Optional[str]:
     """Return the app-level role for a profile (candidate|mentor|admin), or None if not found."""
     if not profile_id:

@@ -13,12 +13,11 @@ class CheckEmailBody(BaseModel):
 
 @router.post("/check-email")
 def check_email(body: CheckEmailBody):
-    """Pre-login check: does an account already exist for this email? Lets the popup
-    send existing users straight to the login link and only ask new users for a name.
+    """Pre-login check → {exists, has_password}. Only accounts that actually have a
+    password go to the login screen; unconfirmed / passwordless ones (signInWithOtp
+    creates the row before the user finishes) are routed back to verify + set-password.
     Sends no email, so it never trips Supabase's OTP rate limit."""
-    email = (body.email or "").strip().lower()
-    exists = bool(email) and db.get_profile_id_by_email(email) is not None
-    return {"exists": exists}
+    return db.get_email_account_status(body.email)
 
 
 @router.post("/set-guest")

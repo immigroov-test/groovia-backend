@@ -486,6 +486,19 @@ CREATE TRIGGER trg_on_auth_user_created
   AFTER INSERT ON auth.users
   FOR EACH ROW EXECUTE FUNCTION handle_new_user();
 
+-- Does this email already have a PASSWORD? signInWithOtp creates an auth.users row
+-- immediately (unconfirmed, no password), so "row exists" ≠ "can log in with a password".
+-- Returns one row (has_password) if the email exists, zero rows if not.
+CREATE OR REPLACE FUNCTION email_account_status(p_email text)
+RETURNS TABLE (has_password boolean)
+LANGUAGE sql SECURITY DEFINER SET search_path = public, auth AS $$
+  SELECT (u.encrypted_password IS NOT NULL AND length(u.encrypted_password) > 0)
+  FROM auth.users u
+  WHERE lower(u.email) = lower(p_email)
+  LIMIT 1;
+$$;
+GRANT EXECUTE ON FUNCTION email_account_status(text) TO service_role;
+
 -- sync_mentor_is_active (from 013)
 CREATE OR REPLACE FUNCTION sync_mentor_is_active()
 RETURNS TRIGGER AS $$
