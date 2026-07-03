@@ -13,7 +13,7 @@ CREATE EXTENSION IF NOT EXISTS btree_gist;
 -- Enum types
 -- ============================================================================
 DO $$ BEGIN
-  CREATE TYPE user_role AS ENUM ('candidate', 'mentor', 'admin');
+  CREATE TYPE user_role AS ENUM ('candidate', 'mentor', 'admin', 'guest');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 DO $$ BEGIN

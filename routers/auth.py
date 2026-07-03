@@ -21,6 +21,14 @@ def check_email(body: CheckEmailBody):
     return {"exists": exists}
 
 
+@router.post("/set-guest")
+def set_guest(user: AuthUser = Depends(get_current_user)):
+    """Mark the (just email-verified, passwordless) account as a guest. Guests book
+    once and cannot log in or manage sessions afterwards."""
+    db.set_profile_role_guest(user.id)
+    return {"role": "guest"}
+
+
 @router.post("/sync")
 def sync_account(user: AuthUser = Depends(get_current_user)):
     """Run once right after login. If this email was pre-approved as a mentor by an

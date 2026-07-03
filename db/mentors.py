@@ -389,6 +389,17 @@ def get_profile_id_by_email(email: str) -> Optional[str]:
         return None
 
 
+def set_profile_role_guest(profile_id: str) -> None:
+    """Mark a just-verified passwordless account as a guest — only if still a plain
+    candidate (never downgrade a mentor/admin)."""
+    if not profile_id:
+        return
+    try:
+        _supabase.table("profiles").update({"role": "guest"}).eq("id", profile_id).eq("role", "candidate").execute()
+    except Exception:
+        logger.exception("set_profile_role_guest failed for %s", profile_id)
+
+
 def get_profile_role(profile_id: str) -> Optional[str]:
     """Return the app-level role for a profile (candidate|mentor|admin), or None if not found."""
     if not profile_id:
