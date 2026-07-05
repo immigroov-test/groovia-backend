@@ -15,6 +15,8 @@ CREATE EXTENSION IF NOT EXISTS btree_gist;
 DO $$ BEGIN
   CREATE TYPE user_role AS ENUM ('candidate', 'mentor', 'admin', 'guest');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+-- Ensure 'guest' exists even when the type predates it (idempotent; makes re-runs safe).
+ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'guest';
 
 DO $$ BEGIN
   CREATE TYPE mentor_status AS ENUM ('pending_review', 'approved', 'rejected', 'suspended');

@@ -15,6 +15,8 @@ CREATE EXTENSION IF NOT EXISTS btree_gist;
 DO $$ BEGIN
   CREATE TYPE user_role AS ENUM ('candidate', 'mentor', 'admin', 'guest');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+-- Ensure 'guest' exists even when the type predates it (idempotent; makes re-runs safe).
+ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'guest';
 
 DO $$ BEGIN
   CREATE TYPE mentor_status AS ENUM ('pending_review', 'approved', 'rejected', 'suspended');
@@ -1502,6 +1504,10 @@ INSERT INTO mentors (
   )
 ON CONFLICT (slug) DO NOTHING;
 
+-- Give seed mentors a contact email so booking-confirmation emails to mentors work in
+-- testing (all point at one inbox you control). Idempotent — only fills blanks.
+UPDATE mentors SET email = 'yokeshd1999@gmail.com' WHERE profile_id IS NULL AND email IS NULL;
+
 -- ============================================================================
 -- Seed bookable services + weekly availability for the seed mentors (testing only)
 -- The mentor profile page only renders a "Book" widget when a mentor has at least
@@ -1535,7 +1541,7 @@ BEGIN
                             set_price, set_currency, is_active)
       VALUES (m.id, '1-on-1 Mentoring Session',
               'A 30-minute video call to talk through your visa and career questions.',
-              'video', 30, 'job_career', 0, 'USD', TRUE);
+              'video', 30, 'job_career', 50, 'EUR', TRUE);
     END IF;
 
     IF NOT EXISTS (SELECT 1 FROM weekly_availability WHERE mentor_id = m.id) THEN
@@ -1544,6 +1550,10 @@ BEGIN
     END IF;
   END LOOP;
 END $$;
+
+-- Correct any seed services still priced at 0 (idempotent; leaves real prices alone).
+UPDATE services SET set_price = 50, set_currency = 'EUR'
+  WHERE set_price = 0 AND mentor_id IN (SELECT id FROM mentors WHERE profile_id IS NULL);
 
 
 -- ###########################################################################
