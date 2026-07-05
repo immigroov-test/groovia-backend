@@ -258,6 +258,11 @@ CREATE INDEX IF NOT EXISTS idx_bookings_thread
 CREATE INDEX IF NOT EXISTS idx_bookings_external_id
   ON bookings(external_id) WHERE external_id IS NOT NULL;
 
+-- Idempotency: dedupes a retried booking request (dropped network response, double-click).
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS idempotency_key text;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_bookings_idempotency
+  ON bookings(idempotency_key) WHERE idempotency_key IS NOT NULL;
+
 -- ============================================================================
 -- mentor_availability (legacy manual fallback system — superseded by weekly_availability)
 -- ============================================================================

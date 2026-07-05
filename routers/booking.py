@@ -101,6 +101,7 @@ class BookSessionBody(BaseModel):
     timezone: str = "UTC"
     answers: list[BookingAnswerItem] = []
     specific_availability_id: Optional[str] = None
+    idempotency_key: Optional[str] = None
 
     @field_validator("email")
     @classmethod
@@ -128,6 +129,13 @@ def book_session(
     user: Optional[AuthUser] = Depends(get_current_user_optional),
 ):
     """Book a direct session slot. Works for both authenticated users and guests."""
+    # Idempotency: a retried/duplicated request (e.g. after a dropped network response)
+    # returns the original booking instead of creating a second one.
+    if body.idempotency_key:
+        existing = db.get_booking_by_idempotency_key(body.idempotency_key)
+        if existing:
+            return {"booking_id": existing["id"], "status": existing.get("status", "confirmed")}
+
     answers_json = [a.model_dump() for a in body.answers]
     candidate_id = user.id if user else None
     try:
@@ -144,6 +152,8 @@ def book_session(
         )
         if result and result[0]:
             booking_id = result[0]["booking_id"]
+            if body.idempotency_key:
+                db.set_booking_idempotency_key(booking_id, body.idempotency_key)
             background_tasks.add_task(
                 _send_booking_confirmation, booking_id, body.mentor_id, body.email, body.name, body.notes
             )

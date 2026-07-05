@@ -59,6 +59,35 @@ def book_session(
     return res.data or []
 
 
+def get_booking_by_idempotency_key(key: str) -> Optional[dict[str, Any]]:
+    """Return an existing booking created with this idempotency key, if any — so a
+    retried/duplicated request returns the same booking instead of creating another."""
+    if not key:
+        return None
+    try:
+        res = (
+            _supabase.table("bookings")
+            .select("id, status")
+            .eq("idempotency_key", key)
+            .limit(1)
+            .execute()
+        )
+        return res.data[0] if res.data else None
+    except Exception:
+        logger.exception("idempotency lookup failed")
+        return None
+
+
+def set_booking_idempotency_key(booking_id: str, key: str) -> None:
+    """Stamp a freshly-created booking with its idempotency key (best-effort)."""
+    if not booking_id or not key:
+        return
+    try:
+        _supabase.table("bookings").update({"idempotency_key": key}).eq("id", booking_id).execute()
+    except Exception:
+        logger.exception("idempotency stamp failed for booking %s", booking_id)
+
+
 def get_booking_principals(booking_id: str) -> Optional[dict[str, Any]]:
     """Return the candidate_id and mentor_id for a booking (for auth checks)."""
     try:
