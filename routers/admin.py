@@ -54,6 +54,7 @@ def approve_mentor(mentor_id: str, background_tasks: BackgroundTasks, user: Auth
     try:
         display_name, mentor_email = db.get_mentor_email(mentor_id)
         result = db.set_mentor_status(mentor_id, "approved")
+        db.approve_pending_services(mentor_id)   # services set up during review go live too
     except ValueError:
         raise HTTPException(status_code=404, detail="Mentor not found")
     if mentor_email:
@@ -143,3 +144,26 @@ def reset_strikes(mentor_id: str, user: AuthUser = Depends(require_admin)):
         return db.reset_mentor_strikes(mentor_id)
     except ValueError:
         raise HTTPException(status_code=404, detail="Mentor not found")
+
+
+# ── Service approval (services added by an already-approved mentor) ──────────
+
+@router.get("/services/pending")
+def pending_services(user: AuthUser = Depends(require_admin)):
+    return db.list_pending_services()
+
+
+@router.post("/services/{service_id}/approve")
+def approve_service(service_id: str, user: AuthUser = Depends(require_admin)):
+    try:
+        return db.set_service_status(service_id, "approved")
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Service not found")
+
+
+@router.post("/services/{service_id}/reject")
+def reject_service(service_id: str, user: AuthUser = Depends(require_admin)):
+    try:
+        return db.set_service_status(service_id, "rejected")
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Service not found")

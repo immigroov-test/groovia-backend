@@ -327,15 +327,66 @@ def mentor_confirm_attendance(booking_id: str) -> None:
 
 def list_services(mentor_id: str, active_only: bool = False) -> list[dict]:
     if active_only:
+        # Public/bookable: active AND admin-approved only.
         res = (_supabase.table("services")
-               .select("id, title, description, type, duration, category, set_price, set_currency, platform_fee, is_active, is_ppp")
+               .select("id, title, description, type, duration, category, set_price, set_currency, platform_fee, is_active, is_ppp, status")
                .eq("mentor_id", mentor_id)
                .eq("is_active", True)
+               .eq("status", "approved")
                .order("created_at")
                .execute())
     else:
         res = _supabase.rpc("service_list", {"p_mentor_id": mentor_id}).execute()
     return res.data or []
+
+
+def approve_pending_services(mentor_id: str) -> int:
+    """Approve all of a mentor's pending services (called when the mentor is approved —
+    the services they set up during review go live with them)."""
+    try:
+        res = (_supabase.table("services")
+               .update({"status": "approved"})
+               .eq("mentor_id", mentor_id)
+               .eq("status", "pending")
+               .execute())
+        return len(res.data or [])
+    except Exception:
+        logger.exception("approve_pending_services failed for mentor %s", mentor_id)
+        return 0
+
+
+def list_pending_services() -> list[dict]:
+    """All services awaiting admin approval, with mentor name — the admin service queue."""
+    try:
+        res = (_supabase.table("services")
+               .select("id, title, description, type, duration, set_price, set_currency, created_at, mentor_id")
+               .eq("status", "pending")
+               .order("created_at", desc=True)
+               .execute())
+        rows = res.data or []
+        ids = list({r["mentor_id"] for r in rows if r.get("mentor_id")})
+        names: dict = {}
+        if ids:
+            m = _supabase.table("mentors").select("id, display_name, status").in_("id", ids).execute()
+            names = {x["id"]: x for x in (m.data or [])}
+        for r in rows:
+            info = names.get(r.get("mentor_id")) or {}
+            r["mentor_name"] = info.get("display_name")
+            r["mentor_status"] = info.get("status")
+        # Only surface services whose mentor is already approved (pre-approval services
+        # ride along with the mentor's own approval, so they don't need a separate review).
+        return [r for r in rows if r.get("mentor_status") == "approved"]
+    except Exception:
+        logger.exception("list_pending_services failed")
+        return []
+
+
+def set_service_status(service_id: str, status: str) -> dict:
+    """Admin approve/reject a single service."""
+    res = _supabase.table("services").update({"status": status}).eq("id", service_id).execute()
+    if not res.data:
+        raise ValueError("Service not found")
+    return res.data[0]
 
 
 def create_service(

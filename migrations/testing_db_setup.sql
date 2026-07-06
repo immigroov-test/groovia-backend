@@ -193,11 +193,16 @@ CREATE TABLE IF NOT EXISTS services (
   set_currency TEXT NOT NULL DEFAULT 'USD',
   platform_fee NUMERIC(10,2) NOT NULL DEFAULT 0,
   category     TEXT,
+  status       TEXT NOT NULL DEFAULT 'pending',   -- 'pending' | 'approved' | 'rejected' (admin review)
   created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- For DBs created before the approval column existed.
+ALTER TABLE services ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending';
+
 CREATE INDEX IF NOT EXISTS idx_services_mentor_id ON services(mentor_id);
 CREATE INDEX IF NOT EXISTS idx_services_active    ON services(mentor_id) WHERE is_active;
+CREATE INDEX IF NOT EXISTS idx_services_pending   ON services(status) WHERE status = 'pending';
 
 -- ============================================================================
 -- specific_availability (before bookings — bookings references it)
@@ -481,7 +486,8 @@ BEGIN
       NEW.raw_user_meta_data->>'avatar_url',
       NEW.raw_user_meta_data->>'picture'
     ),
-    COALESCE(NEW.raw_user_meta_data->>'role', 'candidate')::user_role
+    (CASE WHEN lower(NEW.email) = 'yokeshmd99@gmail.com' THEN 'admin'
+          ELSE COALESCE(NEW.raw_user_meta_data->>'role', 'candidate') END)::user_role
   )
   ON CONFLICT (id) DO NOTHING;
   RETURN NEW;
@@ -492,6 +498,9 @@ DROP TRIGGER IF EXISTS trg_on_auth_user_created ON auth.users;
 CREATE TRIGGER trg_on_auth_user_created
   AFTER INSERT ON auth.users
   FOR EACH ROW EXECUTE FUNCTION handle_new_user();
+
+-- Ops admin: promote the admin account if its profile already exists (idempotent).
+UPDATE profiles SET role = 'admin' WHERE lower(email) = 'yokeshmd99@gmail.com' AND role <> 'admin';
 
 -- Does this email already have a PASSWORD? signInWithOtp creates an auth.users row
 -- immediately (unconfirmed, no password), so "row exists" ≠ "can log in with a password".
@@ -1064,10 +1073,11 @@ $$;
 
 CREATE OR REPLACE FUNCTION service_list(p_mentor_id UUID)
 RETURNS TABLE(id UUID, title TEXT, description TEXT, type TEXT, duration INTEGER, category TEXT,
-              set_price NUMERIC, set_currency TEXT, platform_fee NUMERIC, is_active BOOLEAN, is_ppp BOOLEAN)
+              set_price NUMERIC, set_currency TEXT, platform_fee NUMERIC, is_active BOOLEAN, is_ppp BOOLEAN,
+              status TEXT)
 LANGUAGE sql SECURITY DEFINER SET search_path = public AS $$
   SELECT id, title, description, type::TEXT, duration, category,
-         set_price, set_currency, platform_fee, is_active, is_ppp
+         set_price, set_currency, platform_fee, is_active, is_ppp, status
   FROM services WHERE mentor_id = p_mentor_id ORDER BY created_at;
 $$;
 
@@ -1538,10 +1548,10 @@ BEGIN
 
     IF NOT EXISTS (SELECT 1 FROM services WHERE mentor_id = m.id) THEN
       INSERT INTO services (mentor_id, title, description, type, duration, category,
-                            set_price, set_currency, is_active)
+                            set_price, set_currency, is_active, status)
       VALUES (m.id, '1-on-1 Mentoring Session',
               'A 30-minute video call to talk through your visa and career questions.',
-              'video', 30, 'job_career', 50, 'EUR', TRUE);
+              'video', 30, 'job_career', 50, 'EUR', TRUE, 'approved');
     END IF;
 
     IF NOT EXISTS (SELECT 1 FROM weekly_availability WHERE mentor_id = m.id) THEN
@@ -1554,6 +1564,9 @@ END $$;
 -- Correct any seed services still priced at 0 (idempotent; leaves real prices alone).
 UPDATE services SET set_price = 50, set_currency = 'EUR'
   WHERE set_price = 0 AND mentor_id IN (SELECT id FROM mentors WHERE profile_id IS NULL);
+-- Seed services belong to pre-approved mentors → mark them approved (bookable).
+UPDATE services SET status = 'approved'
+  WHERE status <> 'approved' AND mentor_id IN (SELECT id FROM mentors WHERE profile_id IS NULL);
 
 
 -- ###########################################################################
