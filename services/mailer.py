@@ -156,6 +156,8 @@ def _mentor_approved(d: dict) -> tuple[str, str]:
 
 def _mentor_rejected(d: dict) -> tuple[str, str]:
     name = _e(d.get("display_name", ""))
+    reason = (d.get("reason") or "").strip()
+    reason_html = _info_row("Reviewer note", reason) if reason else ""
     body = (
         '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Your Immigroov mentor application</h1>'
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {name},</p>'
@@ -163,9 +165,10 @@ def _mentor_rejected(d: dict) -> tuple[str, str]:
         "Thank you for your interest in becoming a mentor on Immigroov. After reviewing your application, "
         "we're unable to approve it at this time."
         "</p>"
-        '<p style="margin:0;font-size:15px;color:#444;line-height:1.6">'
-        "If you have additional credentials or context to share, you're welcome to re-apply through the "
-        "mentor signup page. We appreciate your understanding."
+        + reason_html
+        + '<p style="margin:0;font-size:15px;color:#444;line-height:1.6">'
+        "If you have additional credentials or context to share, you're welcome to update your profile and "
+        "re-apply. We appreciate your understanding."
         "</p>"
     )
     return "Your Immigroov mentor application", _base(body)

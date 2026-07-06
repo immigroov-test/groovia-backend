@@ -103,7 +103,7 @@ def get_mentor_by_profile_id(profile_id: str) -> Optional[dict[str, Any]]:
         return None
     res = (
         _supabase.table("mentors")
-        .select("id, slug, display_name, status, session_duration_minutes")
+        .select("id, slug, display_name, status, session_duration_minutes, rejection_reason")
         .eq("profile_id", profile_id)
         .limit(1)
         .execute()
@@ -271,6 +271,7 @@ def update_mentor_critical_fields(mentor_id: str, fields: dict[str, Any]) -> dic
     if not safe:
         raise ValueError("No valid critical fields to update")
     safe["status"] = "pending_review"
+    safe["rejection_reason"] = None   # a fresh re-application clears the old reviewer note
     safe["updated_at"] = datetime.now(timezone.utc).isoformat()
     current = (
         _supabase.table("mentors").select("submission_count").eq("id", mentor_id).limit(1).execute()
@@ -353,16 +354,18 @@ def list_mentors_by_status(status: str, limit: int = 100) -> list[dict[str, Any]
     return rows
 
 
-def set_mentor_status(mentor_id: str, status: str) -> dict[str, Any]:
-    """Update a mentor's status and return the updated row.
-    is_active is also synced here (mirrors the DB trigger in 013_schema_audit.sql)."""
+def set_mentor_status(mentor_id: str, status: str, reason: Optional[str] = None) -> dict[str, Any]:
+    """Update a mentor's status and return the updated row. is_active is synced here.
+    On reject, stores `reason` (shown to the mentor); clears it on any other status."""
+    payload: dict[str, Any] = {
+        "status": status,
+        "is_active": (status == "approved"),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    payload["rejection_reason"] = (reason or "").strip() or None if status == "rejected" else None
     res = (
         _supabase.table("mentors")
-        .update({
-            "status": status,
-            "is_active": (status == "approved"),
-            "updated_at": datetime.now(timezone.utc).isoformat(),
-        })
+        .update(payload)
         .eq("id", mentor_id)
         .execute()
     )
@@ -548,6 +551,94 @@ def get_admin_stats() -> dict[str, int]:
     except Exception:
         logger.exception("Failed to fetch admin stats")
         return {"pending_mentor_count": 0, "approved_mentor_count": 0, "total_bookings": 0}
+
+
+# ── Admin: booking oversight + no-show ops ──────────────────────────────────
+
+def list_all_bookings(
+    status: Optional[str] = None,
+    mentor_id: Optional[str] = None,
+    q: Optional[str] = None,
+    limit: int = 200,
+) -> list[dict[str, Any]]:
+    """All bookings for the admin oversight table (newest first) with the mentor name
+    attached. Optional filters: status, mentor, and a search over candidate email/name."""
+    try:
+        query = (
+            _supabase.table("bookings")
+            .select("id, status, slot_time, candidate_name, candidate_email, "
+                    "reschedule_count, no_show_by, created_at, mentor_id")
+            .order("created_at", desc=True)
+            .limit(limit)
+        )
+        if status:
+            query = query.eq("status", status)
+        if mentor_id:
+            query = query.eq("mentor_id", mentor_id)
+        if q:
+            safe = re.sub(r"[(),%*]", "", q).strip()
+            if safe:
+                query = query.or_(f"candidate_email.ilike.*{safe}*,candidate_name.ilike.*{safe}*")
+        rows = query.execute().data or []
+        ids = list({r["mentor_id"] for r in rows if r.get("mentor_id")})
+        names: dict[str, Any] = {}
+        if ids:
+            mres = _supabase.table("mentors").select("id, display_name").in_("id", ids).execute()
+            names = {m["id"]: m.get("display_name") for m in (mres.data or [])}
+        for r in rows:
+            r["mentor_name"] = names.get(r.get("mentor_id"))
+        return rows
+    except Exception:
+        logger.exception("list_all_bookings failed")
+        return []
+
+
+def get_booking_admin_detail(booking_id: str) -> Optional[dict[str, Any]]:
+    """One booking + mentor name + its request/offer history for the admin detail view."""
+    try:
+        bres = _supabase.table("bookings").select("*").eq("id", booking_id).limit(1).execute()
+        if not bres.data:
+            return None
+        b = bres.data[0]
+        if b.get("mentor_id"):
+            m = _supabase.table("mentors").select("display_name, email").eq("id", b["mentor_id"]).limit(1).execute()
+            if m.data:
+                b["mentor_name"] = m.data[0].get("display_name")
+                b["mentor_email"] = m.data[0].get("email")
+        for tbl, key in (("booking_requests", "requests"), ("reschedule_offers", "offers")):
+            try:
+                r = _supabase.table(tbl).select("*").eq("booking_id", booking_id).order("created_at").execute()
+                b[key] = r.data or []
+            except Exception:
+                b[key] = []
+        return b
+    except Exception:
+        logger.exception("get_booking_admin_detail failed")
+        return None
+
+
+def list_mentors_with_strikes() -> list[dict[str, Any]]:
+    """Mentors who have accrued no-show strikes — the admin ops queue."""
+    try:
+        res = (
+            _supabase.table("mentors")
+            .select("id, display_name, slug, status, no_show_strikes, last_no_show_at")
+            .gt("no_show_strikes", 0)
+            .order("no_show_strikes", desc=True)
+            .execute()
+        )
+        return res.data or []
+    except Exception:
+        logger.exception("list_mentors_with_strikes failed")
+        return []
+
+
+def reset_mentor_strikes(mentor_id: str) -> dict[str, Any]:
+    """Admin clears a mentor's no-show strikes (a dispute resolved in the mentor's favour)."""
+    res = _supabase.table("mentors").update({"no_show_strikes": 0}).eq("id", mentor_id).execute()
+    if not res.data:
+        raise ValueError("Mentor not found")
+    return {"id": mentor_id, "no_show_strikes": 0}
 
 
 def upsert_ai_event(
