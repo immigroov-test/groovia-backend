@@ -1,4 +1,3 @@
-import base64
 import logging
 from typing import Any, Optional
 from urllib.parse import urlparse
@@ -166,35 +165,6 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
             },
         )
     return result
-
-
-# ── Profile photo upload ────────────────────────────────────────────────────────
-
-class PhotoBody(BaseModel):
-    image: str   # data URL ("data:image/jpeg;base64,...") or raw base64
-
-
-@router.post("/photo")
-def upload_photo(body: PhotoBody, user: AuthUser = Depends(get_current_user)):
-    """Store an already-cropped avatar (sent as base64) via the service-role client,
-    so it works without any storage RLS setup. Returns the public URL."""
-    raw = body.image.strip()
-    if raw.startswith("data:") and "," in raw:
-        raw = raw.split(",", 1)[1]
-    try:
-        data = base64.b64decode(raw)
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid image data")
-    if not data:
-        raise HTTPException(status_code=400, detail="Empty image")
-    if len(data) > 6 * 1024 * 1024:
-        raise HTTPException(status_code=400, detail="Image too large (max 5 MB)")
-    try:
-        url = db.upload_mentor_photo(user.id, data)
-    except Exception:
-        logger.exception("Photo upload failed for user %s", user.id)
-        raise HTTPException(status_code=502, detail="Could not store the photo. Please try again.")
-    return {"url": url}
 
 
 # ── Profile editing ────────────────────────────────────────────────────────────

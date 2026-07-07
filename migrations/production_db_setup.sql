@@ -1934,10 +1934,10 @@ GRANT EXECUTE ON FUNCTION mentor_sessions(UUID) TO authenticated;
 
 
 -- ============================================================================
--- STORAGE — mentor profile photos
--- The bucket must exist before the frontend can upload (missing bucket → the
--- "Bucket not found" error). Public read so photos render on public profiles;
--- writes are scoped by RLS to each user's own folder ({auth.uid}/...).
+-- STORAGE: mentor profile photos
+-- The bucket must exist before the frontend can upload (a missing bucket gives
+-- the "Bucket not found" error). Public read so photos render on public
+-- profiles; writes are scoped by RLS to each user's own folder ({auth.uid}/...).
 -- ============================================================================
 INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
 VALUES ('mentor-photos', 'mentor-photos', true, 5242880,
