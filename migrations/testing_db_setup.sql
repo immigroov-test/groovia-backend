@@ -1897,6 +1897,112 @@ $$;
 GRANT EXECUTE ON FUNCTION booking_deadline_state(TIMESTAMPTZ) TO anon, authenticated;
 GRANT EXECUTE ON FUNCTION response_window(TIMESTAMPTZ) TO anon, authenticated;
 
+-- ── 4a. Money: customer_payments, mentor_payouts, refunds, webhook events ──────
+-- Ported from immigroov's 0009_mock_payment.sql (base shape) + 0063_money_model.sql
+-- (authoritative payout columns) + 0072_razorpay_payments.sql (provider/state
+-- machine, payment_refunds, payment_events). These tables did not exist at all
+-- in groovia-backend before this commit — booking creation wrote no payment
+-- record of any kind.
+--
+-- Two intentional simplifications vs. immigroov's schema, safe because groovia
+-- has no existing payment rows to stay backward-compatible with:
+--   - customer_payments has ONE state column (`state`), not immigroov's
+--     dual status-enum-plus-state-text (that duality existed purely to keep
+--     immigroov's old readers working during ITS migration to Razorpay).
+--   - mentor_payouts.payout_state is the only status column, same reasoning.
+-- Everything that IS load-bearing business logic is kept verbatim, notably
+-- mentor_payouts.amount — immigroov's lifecycle-v2 penalty/credit math (in the
+-- next commit) reads this exact column as the PRE-FEE mentor-currency payout
+-- basis (set_price × ppp_multiplier). It is NOT the same number as
+-- net_amount_mentor_currency (which is POST-FEE) — conflating the two would
+-- silently shrink every mentor penalty by roughly the platform fee %.
+
+CREATE TABLE IF NOT EXISTS customer_payments (
+  id                          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  booking_id                  UUID NOT NULL REFERENCES bookings(id) ON DELETE CASCADE,
+  amount                      NUMERIC NOT NULL,   -- decimal, customer currency, actually charged
+  currency                    TEXT NOT NULL,
+  state                       TEXT NOT NULL DEFAULT 'created'
+                                 CHECK (state IN ('created','authorized','captured','partially_refunded','refunded','failed')),
+  provider                    TEXT DEFAULT 'razorpay',
+  provider_order_id           TEXT,
+  provider_payment_id         TEXT,
+  provider_payload            JSONB,
+  provider_error_code         TEXT,
+  provider_error_description  TEXT,
+  created_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_customer_payments_booking ON customer_payments(booking_id);
+CREATE INDEX IF NOT EXISTS idx_customer_payments_provider_order ON customer_payments(provider_order_id);
+ALTER TABLE customer_payments ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS customer_payments_read ON customer_payments;
+CREATE POLICY customer_payments_read ON customer_payments FOR SELECT USING (TRUE);
+
+CREATE TABLE IF NOT EXISTS mentor_payouts (
+  id                            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  mentor_id                     UUID NOT NULL REFERENCES mentors(id) ON DELETE CASCADE,
+  booking_id                    UUID NOT NULL UNIQUE REFERENCES bookings(id) ON DELETE CASCADE,
+  amount                        NUMERIC,   -- LOAD-BEARING: pre-fee mentor-currency basis (set_price × ppp_multiplier); see note above
+  gross_amount                  NUMERIC,   -- customer currency
+  fee_pct                       NUMERIC,
+  platform_fee_amount           NUMERIC,   -- customer currency
+  net_amount_customer_currency  NUMERIC,
+  net_amount_mentor_currency    NUMERIC,   -- what a real payout would actually transfer (post-fee, mentor currency)
+  exchange_rate_used            NUMERIC,   -- customer units per 1 mentor unit
+  customer_currency             TEXT,
+  mentor_currency                TEXT,
+  ppp_multiplier                 NUMERIC,
+  method                          TEXT,     -- 'manual' | NULL (RazorpayX auto-payout is out of scope for this module)
+  payout_reference                TEXT,
+  payout_state                    TEXT NOT NULL DEFAULT 'pending'
+                                    CHECK (payout_state IN ('pending','paid','void','blocked')),
+  paid_date                       TIMESTAMPTZ,
+  comments                        TEXT,
+  created_at                      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_mentor_payouts_mentor ON mentor_payouts(mentor_id);
+ALTER TABLE mentor_payouts ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS mentor_payouts_read ON mentor_payouts;
+CREATE POLICY mentor_payouts_read ON mentor_payouts FOR SELECT USING (TRUE);
+
+CREATE TABLE IF NOT EXISTS payment_refunds (
+  id                          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  payment_id                  UUID NOT NULL REFERENCES customer_payments(id) ON DELETE CASCADE,
+  booking_id                  UUID NOT NULL REFERENCES bookings(id) ON DELETE CASCADE,
+  provider_refund_id          TEXT UNIQUE,
+  amount_minor                INT NOT NULL,   -- MINOR units (paise/cents) — matches Razorpay's refund API, not customer_payments.amount's decimal
+  currency                    TEXT NOT NULL,
+  status                      TEXT NOT NULL DEFAULT 'created' CHECK (status IN ('created','processed','failed')),
+  provider_payload             JSONB,
+  provider_error_code         TEXT,
+  provider_error_description  TEXT,
+  ledger_version               INT,
+  created_at                   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_payment_refunds_booking ON payment_refunds(booking_id);
+
+-- Razorpay webhook intake log. event_id is the dedup key (Razorpay retries
+-- deliveries; processed_at set means "already handled, no-op on replay").
+CREATE TABLE IF NOT EXISTS payment_events (
+  event_id         TEXT PRIMARY KEY,
+  type              TEXT,
+  payload           JSONB,
+  signature         TEXT,
+  attempt_count     INT NOT NULL DEFAULT 0,
+  last_attempt_at   TIMESTAMPTZ,
+  next_retry_at     TIMESTAMPTZ,
+  processed_at      TIMESTAMPTZ,
+  error             TEXT,
+  received_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS payment_hold_expires_at TIMESTAMPTZ;  -- 10-min reservation hold
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS customer_currency TEXT;
+
+INSERT INTO platform_settings (key, value, description) VALUES
+  ('payments_enabled', 'false', 'false = mock instant-confirm booking; true = real Razorpay reserve->pay->confirm flow')
+ON CONFLICT (key) DO NOTHING;
+
 -- ── 4b. Money: booking_ledger + add_ledger ─────────────────────────────────────
 -- Ported from immigroov's 0040_lifecycle_v2_foundation.sql + 0063_money_model.sql.
 -- Every penalty/refund/credit/charge from the lifecycle functions below is
