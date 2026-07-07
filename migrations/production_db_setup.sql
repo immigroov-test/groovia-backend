@@ -2506,14 +2506,38 @@ BEGIN
 END;
 $$;
 
+INSERT INTO platform_settings (key, value, description) VALUES
+  ('review_token_expiry_days', '90', 'How many days a post-session review link stays valid')
+ON CONFLICT (key) DO NOTHING;
+
+-- Reviews hook (added when the Reviews module landed): every booking that
+-- transitions to 'completed' here gets a one-per-booking review token,
+-- matching immigroov's integration point in its own mark_past_bookings_completed
+-- (0099). NOT ported: the review-request EMAIL immigroov sends in the same
+-- pass via pg_net (app_send_email) — groovia has no equivalent SQL-side HTTP
+-- capability, and this function runs on a pg_cron schedule with no FastAPI
+-- request to hang a BackgroundTask off of. The token is generated and ready;
+-- wiring up the nudge email is a follow-up (candidates: a periodic Python
+-- poller, or surfacing "Leave a review" directly in the sessions dashboard
+-- so the email isn't the only path to it).
 CREATE OR REPLACE FUNCTION mark_past_bookings_completed()
 RETURNS INT LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
-DECLARE n INT;
+DECLARE n INT := 0; v_token_days INT; r RECORD;
 BEGIN
-  UPDATE bookings SET status = 'completed'
-   WHERE status IN ('confirmed','rescheduled')
-     AND slot_end IS NOT NULL AND slot_end < NOW();
-  GET DIAGNOSTICS n = ROW_COUNT;
+  v_token_days := COALESCE((SELECT value::int FROM platform_settings WHERE key = 'review_token_expiry_days'), 90);
+
+  FOR r IN
+    UPDATE bookings SET status = 'completed'
+     WHERE status IN ('confirmed','rescheduled')
+       AND slot_end IS NOT NULL AND slot_end < NOW()
+     RETURNING *
+  LOOP
+    n := n + 1;
+    INSERT INTO review_email_tokens (booking_id, expires_at)
+      VALUES (r.id, NOW() + (v_token_days || ' days')::interval)
+      ON CONFLICT (booking_id) DO NOTHING;
+  END LOOP;
+
   RETURN n;
 END;
 $$;
