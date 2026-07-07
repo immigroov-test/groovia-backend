@@ -2077,7 +2077,7 @@ $$;
 -- >=24h, bumps the cancellation counter when late. Auth is enforced in FastAPI.
 CREATE OR REPLACE FUNCTION cancel_booking(p_booking_id UUID, p_cancelled_by TEXT DEFAULT 'user')
 RETURNS bookings LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
-DECLARE b bookings; v_state TEXT;
+DECLARE b bookings; v_state TEXT; v_cost NUMERIC; v_payout NUMERIC;
 BEGIN
   SELECT * INTO b FROM bookings WHERE id = p_booking_id;
   IF NOT FOUND THEN RAISE EXCEPTION 'Booking % not found', p_booking_id; END IF;
@@ -2090,23 +2090,33 @@ BEGIN
     RAISE EXCEPTION 'Within 2 hours of the session — it can no longer be cancelled here. Please contact the other party.';
   END IF;
 
+  SELECT amount INTO v_cost   FROM customer_payments WHERE booking_id = p_booking_id ORDER BY created_at DESC LIMIT 1;
+  SELECT amount INTO v_payout FROM mentor_payouts    WHERE booking_id = p_booking_id ORDER BY created_at DESC LIMIT 1;
+
   IF p_cancelled_by = 'mentor' THEN
     UPDATE bookings SET status = 'cancelled' WHERE id = p_booking_id RETURNING * INTO b;
+    PERFORM add_ledger(p_booking_id, 'customer', 'refund', v_cost, 100, 'Mentor cancelled — full refund');
+    IF v_state = 'late' THEN
+      PERFORM add_ledger(p_booking_id, 'mentor', 'penalty', v_payout * 0.25, 25, 'Late mentor cancel (<24h)');
+      PERFORM bump_mentor_cancellation(b.mentor_id);
+    END IF;
     UPDATE reschedule_offers SET status = 'superseded'
       WHERE booking_id = p_booking_id AND status IN ('pending','mentee_selected');
-    IF v_state = 'late' THEN PERFORM bump_mentor_cancellation(b.mentor_id); END IF;
     PERFORM notify_booking_event(p_booking_id, 'cancelled');
     RETURN b;
   END IF;
 
   IF v_state = 'free' THEN
     UPDATE bookings SET status = 'cancelled' WHERE id = p_booking_id RETURNING * INTO b;
+    PERFORM add_ledger(p_booking_id, 'customer', 'refund', v_cost, 100, 'Customer cancelled (>=24h) — full refund');
     UPDATE reschedule_offers SET status = 'superseded'
       WHERE booking_id = p_booking_id AND status IN ('pending','mentee_selected');
     PERFORM notify_booking_event(p_booking_id, 'cancelled');
     RETURN b;
   ELSE
-    -- late: booking stays confirmed; open a cancel request for the mentor
+    -- late: booking stays confirmed; open a cancel request for the mentor. No
+    -- ledger write here — the outcome (and its ledger entry) is decided by
+    -- respond_booking_request once the mentor answers (or the cron auto-approves).
     UPDATE booking_requests SET status = 'withdrawn', resolved_at = NOW()
       WHERE booking_id = p_booking_id AND status = 'pending';
     INSERT INTO booking_requests(booking_id, kind, initiated_by, status, respond_by, note)
@@ -2122,15 +2132,22 @@ GRANT EXECUTE ON FUNCTION cancel_booking(UUID, TEXT) TO authenticated;
 -- ── 6. Respond to a cancel / reschedule request (mentor side) ─────────────────
 CREATE OR REPLACE FUNCTION respond_booking_request(p_request_id UUID, p_accept BOOLEAN)
 RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
-DECLARE r booking_requests;
+DECLARE r booking_requests; v_cost NUMERIC;
 BEGIN
   SELECT * INTO r FROM booking_requests WHERE id = p_request_id;
   IF NOT FOUND OR r.status <> 'pending' THEN RAISE EXCEPTION 'This request is no longer open'; END IF;
+  SELECT amount INTO v_cost FROM customer_payments WHERE booking_id = r.booking_id ORDER BY created_at DESC LIMIT 1;
 
   IF r.kind = 'cancel' THEN
-    -- A late cancel resolves to cancelled either way (accept = goodwill, reject =
-    -- 50% fee would apply once payments exist). State is identical without money.
+    -- A late cancel resolves to cancelled either way. Accept = mentor's
+    -- goodwill, full refund. Reject = customer keeps half, forfeits half.
     UPDATE bookings SET status = 'cancelled' WHERE id = r.booking_id;
+    IF p_accept THEN
+      PERFORM add_ledger(r.booking_id, 'customer', 'refund', v_cost, 100, 'Late cancel approved — full refund');
+    ELSE
+      PERFORM add_ledger(r.booking_id, 'customer', 'charge', v_cost * 0.5, 50, 'Late cancel rejected — 50% fee kept');
+      PERFORM add_ledger(r.booking_id, 'customer', 'refund', v_cost * 0.5, 50, 'Late cancel rejected — 50% refunded');
+    END IF;
     UPDATE booking_requests
        SET status = CASE WHEN p_accept THEN 'approved' ELSE 'rejected' END, resolved_at = NOW()
      WHERE id = p_request_id;
@@ -2153,8 +2170,20 @@ GRANT EXECUTE ON FUNCTION respond_booking_request(UUID, BOOLEAN) TO authenticate
 -- ── 7. force_autocancel (3rd reschedule attempt) — state only ─────────────────
 CREATE OR REPLACE FUNCTION force_autocancel(p_booking_id UUID, p_initiator TEXT)
 RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_status TEXT; v_cost NUMERIC; v_payout NUMERIC;
 BEGIN
+  SELECT status INTO v_status FROM bookings WHERE id = p_booking_id;
+  IF v_status IS NULL OR v_status IN ('cancelled','completed','no_show') THEN RETURN; END IF;  -- idempotent
+  SELECT amount INTO v_cost   FROM customer_payments WHERE booking_id = p_booking_id ORDER BY created_at DESC LIMIT 1;
+  SELECT amount INTO v_payout FROM mentor_payouts    WHERE booking_id = p_booking_id ORDER BY created_at DESC LIMIT 1;
+
   UPDATE bookings SET status = 'cancelled' WHERE id = p_booking_id;
+  PERFORM add_ledger(p_booking_id, 'customer', 'refund', v_cost, 100, '3rd reschedule attempt — auto-cancel, full refund');
+  IF p_initiator = 'mentor' THEN
+    PERFORM add_ledger(p_booking_id, 'mentor', 'penalty', v_payout, 100, '3rd reschedule attempt — 100% penalty');
+  ELSE
+    PERFORM add_ledger(p_booking_id, 'customer', 'penalty', v_cost, 100, '3rd reschedule attempt — 100% penalty');
+  END IF;
   UPDATE reschedule_offers SET status = 'superseded'
     WHERE booking_id = p_booking_id AND status IN ('pending','mentee_selected');
   PERFORM notify_booking_event(p_booking_id, 'cancelled');
@@ -2193,7 +2222,7 @@ $$;
 -- ── 9. Mentee accepts a slot in the proposed range — finalises directly ───────
 CREATE OR REPLACE FUNCTION mentee_accept_reschedule(p_offer_id UUID, p_slot_time TIMESTAMPTZ)
 RETURNS bookings LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
-DECLARE o reschedule_offers; b bookings;
+DECLARE o reschedule_offers; b bookings; v_payout NUMERIC;
 BEGIN
   SELECT * INTO o FROM reschedule_offers WHERE id = p_offer_id;
   IF NOT FOUND OR o.status <> 'pending' OR o.proposed_by <> 'mentor' THEN
@@ -2212,6 +2241,10 @@ BEGIN
                       reschedule_count = reschedule_count + 1
     WHERE id = o.booking_id RETURNING * INTO b;
   DELETE FROM booking_reminders WHERE booking_id = o.booking_id;
+  IF o.was_late THEN
+    SELECT amount INTO v_payout FROM mentor_payouts WHERE booking_id = o.booking_id ORDER BY created_at DESC LIMIT 1;
+    PERFORM add_ledger(o.booking_id, 'mentor', 'penalty', v_payout * 0.25, 25, 'Late mentor reschedule (<24h)');
+  END IF;
   PERFORM notify_booking_event(o.booking_id, 'rescheduled');
   RETURN b;
 END;
@@ -2220,14 +2253,22 @@ $$;
 -- ── 10. Mentee rejects the mentor's proposal — booking cancelled ──────────────
 CREATE OR REPLACE FUNCTION mentee_reject_reschedule(p_offer_id UUID)
 RETURNS bookings LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
-DECLARE o reschedule_offers; b bookings;
+DECLARE o reschedule_offers; b bookings; v_cost NUMERIC; v_payout NUMERIC;
 BEGIN
   SELECT * INTO o FROM reschedule_offers WHERE id = p_offer_id;
   IF NOT FOUND OR o.status NOT IN ('pending','mentee_selected') OR o.proposed_by <> 'mentor' THEN
     RAISE EXCEPTION 'This proposal is no longer open';
   END IF;
+  SELECT amount INTO v_cost   FROM customer_payments WHERE booking_id = o.booking_id ORDER BY created_at DESC LIMIT 1;
+  SELECT amount INTO v_payout FROM mentor_payouts    WHERE booking_id = o.booking_id ORDER BY created_at DESC LIMIT 1;
   UPDATE reschedule_offers SET status = 'rejected' WHERE id = p_offer_id;
   UPDATE bookings SET status = 'cancelled' WHERE id = o.booking_id RETURNING * INTO b;
+  IF o.was_late THEN
+    PERFORM add_ledger(o.booking_id, 'customer', 'refund', v_cost, 100, 'Rejected late mentor reschedule — full refund');
+    PERFORM add_ledger(o.booking_id, 'mentor', 'penalty', v_payout * 0.25, 25, 'Customer rejected late reschedule');
+  ELSE
+    PERFORM add_ledger(o.booking_id, 'customer', 'credit', v_cost, 100, 'Rejected reschedule — credit for a future booking');
+  END IF;
   PERFORM notify_booking_event(o.booking_id, 'cancelled');
   RETURN b;
 END;
@@ -2346,17 +2387,23 @@ $$;
 -- Mentor no-showed → the user picks one of three outcomes.
 CREATE OR REPLACE FUNCTION resolve_mentor_no_show(p_booking_id UUID, p_choice TEXT)
 RETURNS bookings LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
-DECLARE b bookings;
+DECLARE b bookings; v_cost NUMERIC;
 BEGIN
   SELECT * INTO b FROM bookings WHERE id = p_booking_id;
   IF b.no_show_by IS DISTINCT FROM 'mentor' OR b.status <> 'no_show' THEN
     RAISE EXCEPTION 'Not a mentor no-show awaiting resolution';
   END IF;
+  SELECT amount INTO v_cost FROM customer_payments WHERE booking_id = p_booking_id ORDER BY created_at DESC LIMIT 1;
   IF p_choice = 'rebook_same' THEN
     UPDATE bookings SET status = 'confirmed', no_show_by = NULL WHERE id = p_booking_id RETURNING * INTO b;
-  ELSIF p_choice IN ('rebook_different','refund') THEN
+  ELSIF p_choice = 'rebook_different' THEN
+    UPDATE bookings SET status = 'cancelled', no_show_by = NULL WHERE id = p_booking_id RETURNING * INTO b;  -- close the window
     PERFORM apply_mentor_strike(b.mentor_id);
-    -- status stays 'no_show'; (credit/refund would post to the ledger in Phase 2)
+    PERFORM add_ledger(p_booking_id, 'customer', 'credit', v_cost, 100, 'Mentor no-show — credit to rebook another mentor');
+  ELSIF p_choice = 'refund' THEN
+    UPDATE bookings SET status = 'cancelled', no_show_by = NULL WHERE id = p_booking_id RETURNING * INTO b;  -- close the window
+    PERFORM apply_mentor_strike(b.mentor_id);
+    PERFORM add_ledger(p_booking_id, 'customer', 'refund', v_cost, 100, 'Mentor no-show — full refund');
   ELSE
     RAISE EXCEPTION 'Unknown choice %', p_choice;
   END IF;
@@ -2367,7 +2414,7 @@ $$;
 -- User no-showed → the mentor picks one of two outcomes.
 CREATE OR REPLACE FUNCTION resolve_customer_no_show(p_booking_id UUID, p_choice TEXT)
 RETURNS bookings LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
-DECLARE b bookings;
+DECLARE b bookings; v_payout NUMERIC;
 BEGIN
   SELECT * INTO b FROM bookings WHERE id = p_booking_id;
   IF b.no_show_by IS DISTINCT FROM 'user' OR b.status <> 'no_show' THEN
@@ -2376,7 +2423,9 @@ BEGIN
   IF p_choice = 'accept_rebook' THEN
     UPDATE bookings SET status = 'confirmed', no_show_by = NULL WHERE id = p_booking_id RETURNING * INTO b;
   ELSIF p_choice = 'reject' THEN
+    SELECT amount INTO v_payout FROM mentor_payouts WHERE booking_id = p_booking_id ORDER BY created_at DESC LIMIT 1;
     UPDATE bookings SET status = 'completed' WHERE id = p_booking_id RETURNING * INTO b;
+    PERFORM add_ledger(p_booking_id, 'mentor', 'credit', v_payout, 100, 'Customer no-show — session closed, mentor paid in full');
   ELSE
     RAISE EXCEPTION 'Unknown choice %', p_choice;
   END IF;
