@@ -49,6 +49,12 @@ class SocialLink(BaseModel):
         return self
 
 
+class AvailabilitySlot(BaseModel):
+    day_of_week: int   # 0=Mon … 6=Sun
+    start_time: str    # "HH:MM"
+    end_time: str      # "HH:MM"
+
+
 @router.get("/me")
 def get_my_mentor(user: AuthUser = Depends(get_current_user)):
     """Returns the mentor row linked to the logged-in user, or 404 if not a mentor."""
@@ -77,6 +83,7 @@ class MentorSignupBody(BaseModel):
     professional_domains: list[str] = []
     agreed_to_mentor_terms: bool = False
     session_duration_minutes: int = 60
+    availability_slots: list[AvailabilitySlot] = []
 
     @field_validator("session_duration_minutes")
     @classmethod
@@ -134,6 +141,18 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
         professional_domains=body.professional_domains,
         session_duration_minutes=body.session_duration_minutes,
     )
+    # Availability is collected on step 2 of the signup wizard and stored alongside
+    # the profile so the admin sees both when reviewing.
+    if body.availability_slots:
+        try:
+            db.set_mentor_availability(
+                result["id"],
+                slots=[s.model_dump() for s in body.availability_slots],
+                session_duration_minutes=body.session_duration_minutes,
+                availability_type="manual",
+            )
+        except Exception:
+            logger.exception("Availability save failed during signup for mentor %s", result["id"])
     _, mentor_email = db.get_mentor_email(result["id"])
     if mentor_email:
         background_tasks.add_task(
@@ -244,12 +263,6 @@ def update_critical_fields(body: CriticalUpdateBody, user: AuthUser = Depends(ge
 
 
 # ── Availability ───────────────────────────────────────────────────────────────
-
-class AvailabilitySlot(BaseModel):
-    day_of_week: int   # 0=Mon … 6=Sun
-    start_time: str    # "HH:MM"
-    end_time: str      # "HH:MM"
-
 
 class AvailabilityBody(BaseModel):
     slots: list[AvailabilitySlot]

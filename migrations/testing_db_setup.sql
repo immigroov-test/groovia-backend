@@ -2150,3 +2150,39 @@ RETURNS TABLE (
   ORDER BY b.slot_time DESC NULLS LAST;
 $$;
 GRANT EXECUTE ON FUNCTION mentor_sessions(UUID) TO authenticated;
+
+
+-- ============================================================================
+-- STORAGE — mentor profile photos
+-- The bucket must exist before the frontend can upload (missing bucket → the
+-- "Bucket not found" error). Public read so photos render on public profiles;
+-- writes are scoped by RLS to each user's own folder ({auth.uid}/...).
+-- ============================================================================
+INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+VALUES ('mentor-photos', 'mentor-photos', true, 5242880,
+        ARRAY['image/png','image/jpeg','image/webp'])
+ON CONFLICT (id) DO UPDATE
+  SET public = true,
+      file_size_limit = 5242880,
+      allowed_mime_types = ARRAY['image/png','image/jpeg','image/webp'];
+
+DROP POLICY IF EXISTS "mentor-photos public read" ON storage.objects;
+CREATE POLICY "mentor-photos public read"
+  ON storage.objects FOR SELECT
+  USING (bucket_id = 'mentor-photos');
+
+DROP POLICY IF EXISTS "mentor-photos owner insert" ON storage.objects;
+CREATE POLICY "mentor-photos owner insert"
+  ON storage.objects FOR INSERT TO authenticated
+  WITH CHECK (bucket_id = 'mentor-photos' AND (storage.foldername(name))[1] = auth.uid()::text);
+
+DROP POLICY IF EXISTS "mentor-photos owner update" ON storage.objects;
+CREATE POLICY "mentor-photos owner update"
+  ON storage.objects FOR UPDATE TO authenticated
+  USING (bucket_id = 'mentor-photos' AND (storage.foldername(name))[1] = auth.uid()::text)
+  WITH CHECK (bucket_id = 'mentor-photos' AND (storage.foldername(name))[1] = auth.uid()::text);
+
+DROP POLICY IF EXISTS "mentor-photos owner delete" ON storage.objects;
+CREATE POLICY "mentor-photos owner delete"
+  ON storage.objects FOR DELETE TO authenticated
+  USING (bucket_id = 'mentor-photos' AND (storage.foldername(name))[1] = auth.uid()::text);
