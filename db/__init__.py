@@ -3,6 +3,7 @@ from .bookings import *
 from .chat import *
 from .direct_booking import *
 from .pricing import *
+from .payments import *
 
 
 def client():

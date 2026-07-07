@@ -15,6 +15,9 @@ os.environ.setdefault("SUPABASE_URL", "https://fake.supabase.co")
 os.environ.setdefault("SUPABASE_SERVICE_ROLE_KEY", "fake-service-role")
 os.environ.setdefault("SUPABASE_JWT_SECRET", "fake-jwt-secret")
 os.environ.setdefault("DATABASE_URL", "postgresql://fake:fake@localhost:5432/fake")
+# Mounts the dev router + /payments/confirm-mock, and skips webhook signature
+# verification — matches the project's own documented MOCK_SERVICES intent.
+os.environ.setdefault("MOCK_SERVICES", "true")
 
 # Rate limits would trip across a full test run (shared in-memory counter per IP).
 from core.rate_limit import limiter  # noqa: E402

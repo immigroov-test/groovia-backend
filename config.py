@@ -56,6 +56,14 @@ ADMIN_EMAIL    = os.getenv("ADMIN_EMAIL", "")
 # mentee/admin. Set it to the Resend account owner's email so sandbox delivers. Empty = live.
 EMAIL_TEST_REDIRECT = os.getenv("EMAIL_TEST_REDIRECT", "").strip()
 
+# Razorpay (customer payments). Optional at startup — MOCK_SERVICES=true lets
+# booking/payment flows work locally without real credentials (mirrors how
+# RESEND_API_KEY is optional). RAZORPAY_WEBHOOK_SECRET is a SEPARATE secret
+# from RAZORPAY_KEY_SECRET — it signs webhook deliveries, not API requests.
+RAZORPAY_KEY_ID         = os.getenv("RAZORPAY_KEY_ID", "")
+RAZORPAY_KEY_SECRET     = os.getenv("RAZORPAY_KEY_SECRET", "")
+RAZORPAY_WEBHOOK_SECRET = os.getenv("RAZORPAY_WEBHOOK_SECRET", "")
+
 # Feature flags, default ON. Keep in sync with groovia-frontend/lib/features.ts.
 def _flag(name: str, default: bool = True) -> bool:
     raw = os.getenv(name)
@@ -93,3 +101,13 @@ if _missing:
 if not RESEND_API_KEY:
     import warnings
     warnings.warn("[WARN] RESEND_API_KEY not set — transactional emails will be skipped", stacklevel=1)
+
+# Razorpay is optional at startup — set MOCK_SERVICES=true to use the mock
+# confirm endpoint instead of a real gateway (see routers/payments.py).
+if not (RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET and RAZORPAY_WEBHOOK_SECRET):
+    import warnings
+    warnings.warn(
+        "[WARN] RAZORPAY_KEY_ID/RAZORPAY_KEY_SECRET/RAZORPAY_WEBHOOK_SECRET not fully set — "
+        "real payments will fail; use MOCK_SERVICES=true for local dev",
+        stacklevel=1,
+    )
