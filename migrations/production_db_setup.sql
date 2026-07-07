@@ -1359,6 +1359,95 @@ RETURNS NUMERIC LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS
 $$;
 GRANT EXECUTE ON FUNCTION get_ppp_factor(TEXT) TO anon, authenticated;
 
+-- ============================================================================
+-- FX rate infra — ported verbatim from immigroov's 0065_pricing_engine.sql.
+-- fx_rates is a pivot model (base='EUR' -> every quote currency); one
+-- Frankfurter API call refreshes the whole table. get_fx() is the STRICT
+-- variant the pricing engine uses: it RAISES FX_UNAVAILABLE rather than
+-- silently falling back to rate=1, which would corrupt the INR ledger.
+-- get_fx_or_null() is the soft variant for display-only pricing.
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS fx_rates (
+  base        TEXT        NOT NULL,             -- always 'EUR'
+  quote       TEXT        NOT NULL,              -- ISO currency code
+  rate        NUMERIC     NOT NULL,               -- quote units per 1 base unit
+  as_of       DATE,                               -- provider's published date
+  fetched_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (base, quote)
+);
+
+CREATE TABLE IF NOT EXISTS fx_refresh_log (
+  id          BIGSERIAL PRIMARY KEY,
+  provider    TEXT DEFAULT 'frankfurter',
+  as_of       DATE,
+  raw_json    JSONB,
+  success     BOOLEAN,
+  error       TEXT,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+INSERT INTO platform_settings (key, value, description) VALUES
+  ('fx_max_age_minutes', '1440', 'Max age (minutes) of an FX rate before bookings fail with FX_UNAVAILABLE (default 24h)')
+ON CONFLICT (key) DO NOTHING;
+
+-- Cross-rate via the EUR pivot. Returns NULL if either leg is missing or
+-- older than fx_max_age_minutes. No silent fallback to 1.
+CREATE OR REPLACE FUNCTION get_fx_or_null(p_from TEXT, p_to TEXT)
+RETURNS NUMERIC LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_from TEXT := UPPER(COALESCE(p_from, ''));
+  v_to   TEXT := UPPER(COALESCE(p_to, ''));
+  v_max  INT := COALESCE((SELECT value::numeric FROM platform_settings WHERE key = 'fx_max_age_minutes'), 1440);
+  r_from NUMERIC; r_to NUMERIC; f_from TIMESTAMPTZ; f_to TIMESTAMPTZ;
+BEGIN
+  IF v_from = '' OR v_to = '' THEN RETURN NULL; END IF;
+  IF v_from = v_to THEN RETURN 1; END IF;
+
+  IF v_from = 'EUR' THEN r_from := 1; f_from := NOW();
+  ELSE SELECT rate, fetched_at INTO r_from, f_from FROM fx_rates WHERE base = 'EUR' AND quote = v_from; END IF;
+
+  IF v_to = 'EUR' THEN r_to := 1; f_to := NOW();
+  ELSE SELECT rate, fetched_at INTO r_to, f_to FROM fx_rates WHERE base = 'EUR' AND quote = v_to; END IF;
+
+  IF r_from IS NULL OR r_to IS NULL THEN RETURN NULL; END IF;                              -- missing
+  IF LEAST(f_from, f_to) < NOW() - MAKE_INTERVAL(mins => v_max) THEN RETURN NULL; END IF;  -- stale
+  RETURN r_to / r_from;
+END; $$;
+GRANT EXECUTE ON FUNCTION get_fx_or_null(TEXT, TEXT) TO anon, authenticated;
+
+-- Strict variant used by the booking engine: aborts rather than mis-price.
+CREATE OR REPLACE FUNCTION get_fx(p_from TEXT, p_to TEXT)
+RETURNS NUMERIC LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+DECLARE v NUMERIC := get_fx_or_null(p_from, p_to);
+BEGIN
+  IF v IS NULL THEN
+    RAISE EXCEPTION 'FX_UNAVAILABLE: no fresh exchange rate for %->%', UPPER(p_from), UPPER(p_to)
+      USING errcode = 'P0001';
+  END IF;
+  RETURN v;
+END; $$;
+GRANT EXECUTE ON FUNCTION get_fx(TEXT, TEXT) TO anon, authenticated;
+
+-- Country -> display currency. Only currencies Frankfurter supports; anything
+-- else falls back to USD.
+CREATE OR REPLACE FUNCTION currency_for_country(p_cc TEXT)
+RETURNS TEXT LANGUAGE sql IMMUTABLE SET search_path = public AS $$
+  SELECT COALESCE(
+    (CASE UPPER(COALESCE(p_cc, ''))
+      WHEN 'US' THEN 'USD' WHEN 'GB' THEN 'GBP' WHEN 'IN' THEN 'INR'
+      WHEN 'DE' THEN 'EUR' WHEN 'FR' THEN 'EUR' WHEN 'NL' THEN 'EUR' WHEN 'IE' THEN 'EUR'
+      WHEN 'ES' THEN 'EUR' WHEN 'IT' THEN 'EUR' WHEN 'PT' THEN 'EUR'
+      WHEN 'CA' THEN 'CAD' WHEN 'AU' THEN 'AUD' WHEN 'NZ' THEN 'NZD' WHEN 'SG' THEN 'SGD'
+      WHEN 'HK' THEN 'HKD' WHEN 'JP' THEN 'JPY' WHEN 'KR' THEN 'KRW' WHEN 'CN' THEN 'CNY'
+      WHEN 'MX' THEN 'MXN' WHEN 'BR' THEN 'BRL' WHEN 'ZA' THEN 'ZAR' WHEN 'CH' THEN 'CHF'
+      WHEN 'SE' THEN 'SEK' WHEN 'NO' THEN 'NOK' WHEN 'DK' THEN 'DKK' WHEN 'PL' THEN 'PLN'
+      WHEN 'RO' THEN 'RON' WHEN 'CZ' THEN 'CZK' WHEN 'HU' THEN 'HUF' WHEN 'BG' THEN 'BGN'
+      WHEN 'IL' THEN 'ILS' WHEN 'ID' THEN 'IDR' WHEN 'PH' THEN 'PHP' WHEN 'MY' THEN 'MYR'
+      WHEN 'TH' THEN 'THB' WHEN 'TR' THEN 'TRY'
+      ELSE NULL END), 'USD');
+$$;
+GRANT EXECUTE ON FUNCTION currency_for_country(TEXT) TO anon, authenticated;
+
 
 -- ###########################################################################
 -- Booking lifecycle v2 (folded in from 017_booking_lifecycle_v2.sql)
