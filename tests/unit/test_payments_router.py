@@ -261,18 +261,21 @@ def test_webhook_handler_exception_still_returns_200(client):
     assert mocked_mark.call_args.kwargs.get("error") is not None
 
 
-# ── /payments/confirm-mock (MOCK_SERVICES gate) ─────────────────────────────
+# ── /payments/config + /payments/confirm-mock ───────────────────────────────
+# Gated at runtime by platform_settings.payments_enabled (business toggle),
+# not by MOCK_SERVICES (dev/test env toggle) — see the note in payments.py.
 
-def test_confirm_mock_route_exists_when_mock_services_enabled(client):
-    # conftest sets MOCK_SERVICES=true before main is imported, so this route
-    # must be mounted.
-    paths = [r.path for r in client.app.routes]
-    assert "/payments/confirm-mock" in paths
+def test_config_reports_payments_enabled(client):
+    with patch.object(db, "payments_enabled", return_value=True):
+        resp = client.get("/payments/config")
+    assert resp.status_code == 200
+    assert resp.json() == {"payments_enabled": True}
 
 
 def test_confirm_mock_happy_path(client):
     booking_id = str(uuid.uuid4())
-    with patch.object(db, "confirm_booking_payment", return_value="confirmed") as mocked, \
+    with patch.object(db, "payments_enabled", return_value=False), \
+         patch.object(db, "confirm_booking_payment", return_value="confirmed") as mocked, \
          patch.object(db, "get_booking_notify_info", return_value=None):
         resp = client.post("/payments/confirm-mock", json={"booking_id": booking_id})
     assert resp.status_code == 200
@@ -281,9 +284,18 @@ def test_confirm_mock_happy_path(client):
 
 
 def test_confirm_mock_hold_expired_maps_to_409(client):
-    with patch.object(db, "confirm_booking_payment", side_effect=Exception("HOLD_EXPIRED: too late")):
+    with patch.object(db, "payments_enabled", return_value=False), \
+         patch.object(db, "confirm_booking_payment", side_effect=Exception("HOLD_EXPIRED: too late")):
         resp = client.post("/payments/confirm-mock", json={"booking_id": str(uuid.uuid4())})
     assert resp.status_code == 409
+
+
+def test_confirm_mock_rejected_once_real_payments_enabled(client):
+    with patch.object(db, "payments_enabled", return_value=True), \
+         patch.object(db, "confirm_booking_payment") as mocked:
+        resp = client.post("/payments/confirm-mock", json={"booking_id": str(uuid.uuid4())})
+    assert resp.status_code == 403
+    mocked.assert_not_called()
 
 
 # ── to_minor / from_minor ────────────────────────────────────────────────────

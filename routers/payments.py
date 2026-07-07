@@ -245,25 +245,39 @@ def _send_confirmation_email(booking_id: str) -> None:
         logger.warning("payment confirmation email failed booking=%s", booking_id)
 
 
-# ── Mock confirm (local dev without a real Razorpay sandbox) ───────────────────
+# ── Checkout config + mock confirm ──────────────────────────────────────────────
+# payments_enabled (platform_settings, admin-configurable) is the BUSINESS
+# toggle deciding mock-instant-confirm vs real Razorpay checkout — distinct
+# from the MOCK_SERVICES env flag (a broader local-dev/test switch that also
+# mocks email and skips webhook signature checks). The frontend needs this to
+# pick a checkout flow in any environment, not just local dev, so it's a
+# runtime check here rather than a route-mount-time gate.
+
+@router.get("/config")
+def payments_config():
+    """Public — tells the frontend which checkout flow to use."""
+    return {"payments_enabled": db.payments_enabled()}
+
 
 class MockConfirmBody(BaseModel):
     booking_id: str
 
 
-if config.MOCK_SERVICES:
-    @router.post("/confirm-mock")
-    def confirm_mock(body: MockConfirmBody, background_tasks: BackgroundTasks):
-        """Only mounted when MOCK_SERVICES=true. Skips Razorpay entirely and
-        confirms the hold directly — mirrors immigroov's payments_enabled=false
-        mock mode, for local dev without real Razorpay credentials."""
-        try:
-            result = db.confirm_booking_payment(body.booking_id, f"mock_{body.booking_id}")
-        except Exception as e:
-            msg = str(e)
-            if "HOLD_EXPIRED" in msg:
-                raise HTTPException(status_code=409, detail=msg)
-            raise HTTPException(status_code=500, detail="Mock confirmation failed")
-        if result == "confirmed":
-            background_tasks.add_task(_send_confirmation_email, body.booking_id)
-        return {"result": result}
+@router.post("/confirm-mock")
+def confirm_mock(body: MockConfirmBody, background_tasks: BackgroundTasks):
+    """Skips Razorpay entirely and confirms the hold directly — mirrors
+    immigroov's payments_enabled=false mock mode. Rejected once real payments
+    are switched on; a booking made while payments are live must go through
+    the real Razorpay flow, never this shortcut."""
+    if db.payments_enabled():
+        raise HTTPException(status_code=403, detail="Real payments are enabled — use the Razorpay checkout flow")
+    try:
+        result = db.confirm_booking_payment(body.booking_id, f"mock_{body.booking_id}")
+    except Exception as e:
+        msg = str(e)
+        if "HOLD_EXPIRED" in msg:
+            raise HTTPException(status_code=409, detail=msg)
+        raise HTTPException(status_code=500, detail="Mock confirmation failed")
+    if result == "confirmed":
+        background_tasks.add_task(_send_confirmation_email, body.booking_id)
+    return {"result": result}

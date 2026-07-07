@@ -93,6 +93,17 @@ def booking_status(booking_id: str) -> Optional[str]:
     return res.data
 
 
+def payments_enabled() -> bool:
+    """Business-level toggle (platform_settings.payments_enabled) deciding
+    mock-instant-confirm vs real Razorpay checkout. Distinct from the
+    MOCK_SERVICES env flag, which is a broader local-dev/test switch (also
+    mocks email, skips webhook signature checks) — payments_enabled is the
+    one thing the frontend needs to know to pick a checkout flow, in any
+    environment, matching immigroov's own separation of the two concerns."""
+    res = _supabase.rpc("public_setting", {"p_key": "payments_enabled"}).execute()
+    return str(res.data).strip().lower() == "true"
+
+
 def get_payment_by_booking(booking_id: str) -> Optional[dict[str, Any]]:
     res = (
         _supabase.table("customer_payments")
