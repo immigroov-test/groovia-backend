@@ -9,7 +9,6 @@ from pydantic import BaseModel, field_validator
 import config
 import db
 from core.auth import AuthUser, get_current_user_optional
-from services import mailer
 
 logger = logging.getLogger("immigroov.routers.payments")
 
@@ -215,32 +214,18 @@ def _handle_webhook_event(event_type: str, payload: dict, background_tasks: Back
 
 
 def _send_confirmation_email(booking_id: str) -> None:
-    """Best-effort — mirrors the existing booking.py _send_booking_confirmation
-    background task, reused here so a real-payment confirmation emails exactly
-    like a mock-mode one does."""
+    """Delegates to booking.py's _send_booking_confirmation (richer template:
+    per-party local-timezone formatting, admin copy) rather than keeping a
+    second, weaker duplicate. mentor_id is unused inside that function — its
+    own lookup (get_booking_notify_info) resolves everything it needs from
+    booking_id — so it's fine to pass an empty string here."""
+    from routers.booking import _send_booking_confirmation
     try:
         info = db.get_booking_notify_info(booking_id) or {}
         candidate_email = info.get("candidate_email")
         if not candidate_email:
             return
-        meeting_url = f"{config.FRONTEND_URL}/meeting/{booking_id}"
-        mailer.send_transactional(candidate_email, "booking_confirmed_candidate", {
-            "candidate_name": info.get("candidate_name") or "there",
-            "mentor_name": info.get("mentor_name") or "your mentor",
-            "service_title": info.get("service_title") or "1-on-1 session",
-            "session_time": str(info.get("slot_time") or ""),
-            "meeting_url": meeting_url,
-        })
-        if info.get("mentor_email"):
-            mailer.send_transactional(info["mentor_email"], "booking_confirmed_mentor", {
-                "mentor_name": info.get("mentor_name") or "there",
-                "candidate_name": info.get("candidate_name") or "A candidate",
-                "candidate_email": candidate_email,
-                "service_title": info.get("service_title") or "1-on-1 session",
-                "session_time": str(info.get("slot_time") or ""),
-                "notes": "",
-                "meeting_url": meeting_url,
-            })
+        _send_booking_confirmation(booking_id, "", candidate_email, info.get("candidate_name"))
     except Exception:
         logger.warning("payment confirmation email failed booking=%s", booking_id)
 

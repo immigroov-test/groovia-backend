@@ -3,11 +3,11 @@ from datetime import date, datetime
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
-from pydantic import BaseModel, EmailStr, field_validator
+from pydantic import BaseModel, field_validator
 
 import config
 import db
-from core.auth import AuthUser, get_current_user, get_current_user_optional
+from core.auth import AuthUser, get_current_user
 from services import mailer
 
 logger = logging.getLogger("immigroov.routers.booking")
@@ -85,85 +85,16 @@ def reschedule_slots(
 
 
 # ── Book a session ─────────────────────────────────────────────────────────────
-
-class BookingAnswerItem(BaseModel):
-    question_id: str
-    answer_text: str
-
-
-class BookSessionBody(BaseModel):
-    mentor_id: str
-    service_id: str
-    slot_time: datetime
-    email: str
-    name: Optional[str] = None
-    notes: Optional[str] = None
-    timezone: str = "UTC"
-    answers: list[BookingAnswerItem] = []
-    specific_availability_id: Optional[str] = None
-    idempotency_key: Optional[str] = None
-
-    @field_validator("email")
-    @classmethod
-    def normalise_email(cls, v: str) -> str:
-        v = v.strip().lower()
-        if "@" not in v or "." not in v.split("@")[-1]:
-            raise ValueError("Invalid email address")
-        return v
-
-    @field_validator("name")
-    @classmethod
-    def strip_name(cls, v: Optional[str]) -> Optional[str]:
-        return (v or "").strip() or None
-
-    @field_validator("notes")
-    @classmethod
-    def strip_notes(cls, v: Optional[str]) -> Optional[str]:
-        return (v or "").strip()[:500] or None
-
-
-@router.post("")
-def book_session(
-    body: BookSessionBody,
-    background_tasks: BackgroundTasks,
-    user: Optional[AuthUser] = Depends(get_current_user_optional),
-):
-    """Book a direct session slot. Works for both authenticated users and guests."""
-    # Idempotency: a retried/duplicated request (e.g. after a dropped network response)
-    # returns the original booking instead of creating a second one.
-    if body.idempotency_key:
-        existing = db.get_booking_by_idempotency_key(body.idempotency_key)
-        if existing:
-            return {"booking_id": existing["id"], "status": existing.get("status", "confirmed")}
-
-    answers_json = [a.model_dump() for a in body.answers]
-    candidate_id = user.id if user else None
-    try:
-        result = db.book_session(
-            mentor_id=body.mentor_id,
-            service_id=body.service_id,
-            slot_time=body.slot_time.isoformat(),
-            email=body.email,
-            name=body.name,
-            timezone=body.timezone,
-            answers=answers_json,
-            specific_availability_id=body.specific_availability_id,
-            candidate_id=candidate_id,
-        )
-        if result and result[0]:
-            booking_id = result[0]["booking_id"]
-            if body.idempotency_key:
-                db.set_booking_idempotency_key(booking_id, body.idempotency_key)
-            background_tasks.add_task(
-                _send_booking_confirmation, booking_id, body.mentor_id, body.email, body.name, body.notes
-            )
-        return result[0] if result else {"booking_id": None, "status": "unknown"}
-    except Exception as e:
-        msg = str(e)
-        if "not available" in msg.lower():
-            raise HTTPException(status_code=409, detail=msg)
-        logger.exception("book_session failed mentor=%s service=%s", body.mentor_id, body.service_id)
-        raise HTTPException(status_code=500, detail="Booking failed — please try again")
+# RETIRED (Payments module cutover): booking creation now goes through the
+# quote-based flow — POST /pricing/quote/{service_id} -> POST /payments/reserve
+# -> POST /payments/confirm-mock or the real Razorpay checkout (see
+# routers/payments.py). The old POST /booking here booked straight to
+# 'confirmed' with zero pricing/payment involved; keeping it live would leave
+# an unprotected zero-money booking path once real money matters.
+#
+# db.book_session (the underlying RPC) is deliberately NOT dropped from the
+# database — same caution immigroov itself took with its own superseded
+# creation RPCs (see the frozen spec's own comment on book_session_guest).
 
 
 # ── Cancellation ───────────────────────────────────────────────────────────────
@@ -533,6 +464,10 @@ def list_requests(booking_id: str, user: AuthUser = Depends(get_current_user)):
 
 
 # ── Background helpers ─────────────────────────────────────────────────────────
+# _send_booking_confirmation is also used by routers/payments.py — it's the
+# richer of the two email senders (per-party local-timezone formatting via
+# booking_times_display, admin copy), so payments reuses it rather than
+# keeping a second, weaker duplicate.
 
 def _send_booking_confirmation(
     booking_id: str, mentor_id: str, candidate_email: str, candidate_name: Optional[str],
