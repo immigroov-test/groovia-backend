@@ -1314,6 +1314,9 @@ GRANT EXECUTE ON FUNCTION is_valid_timezone(TEXT) TO anon, authenticated;
 
 -- ============================================================================
 -- ppp_factors  (Purchasing Power Parity price adjustments per country)
+-- Ported verbatim from immigroov/supabase/migrations/0023_ppp_pricing.sql —
+-- the frozen business spec. Price-level factors (US = 1.00). PPP only applies
+-- to services where the mentor enabled is_ppp.
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS ppp_factors (
   country_code  CHAR(2)      PRIMARY KEY,
@@ -1322,29 +1325,36 @@ CREATE TABLE IF NOT EXISTS ppp_factors (
 );
 
 INSERT INTO ppp_factors (country_code, factor) VALUES
-  ('IN', 0.2500), ('PK', 0.2000), ('BD', 0.1800), ('NP', 0.1800),
-  ('LK', 0.2200), ('MM', 0.2000), ('PH', 0.3000), ('VN', 0.2800),
-  ('ID', 0.3000), ('TH', 0.4000), ('CN', 0.4500),
-  ('NG', 0.2200), ('GH', 0.2200), ('KE', 0.2500), ('ET', 0.1500),
-  ('TZ', 0.2000), ('UG', 0.2000), ('CM', 0.2200), ('ZA', 0.3800),
-  ('EG', 0.2800), ('MA', 0.3000),
-  ('BR', 0.4000), ('MX', 0.4500), ('CO', 0.3500), ('PE', 0.3800),
-  ('AR', 0.3500), ('EC', 0.4000), ('CL', 0.5000),
-  ('UA', 0.3000), ('RO', 0.5000), ('TR', 0.3200)
-ON CONFLICT (country_code) DO NOTHING;
+  ('US',1.00),('CA',0.92),('GB',0.94),('IE',0.95),('DE',0.90),('FR',0.92),('NL',0.93),
+  ('ES',0.78),('IT',0.80),('PT',0.72),('SE',0.97),('NO',1.05),('CH',1.15),('PL',0.55),
+  ('RO',0.50),('AU',0.95),('NZ',0.90),('JP',0.85),('KR',0.78),('SG',0.85),('HK',0.90),
+  ('AE',0.72),('SA',0.60),('QA',0.70),('IN',0.30),('PK',0.29),('BD',0.32),('LK',0.32),
+  ('NP',0.30),('ID',0.38),('PH',0.40),('VN',0.37),('TH',0.45),('MY',0.45),('CN',0.55),
+  ('BR',0.45),('MX',0.50),('AR',0.40),('CO',0.42),('CL',0.55),('PE',0.45),('ZA',0.45),
+  ('NG',0.40),('KE',0.42),('EG',0.28),('MA',0.45),('TR',0.40),('RU',0.42),('UA',0.35)
+ON CONFLICT (country_code) DO UPDATE SET factor = excluded.factor;
 
 ALTER TABLE ppp_factors ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS ppp_factors_read ON ppp_factors;
 CREATE POLICY ppp_factors_read ON ppp_factors FOR SELECT USING (TRUE);
 
+-- Global floor: PPP never discounts below this fraction of base price, even
+-- for a country not in ppp_factors or seeded below the floor (e.g. IN=0.30 is
+-- dominated by a 0.40 floor — by design, per the source migration's comment).
+INSERT INTO platform_settings (key, value, description) VALUES
+  ('ppp_floor', '0.40', 'Minimum PPP factor (never price below this fraction of base)')
+ON CONFLICT (key) DO NOTHING;
+
 -- ============================================================================
--- get_ppp_factor  — returns 1.0 for countries not in the table (full price)
+-- get_ppp_factor  — countries NOT in ppp_factors get 1.0 (no discount);
+-- countries IN the table get GREATEST(their factor, ppp_floor) — the floor is
+-- an admin-configurable platform_settings row, not hardcoded.
 -- ============================================================================
 CREATE OR REPLACE FUNCTION get_ppp_factor(p_country_code TEXT)
 RETURNS NUMERIC LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
-  SELECT COALESCE(
-    (SELECT factor FROM ppp_factors WHERE country_code = UPPER(p_country_code)),
-    1.0
+  SELECT GREATEST(
+    COALESCE((SELECT factor FROM ppp_factors WHERE country_code = UPPER(p_country_code)), 1.0),
+    COALESCE((SELECT value::numeric FROM platform_settings WHERE key = 'ppp_floor'), 0.40)
   );
 $$;
 GRANT EXECUTE ON FUNCTION get_ppp_factor(TEXT) TO anon, authenticated;
