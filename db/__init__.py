@@ -4,6 +4,7 @@ from .chat import *
 from .direct_booking import *
 from .pricing import *
 from .payments import *
+from .reviews import *
 
 
 def client():

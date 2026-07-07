@@ -167,3 +167,38 @@ def reject_service(service_id: str, user: AuthUser = Depends(require_admin)):
         return db.set_service_status(service_id, "rejected")
     except ValueError:
         raise HTTPException(status_code=404, detail="Service not found")
+
+
+# ── Review moderation (1-3* holds) ────────────────────────────────────────────
+
+@router.get("/reviews/pending")
+def pending_reviews(user: AuthUser = Depends(require_admin)):
+    return db.admin_reviews_queue()
+
+
+@router.post("/reviews/{review_id}/approve")
+def approve_review(review_id: str, user: AuthUser = Depends(require_admin)):
+    try:
+        db.admin_moderate_review(review_id, "approve", user.id)
+        return {"approved": True}
+    except Exception as e:
+        msg = str(e)
+        if "not found" in msg.lower():
+            raise HTTPException(status_code=404, detail=msg)
+        if "not awaiting moderation" in msg.lower():
+            raise HTTPException(status_code=409, detail=msg)
+        raise HTTPException(status_code=500, detail="Failed to approve review")
+
+
+@router.post("/reviews/{review_id}/reject")
+def reject_review(review_id: str, user: AuthUser = Depends(require_admin)):
+    try:
+        db.admin_moderate_review(review_id, "reject", user.id)
+        return {"rejected": True}
+    except Exception as e:
+        msg = str(e)
+        if "not found" in msg.lower():
+            raise HTTPException(status_code=404, detail=msg)
+        if "not awaiting moderation" in msg.lower():
+            raise HTTPException(status_code=409, detail=msg)
+        raise HTTPException(status_code=500, detail="Failed to reject review")

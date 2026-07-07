@@ -294,6 +294,19 @@ def _review_request(d: dict) -> tuple[str, str]:
     return f"How was your session with {mentor}?", _base(body)
 
 
+def _mentor_five_star_review(d: dict) -> tuple[str, str]:
+    mentor = _e(d.get("mentor_name", ""))
+    title = d.get("review_title", "")
+    body = (
+        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">You received a new 5★ review</h1>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Congrats{", " + mentor if mentor else ""}!'
+        " You just received a new 5-star review"
+        + (f': "{_e(title)}"' if title else ".")
+        + "</p>"
+    )
+    return "You received a new 5★ review", _base(body)
+
+
 def _welcome_candidate(d: dict) -> tuple[str, str]:
     name = _e(d.get("candidate_name", ""))
     platform = d.get("platform_url", config.FRONTEND_URL)
@@ -459,6 +472,7 @@ _TEMPLATES = {
     "session_reminder_24h": _session_reminder_24h,
     "session_reminder_1h": _session_reminder_1h,
     "review_request": _review_request,
+    "mentor_five_star_review": _mentor_five_star_review,
     "welcome_candidate": _welcome_candidate,
     "welcome_mentor": _welcome_mentor,
     "booking_cancelled": _booking_cancelled,

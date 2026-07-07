@@ -44,3 +44,20 @@ def get_mentor(slug: str):
         raise HTTPException(status_code=404, detail="Mentor not found")
     public = {k: v for k, v in mentor.items() if k not in _PRIVATE_FIELDS}
     return public
+
+
+@router.get("/{slug}/reviews")
+def get_mentor_reviews(
+    slug: str,
+    limit: int = Query(10, ge=1, le=50),
+    offset: int = Query(0, ge=0),
+):
+    """Public — published reviews + rating breakdown for a mentor's profile page."""
+    mentor = db.get_mentor_by_slug(slug)
+    if not mentor:
+        raise HTTPException(status_code=404, detail="Mentor not found")
+    try:
+        return db.mentor_reviews_public(mentor["id"], limit=limit, offset=offset)
+    except Exception:
+        logger.exception("get_mentor_reviews failed slug=%s", slug)
+        raise HTTPException(status_code=500, detail="Failed to load reviews")
