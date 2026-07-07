@@ -1450,6 +1450,165 @@ $$;
 GRANT EXECUTE ON FUNCTION currency_for_country(TEXT) TO anon, authenticated;
 
 -- ============================================================================
+-- Pricing engine — ported from immigroov's 0065_pricing_engine.sql, adapted
+-- from bigint PKs to this schema's UUID PKs. Business math (PPP, FX, fee) is
+-- verbatim; only the ID types and the services-approval filter differ:
+--   - services.id / mentors.id / bookings.id are UUID here, not bigint.
+--   - compute_booking_price additionally requires status = 'approved' — a
+--     groovia-only rule (service admin-approval workflow) immigroov doesn't
+--     have. This is an existing groovia business rule being preserved, not a
+--     new one introduced during migration (see db.list_services active_only
+--     in db/direct_booking.py, which applies the same is_active + approved
+--     filter for the public/bookable service list).
+-- book_session_guest is intentionally NOT touched here — wiring quotes into
+-- booking creation is Payments-phase work, not Pricing+PPP.
+-- ============================================================================
+
+-- Binding price quotes. A quote is a 10-minute offer; booking commits it verbatim.
+CREATE TABLE IF NOT EXISTS pricing_quotes (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  service_id        UUID NOT NULL,
+  mentor_id         UUID NOT NULL,
+  customer_country  TEXT,
+  customer_currency TEXT,
+  pricing_version   INT,
+  ppp_version       INT,
+  fx_provider       TEXT,
+  snapshot          JSONB NOT NULL,    -- full BookingPrice record (the contract)
+  pricing_hash      TEXT NOT NULL,     -- SHA-256 of canonical snapshot JSON
+  used              BOOLEAN NOT NULL DEFAULT FALSE,
+  booking_id        UUID,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  expires_at        TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '10 minutes'
+);
+CREATE INDEX IF NOT EXISTS pricing_quotes_expires_idx ON pricing_quotes(expires_at);
+
+-- Immutable per-booking pricing snapshot (1:1 with bookings).
+CREATE TABLE IF NOT EXISTS booking_pricing (
+  booking_id         UUID PRIMARY KEY REFERENCES bookings(id) ON DELETE CASCADE,
+  pricing_version    INT NOT NULL,
+  ppp_version        INT,
+  fx_provider        TEXT,
+  mentor_currency    TEXT,
+  customer_currency  TEXT,
+  set_price          NUMERIC,
+  ppp_multiplier     NUMERIC,
+  fx_mentor_customer NUMERIC,
+  fx_customer_inr    NUMERIC,
+  fx_mentor_inr      NUMERIC,
+  gross_customer     NUMERIC,
+  fee_pct            NUMERIC,
+  fee_amount         NUMERIC,
+  net_customer       NUMERIC,
+  net_mentor         NUMERIC,
+  calculated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- The single pricing engine. Returns the canonical BookingPrice as jsonb.
+-- Raises FX_UNAVAILABLE if rates are missing/stale. ppp_floor (0.40)
+-- intentionally governs IN/PK/NP/EG/etc via get_ppp_factor — the seeded 0.30
+-- IN row is dominated by the floor (by design, matching the source spec).
+CREATE OR REPLACE FUNCTION compute_booking_price(p_service_id UUID, p_customer_country TEXT)
+RETURNS JSONB LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_pricing_version CONSTANT INT := 1;
+  v_ppp_version     CONSTANT INT := 1;
+  v_provider        CONSTANT TEXT := 'frankfurter';
+  v_mentor_id UUID; v_set NUMERIC; v_ment_ccy TEXT; v_is_ppp BOOLEAN; v_fee_pct NUMERIC;
+  v_cust_ccy TEXT; v_ppp NUMERIC;
+  v_fx_mc NUMERIC; v_fx_c_inr NUMERIC; v_fx_m_inr NUMERIC;
+  v_gross NUMERIC; v_fee NUMERIC; v_net_cust NUMERIC; v_net_mentor NUMERIC;
+BEGIN
+  -- NOTE: services.platform_fee is an ABSOLUTE commission amount in the mentor's
+  -- currency (e.g. set_price 2500 -> platform_fee 375 = 15%), NOT a percentage.
+  -- We convert it to a percentage of set_price so the fee applies correctly to
+  -- the PPP-adjusted, FX-converted customer gross. Falls back to the admin
+  -- global pct (immigroov_commission_pct).
+  SELECT s.mentor_id, s.set_price, COALESCE(s.set_currency, 'USD'), s.is_ppp,
+         COALESCE(
+           CASE WHEN s.set_price > 0 AND NULLIF(s.platform_fee, 0) IS NOT NULL
+                THEN ROUND(s.platform_fee / s.set_price * 100.0, 4) END,
+           (SELECT value::numeric FROM platform_settings WHERE key = 'immigroov_commission_pct'),
+           15)
+    INTO v_mentor_id, v_set, v_ment_ccy, v_is_ppp, v_fee_pct
+  FROM services s WHERE s.id = p_service_id AND s.is_active AND s.status = 'approved';
+  IF v_set IS NULL THEN RAISE EXCEPTION 'Service not available' USING errcode = 'P0001'; END IF;
+
+  v_cust_ccy := currency_for_country(p_customer_country);
+  v_ppp := CASE WHEN v_is_ppp THEN get_ppp_factor(p_customer_country) ELSE 1 END;
+
+  v_fx_mc    := get_fx(v_ment_ccy, v_cust_ccy);   -- customer units per 1 mentor unit
+  v_fx_c_inr := get_fx(v_cust_ccy, 'INR');
+  v_fx_m_inr := get_fx(v_ment_ccy, 'INR');
+
+  v_gross      := ROUND(v_set * v_ppp * v_fx_mc, 2);
+  v_fee        := ROUND(v_gross * v_fee_pct / 100.0, 2);
+  v_net_cust   := ROUND(v_gross - v_fee, 2);
+  v_net_mentor := ROUND(v_net_cust / v_fx_mc, 2);  -- divide: customer-net -> mentor currency
+
+  RETURN jsonb_build_object(
+    'pricing_version', v_pricing_version, 'ppp_version', v_ppp_version, 'fx_provider', v_provider,
+    'service_id', p_service_id, 'mentor_id', v_mentor_id, 'customer_country', UPPER(COALESCE(p_customer_country, '')),
+    'mentor_currency', v_ment_ccy, 'customer_currency', v_cust_ccy,
+    'set_price', v_set, 'ppp_multiplier', v_ppp,
+    'fx_mentor_customer', v_fx_mc, 'fx_customer_inr', v_fx_c_inr, 'fx_mentor_inr', v_fx_m_inr,
+    'gross_customer', v_gross, 'fee_pct', v_fee_pct, 'fee_amount', v_fee,
+    'net_customer', v_net_cust, 'net_mentor', v_net_mentor);
+END; $$;
+GRANT EXECUTE ON FUNCTION compute_booking_price(UUID, TEXT) TO anon, authenticated;
+
+-- Issue a binding 10-minute quote.
+CREATE OR REPLACE FUNCTION get_booking_quote(p_service_id UUID, p_customer_country TEXT)
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_snap JSONB; v_hash TEXT; v_id UUID; v_exp TIMESTAMPTZ;
+BEGIN
+  v_snap := compute_booking_price(p_service_id, p_customer_country);
+  v_hash := encode(digest(v_snap::text, 'sha256'), 'hex');
+  INSERT INTO pricing_quotes(service_id, mentor_id, customer_country, customer_currency,
+      pricing_version, ppp_version, fx_provider, snapshot, pricing_hash)
+    VALUES (p_service_id, (v_snap->>'mentor_id')::uuid, UPPER(COALESCE(p_customer_country, '')),
+      v_snap->>'customer_currency', (v_snap->>'pricing_version')::int, (v_snap->>'ppp_version')::int,
+      v_snap->>'fx_provider', v_snap, v_hash)
+    RETURNING id, expires_at INTO v_id, v_exp;
+  RETURN v_snap || jsonb_build_object('quote_id', v_id, 'expires_at', v_exp, 'pricing_hash', v_hash);
+END; $$;
+GRANT EXECUTE ON FUNCTION get_booking_quote(UUID, TEXT) TO anon, authenticated;
+
+-- Read-only DISPLAY pricing (soft FX fallback) — for browsing (homepage cards,
+-- service lists). No quote row, no fee. If FX is unavailable it shows the
+-- mentor-currency price (fx_ok=false) rather than failing the page; the
+-- binding quote/booking still enforces fresh FX via get_fx().
+-- p_items: [{ "key": "<any>", "amount": <num>, "from": "<ccy>", "is_ppp": <bool> }]
+CREATE OR REPLACE FUNCTION convert_prices(p_customer_country TEXT, p_items JSONB)
+RETURNS TABLE(key TEXT, you NUMERIC, you0 NUMERIC, customer_currency TEXT, fx_ok BOOLEAN)
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+DECLARE it JSONB; v_amt NUMERIC; v_from TEXT; v_ppp_on BOOLEAN; v_cust TEXT; v_ppp NUMERIC; v_rate NUMERIC;
+BEGIN
+  v_cust := currency_for_country(p_customer_country);
+  FOR it IN SELECT * FROM jsonb_array_elements(COALESCE(p_items, '[]'::jsonb)) LOOP
+    v_amt := COALESCE((it->>'amount')::numeric, 0);
+    v_from := COALESCE(it->>'from', 'USD');
+    v_ppp_on := COALESCE((it->>'is_ppp')::boolean, false);
+    v_ppp := CASE WHEN v_ppp_on THEN get_ppp_factor(p_customer_country) ELSE 1 END;
+    v_rate := get_fx_or_null(v_from, v_cust);
+    IF v_rate IS NULL THEN
+      key := it->>'key'; you0 := ROUND(v_amt, 2); you := ROUND(v_amt * v_ppp, 2);
+      customer_currency := UPPER(v_from); fx_ok := false;
+    ELSE
+      key := it->>'key'; you0 := ROUND(v_amt * v_rate, 2); you := ROUND(v_amt * v_ppp * v_rate, 2);
+      customer_currency := v_cust; fx_ok := true;
+    END IF;
+    RETURN NEXT;
+  END LOOP;
+END; $$;
+GRANT EXECUTE ON FUNCTION convert_prices(TEXT, JSONB) TO anon, authenticated;
+
+-- GC expired quotes (mirrors immigroov's daily 'pricing-quotes-gc' pg_cron job).
+-- Not scheduled here — groovia-backend has no pg_cron jobs registered yet;
+-- run this manually or wire up a scheduler when the cron infra exists.
+-- DELETE FROM pricing_quotes WHERE expires_at < NOW() - INTERVAL '1 day';
+
+-- ============================================================================
 -- Seed mentor data (testing only)
 -- ============================================================================
 INSERT INTO mentors (
