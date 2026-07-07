@@ -2071,6 +2071,132 @@ BEGIN
 END;
 $$;
 
+-- ── 4c. Payment state machine + payout admin ops ───────────────────────────────
+-- Ported from immigroov's 0072_razorpay_payments.sql. get_app_secret (Vault
+-- secret retrieval) is deliberately NOT ported — groovia-backend keeps secrets
+-- in config.py/.env, not Supabase Vault. That's an architecture difference
+-- (Source of architecture: groovia-backend), not a business-rule change; the
+-- FastAPI layer reads RAZORPAY_* env vars directly (see the Payments F commit).
+
+-- Legal customer_payments.state transitions. Called by the webhook handler and
+-- confirm_booking_payment — never by anon/authenticated directly.
+CREATE OR REPLACE FUNCTION set_payment_state(p_payment_id UUID, p_new_state TEXT)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_state TEXT;
+BEGIN
+  SELECT state INTO v_state FROM customer_payments WHERE id = p_payment_id FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Payment % not found', p_payment_id; END IF;
+  IF NOT (
+    p_new_state = v_state                                                            -- idempotent
+    OR p_new_state = 'failed'                                                        -- any -> failed
+    OR (v_state = 'created' AND p_new_state IN ('authorized','captured'))
+    OR (v_state = 'authorized' AND p_new_state = 'captured')
+    OR (v_state = 'captured' AND p_new_state IN ('partially_refunded','refunded'))
+    OR (v_state = 'partially_refunded' AND p_new_state IN ('partially_refunded','refunded'))
+  ) THEN
+    RAISE EXCEPTION 'Illegal payment state transition % -> %', v_state, p_new_state;
+  END IF;
+  UPDATE customer_payments SET state = p_new_state WHERE id = p_payment_id;
+END;
+$$;
+REVOKE ALL ON FUNCTION set_payment_state(UUID, TEXT) FROM PUBLIC, anon, authenticated;
+
+-- Stamp the Razorpay order id onto the 'created' payment row for a booking.
+CREATE OR REPLACE FUNCTION set_provider_order(p_booking_id UUID, p_order_id TEXT)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  UPDATE customer_payments SET provider = 'razorpay', provider_order_id = p_order_id
+    WHERE booking_id = p_booking_id AND state = 'created';
+END;
+$$;
+REVOKE ALL ON FUNCTION set_provider_order(UUID, TEXT) FROM PUBLIC, anon, authenticated;
+
+-- How much (in MINOR units — paise/cents, matching Razorpay's refund API) is
+-- still owed on a booking: sum of ledger 'refund' rows minus refunds already
+-- issued. Used by the refund-issuing endpoint so a booking is never refunded
+-- twice for the same ledger entry.
+CREATE OR REPLACE FUNCTION refund_owed_minor(p_booking_id UUID)
+RETURNS INT LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_owed NUMERIC; v_issued INT;
+BEGIN
+  SELECT COALESCE(SUM(amount), 0) INTO v_owed
+    FROM booking_ledger WHERE booking_id = p_booking_id AND party = 'customer' AND kind = 'refund';
+  SELECT COALESCE(SUM(amount_minor), 0) INTO v_issued
+    FROM payment_refunds WHERE booking_id = p_booking_id AND status IN ('created','processed');
+  RETURN GREATEST(0, ROUND(v_owed * 100)::int - v_issued);
+END;
+$$;
+REVOKE ALL ON FUNCTION refund_owed_minor(UUID) FROM PUBLIC, anon, authenticated;
+
+-- Admin marks a payout as actually paid (manual transfer — RazorpayX auto-payout
+-- is out of scope for this module). Guard: only a completed booking's payout,
+-- and only if it isn't already void/blocked.
+CREATE OR REPLACE FUNCTION mark_payout_paid(p_booking_id UUID, p_reference TEXT)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_status TEXT;
+BEGIN
+  SELECT status INTO v_status FROM bookings WHERE id = p_booking_id;
+  IF v_status IS DISTINCT FROM 'completed' THEN
+    RAISE EXCEPTION 'Booking % is not completed — cannot mark payout paid', p_booking_id;
+  END IF;
+  UPDATE mentor_payouts SET payout_state = 'paid', paid_date = NOW(), payout_reference = p_reference
+    WHERE booking_id = p_booking_id AND payout_state NOT IN ('void','blocked');
+END;
+$$;
+GRANT EXECUTE ON FUNCTION mark_payout_paid(UUID, TEXT) TO authenticated;
+
+-- Admin blocks a payout (compliance hold, dispute, etc). Never overrides an
+-- already-paid payout.
+CREATE OR REPLACE FUNCTION set_payout_blocked(p_booking_id UUID, p_reason TEXT)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  UPDATE mentor_payouts
+     SET payout_state = 'blocked',
+         comments = COALESCE(comments || E'\n', '') || COALESCE(p_reason, '')
+   WHERE booking_id = p_booking_id AND payout_state <> 'paid';
+END;
+$$;
+GRANT EXECUTE ON FUNCTION set_payout_blocked(UUID, TEXT) TO authenticated;
+
+-- A cancelled/no-show booking's payout is automatically voided (unless it's
+-- already paid or blocked) — no manual step needed. Idempotent: only fires
+-- when status actually CHANGES into cancelled/no_show.
+CREATE OR REPLACE FUNCTION trg_void_payout_fn()
+RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF NEW.status IN ('cancelled','no_show') AND NEW.status IS DISTINCT FROM OLD.status THEN
+    UPDATE mentor_payouts SET payout_state = 'void'
+      WHERE booking_id = NEW.id AND payout_state NOT IN ('paid','blocked');
+  END IF;
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_void_payout ON bookings;
+CREATE TRIGGER trg_void_payout AFTER UPDATE OF status ON bookings
+  FOR EACH ROW EXECUTE FUNCTION trg_void_payout_fn();
+
+-- Whitelisted public read of a platform_settings value — only 'payments_enabled'
+-- is ever returned; anything else raises rather than silently leaking a value
+-- that might later be added to platform_settings for internal use only.
+CREATE OR REPLACE FUNCTION public_setting(p_key TEXT)
+RETURNS TEXT LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF p_key <> 'payments_enabled' THEN
+    RAISE EXCEPTION 'Setting % is not publicly readable', p_key;
+  END IF;
+  RETURN (SELECT value FROM platform_settings WHERE key = p_key);
+END;
+$$;
+GRANT EXECUTE ON FUNCTION public_setting(TEXT) TO anon, authenticated;
+
+-- Cheap read-only status poll for checkout pages (webhook-independent
+-- confirmation UX: the frontend polls this after redirecting back from Razorpay).
+CREATE OR REPLACE FUNCTION booking_status(p_booking_id UUID)
+RETURNS TEXT LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT status::text FROM bookings WHERE id = p_booking_id;
+$$;
+GRANT EXECUTE ON FUNCTION booking_status(UUID) TO anon, authenticated;
+
 -- ── 5. Cancel flow (REPLACES the old block-on-late cancel_booking) ────────────
 -- >=24h: cancelled immediately · 2–24h (user): opens a cancel request for mentor
 -- approval · <2h: blocked. Mentor cancel is always allowed (>=2h) and is free
