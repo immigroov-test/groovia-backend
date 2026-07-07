@@ -1678,6 +1678,74 @@ $$;
 GRANT EXECUTE ON FUNCTION booking_deadline_state(TIMESTAMPTZ) TO anon, authenticated;
 GRANT EXECUTE ON FUNCTION response_window(TIMESTAMPTZ) TO anon, authenticated;
 
+-- ── 4b. Money: booking_ledger + add_ledger ─────────────────────────────────────
+-- Ported from immigroov's 0040_lifecycle_v2_foundation.sql + 0063_money_model.sql.
+-- Every penalty/refund/credit/charge from the lifecycle functions below is
+-- recorded here — this table was the real gap: cancel_booking and friends were
+-- ported with the state-machine logic but their `add_ledger(...)` calls were
+-- left out (see the "would post to the ledger in Phase 2" comments they shipped
+-- with). This commit adds the table + helper; the next commit wires the calls
+-- back in, matching immigroov's 0071_lifecycle_consolidation.sql exactly
+-- ("Money math is unchanged throughout" — that migration's own words).
+CREATE TABLE IF NOT EXISTS booking_ledger (
+  id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  booking_id             UUID NOT NULL REFERENCES bookings(id) ON DELETE CASCADE,
+  party                  TEXT NOT NULL CHECK (party IN ('customer','mentor','platform')),
+  kind                   TEXT NOT NULL CHECK (kind IN ('penalty','refund','credit','charge')),
+  amount                 NUMERIC(10,2),
+  pct                    INT,
+  currency               TEXT,
+  reason                 TEXT,
+  normalized_inr_amount  NUMERIC,
+  created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_booking_ledger_booking ON booking_ledger(booking_id);
+ALTER TABLE booking_ledger ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS booking_ledger_read ON booking_ledger;
+CREATE POLICY booking_ledger_read ON booking_ledger FOR SELECT USING (TRUE);
+
+-- INR-normalized reporting needs a per-booking FX snapshot. Not populated by
+-- anything yet — the reserve_booking/confirm_booking_payment RPCs (Payments
+-- module, later commit) will fill these in from the pricing quote. Until then
+-- add_ledger's COALESCE(...,1) fallback means normalized_inr_amount == amount,
+-- which is only correct for INR-denominated bookings — acceptable for now
+-- since no non-mock payment flow exists yet to produce a real fx snapshot.
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS fx_customer_inr NUMERIC;  -- INR per 1 customer-currency unit
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS fx_mentor_inr   NUMERIC;  -- INR per 1 mentor-currency unit
+
+-- add_ledger(booking, party, kind, amount, pct, reason): idempotent-by-call-site
+-- money journal insert. Resolves the correct currency for the party (customer
+-- vs mentor) from the latest customer_payments/mentor_payouts row for the
+-- booking, and normalizes to INR using the booking's frozen FX snapshot.
+CREATE OR REPLACE FUNCTION add_ledger(
+  p_booking UUID, p_party TEXT, p_kind TEXT, p_amount NUMERIC, p_pct INT, p_reason TEXT
+) RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_cust_ccy TEXT; v_ment_ccy TEXT; v_fxc NUMERIC; v_fxm NUMERIC; v_ccy TEXT; v_fx NUMERIC;
+BEGIN
+  SELECT COALESCE(mp.customer_currency, cp.currency, 'INR'),
+         COALESCE(mp.mentor_currency, 'INR'),
+         b.fx_customer_inr, b.fx_mentor_inr
+    INTO v_cust_ccy, v_ment_ccy, v_fxc, v_fxm
+  FROM bookings b
+  LEFT JOIN LATERAL (
+    SELECT customer_currency, mentor_currency FROM mentor_payouts
+    WHERE booking_id = b.id ORDER BY created_at DESC LIMIT 1
+  ) mp ON TRUE
+  LEFT JOIN LATERAL (
+    SELECT currency FROM customer_payments
+    WHERE booking_id = b.id ORDER BY created_at DESC LIMIT 1
+  ) cp ON TRUE
+  WHERE b.id = p_booking;
+
+  IF p_party = 'mentor' THEN v_ccy := v_ment_ccy; v_fx := COALESCE(v_fxm, 1);
+  ELSE                       v_ccy := v_cust_ccy; v_fx := COALESCE(v_fxc, 1); END IF;
+
+  INSERT INTO booking_ledger(booking_id, party, kind, amount, pct, currency, reason, normalized_inr_amount)
+    VALUES (p_booking, p_party, p_kind, ROUND(COALESCE(p_amount, 0), 2), p_pct, v_ccy, p_reason,
+            ROUND(COALESCE(p_amount, 0) * v_fx, 2));
+END;
+$$;
+
 -- ── 5. Cancel flow (REPLACES the old block-on-late cancel_booking) ────────────
 -- >=24h: cancelled immediately · 2–24h (user): opens a cancel request for mentor
 -- approval · <2h: blocked. Mentor cancel is always allowed (>=2h) and is free
