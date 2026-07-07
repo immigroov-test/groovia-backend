@@ -2901,3 +2901,125 @@ RETURNS TABLE (
   ORDER BY b.slot_time DESC NULLS LAST;
 $$;
 GRANT EXECUTE ON FUNCTION mentor_sessions(UUID) TO authenticated;
+
+
+-- ###########################################################################
+-- Reviews — ported from immigroov's 0001 (base table) + 0013 (rating rollup
+-- trigger + integrity guard trigger) + 0099 (token-gated submission, star-
+-- based moderation gating) + 0101 (FINAL state: edit_review removed —
+-- reviews are final on submit; get_review_token_info simplified).
+--
+-- mentors.avg_rating / mentors.review_count already existed as columns
+-- (provisioned ahead of time, never wired to anything) — this is the same
+-- "gap" pattern as Payments: columns anticipated, feature never built.
+--
+-- One intentional simplification vs. immigroov's live schema: no `edited_at`
+-- column. immigroov's table still carries it because ALTER TABLE ADD COLUMN
+-- was never reverted after 0101 dropped edit_review — but nothing writes to
+-- it in the final spec, and groovia has no existing rows to stay compatible
+-- with, so it's simply not created. If review editing is ever reintroduced,
+-- add it back then.
+-- ###########################################################################
+
+CREATE TABLE IF NOT EXISTS reviews (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  candidate_id UUID REFERENCES profiles(id) ON DELETE SET NULL,
+  mentor_id    UUID NOT NULL REFERENCES mentors(id) ON DELETE CASCADE,
+  service_id   UUID REFERENCES services(id) ON DELETE SET NULL,
+  booking_id   UUID NOT NULL UNIQUE REFERENCES bookings(id) ON DELETE CASCADE,
+  rating       INT CHECK (rating BETWEEN 1 AND 5),
+  title        TEXT,
+  comment      TEXT,
+  status       TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'published', 'rejected')),
+  published_at TIMESTAMPTZ,
+  reviewed_by  UUID REFERENCES profiles(id),
+  review_token UUID,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_reviews_mentor_published ON reviews(mentor_id) WHERE status = 'published';
+CREATE INDEX IF NOT EXISTS idx_reviews_pending ON reviews(status) WHERE status = 'pending';
+
+-- Public read must only expose PUBLISHED reviews — a pending/rejected review
+-- must never leak via a direct table read (admin/customer flows go through
+-- SECURITY DEFINER RPCs below, which bypass this and see everything they're
+-- entitled to).
+ALTER TABLE reviews ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS reviews_public_read ON reviews;
+CREATE POLICY reviews_public_read ON reviews FOR SELECT USING (status = 'published');
+
+CREATE TABLE IF NOT EXISTS review_email_tokens (
+  id         UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  booking_id UUID NOT NULL UNIQUE REFERENCES bookings(id) ON DELETE CASCADE,
+  token      UUID NOT NULL UNIQUE DEFAULT gen_random_uuid(),
+  expires_at TIMESTAMPTZ NOT NULL,
+  used_at    TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+-- No direct policies — reachable only via the SECURITY DEFINER token RPCs
+-- below, same masking pattern as booking_ledger/customer_payments.
+ALTER TABLE review_email_tokens ENABLE ROW LEVEL SECURITY;
+
+-- Rating rollup must only count PUBLISHED reviews — a pending/rejected
+-- review must never move the public average (business rule, from 0099).
+CREATE OR REPLACE FUNCTION recompute_mentor_rating(p_mentor_id UUID)
+RETURNS VOID LANGUAGE sql AS $$
+  UPDATE mentors m SET
+    avg_rating = COALESCE((SELECT ROUND(AVG(rating)::numeric, 2) FROM reviews WHERE mentor_id = p_mentor_id AND status = 'published'), 0),
+    review_count = (SELECT COUNT(*) FROM reviews WHERE mentor_id = p_mentor_id AND status = 'published')
+  WHERE m.id = p_mentor_id;
+$$;
+
+-- Trigger helper (must stay in Postgres, not a Python service): any write to
+-- reviews, from ANY code path, keeps mentors.avg_rating/review_count in
+-- sync. Same reasoning as trg_void_payout_fn in the Payments module.
+CREATE OR REPLACE FUNCTION trg_reviews_rollup()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    PERFORM recompute_mentor_rating(OLD.mentor_id);
+    RETURN OLD;
+  END IF;
+  PERFORM recompute_mentor_rating(NEW.mentor_id);
+  IF TG_OP = 'UPDATE' AND OLD.mentor_id IS DISTINCT FROM NEW.mentor_id THEN
+    PERFORM recompute_mentor_rating(OLD.mentor_id);
+  END IF;
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS reviews_rollup ON reviews;
+CREATE TRIGGER reviews_rollup
+  AFTER INSERT OR UPDATE OR DELETE ON reviews
+  FOR EACH ROW EXECUTE FUNCTION trg_reviews_rollup();
+
+-- Review integrity guard (must stay in Postgres — defense in depth against
+-- ANY insert path, not just submit_review below): only a completed booking
+-- can be reviewed, the reviewer must match the booking's own candidate
+-- (NULL = NULL passes for guest bookings), and mentor_id must match.
+-- Adapted from immigroov's trg_review_guard: user_id -> candidate_id.
+CREATE OR REPLACE FUNCTION trg_review_guard()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE b bookings;
+BEGIN
+  SELECT * INTO b FROM bookings WHERE id = NEW.booking_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Booking % not found', NEW.booking_id;
+  END IF;
+  IF b.status <> 'completed' THEN
+    RAISE EXCEPTION 'You can only review a completed session (booking status is %)', b.status;
+  END IF;
+  IF b.candidate_id IS DISTINCT FROM NEW.candidate_id THEN
+    RAISE EXCEPTION 'You can only review your own booking';
+  END IF;
+  IF b.mentor_id <> NEW.mentor_id THEN
+    RAISE EXCEPTION 'mentor_id does not match the booking';
+  END IF;
+  IF NEW.service_id IS NULL THEN
+    NEW.service_id := b.service_id;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS review_guard ON reviews;
+CREATE TRIGGER review_guard
+  BEFORE INSERT ON reviews
+  FOR EACH ROW EXECUTE FUNCTION trg_review_guard();
