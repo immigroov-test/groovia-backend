@@ -3023,3 +3023,126 @@ DROP TRIGGER IF EXISTS review_guard ON reviews;
 CREATE TRIGGER review_guard
   BEFORE INSERT ON reviews
   FOR EACH ROW EXECUTE FUNCTION trg_review_guard();
+
+-- Public token lookup — feeds the /review/:token page. FINAL (0101) shape:
+-- no title/comment/status/editable in the response (edit_review is gone) —
+-- just enough to render the form, or the fact a review already exists (with
+-- its star count, so a confirmation screen can redisplay it) so the page
+-- can't be resubmitted.
+CREATE OR REPLACE FUNCTION get_review_token_info(p_token UUID)
+RETURNS JSONB LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+DECLARE t review_email_tokens; b bookings; v_mentor_name TEXT; v_service_title TEXT; v_rating INT;
+BEGIN
+  SELECT * INTO t FROM review_email_tokens WHERE token = p_token;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Invalid review link'; END IF;
+  SELECT * INTO b FROM bookings WHERE id = t.booking_id;
+  SELECT display_name INTO v_mentor_name FROM mentors WHERE id = b.mentor_id;
+  SELECT title INTO v_service_title FROM services WHERE id = b.service_id;
+  SELECT rating INTO v_rating FROM reviews WHERE booking_id = t.booking_id;
+
+  RETURN jsonb_build_object(
+    'booking_id', b.id, 'mentor_name', COALESCE(v_mentor_name, 'your mentor'), 'service_title', v_service_title,
+    'expired', t.expires_at < NOW(),
+    'already_submitted', t.used_at IS NOT NULL,
+    'rating', v_rating
+  );
+END;
+$$;
+GRANT EXECUTE ON FUNCTION get_review_token_info(UUID) TO anon, authenticated;
+
+-- Submit a review via token. Rating gates publication immediately:
+-- 4-5* -> published (visible right away); 1-3* -> pending, held for admin
+-- moderation, never counted in avg_rating until approved (the rollup
+-- trigger already filters on status). Final on submit — no edit path
+-- (immigroov 0101: "reviews are final once submitted").
+-- Email dispatch (5* -> notify mentor) is NOT done here — unlike immigroov's
+-- pg_net-based app_send_email, groovia sends transactional email from the
+-- FastAPI layer via a BackgroundTask, so `rating` is returned to let the
+-- caller decide whether to fire that email.
+CREATE OR REPLACE FUNCTION submit_review(p_token UUID, p_rating INT, p_title TEXT, p_review TEXT)
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE t review_email_tokens; b bookings; v_status TEXT; v_review_id UUID;
+BEGIN
+  IF p_rating NOT BETWEEN 1 AND 5 THEN RAISE EXCEPTION 'Rating must be between 1 and 5'; END IF;
+  SELECT * INTO t FROM review_email_tokens WHERE token = p_token FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Invalid review link'; END IF;
+  IF t.expires_at < NOW() THEN RAISE EXCEPTION 'This review link has expired'; END IF;
+  IF t.used_at IS NOT NULL THEN RAISE EXCEPTION 'A review was already submitted for this session'; END IF;
+
+  SELECT * INTO b FROM bookings WHERE id = t.booking_id;
+  IF b.status <> 'completed' THEN RAISE EXCEPTION 'You can only review a completed session'; END IF;
+
+  v_status := CASE WHEN p_rating >= 4 THEN 'published' ELSE 'pending' END;
+
+  INSERT INTO reviews (candidate_id, mentor_id, service_id, booking_id, rating, title, comment, status, published_at, review_token)
+    VALUES (b.candidate_id, b.mentor_id, b.service_id, b.id, p_rating, NULLIF(TRIM(COALESCE(p_title, '')), ''), p_review,
+            v_status, CASE WHEN v_status = 'published' THEN NOW() ELSE NULL END, p_token)
+    RETURNING id INTO v_review_id;
+
+  UPDATE review_email_tokens SET used_at = NOW() WHERE id = t.id;
+
+  RETURN jsonb_build_object('review_id', v_review_id, 'status', v_status, 'rating', p_rating);
+END;
+$$;
+GRANT EXECUTE ON FUNCTION submit_review(UUID, INT, TEXT, TEXT) TO anon, authenticated;
+
+-- Mentor-profile-facing published reviews + rating breakdown histogram.
+CREATE OR REPLACE FUNCTION mentor_reviews_public(p_mentor_id UUID, p_limit INT DEFAULT 10, p_offset INT DEFAULT 0)
+RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT jsonb_build_object(
+    'breakdown', (
+      SELECT jsonb_build_object(
+        '5', COUNT(*) FILTER (WHERE rating = 5), '4', COUNT(*) FILTER (WHERE rating = 4),
+        '3', COUNT(*) FILTER (WHERE rating = 3), '2', COUNT(*) FILTER (WHERE rating = 2),
+        '1', COUNT(*) FILTER (WHERE rating = 1))
+      FROM reviews WHERE mentor_id = p_mentor_id AND status = 'published'
+    ),
+    'reviews', (
+      SELECT COALESCE(jsonb_agg(jsonb_build_object(
+        'rating', r.rating, 'title', r.title, 'review', r.comment,
+        'created_at', r.created_at, 'booking_slot_time', b.slot_time, 'verified_session', true
+      ) ORDER BY r.created_at DESC), '[]'::jsonb)
+      FROM (
+        SELECT * FROM reviews WHERE mentor_id = p_mentor_id AND status = 'published'
+        ORDER BY created_at DESC LIMIT p_limit OFFSET p_offset
+      ) r
+      JOIN bookings b ON b.id = r.booking_id
+    )
+  );
+$$;
+GRANT EXECUTE ON FUNCTION mentor_reviews_public(UUID, INT, INT) TO anon, authenticated;
+
+-- Admin moderation queue (1-3* holds) + approve/reject.
+CREATE OR REPLACE FUNCTION admin_reviews_queue()
+RETURNS TABLE (
+  review_id UUID, booking_id UUID, rating INT, title TEXT, review TEXT,
+  candidate_email TEXT, mentor_name TEXT, created_at TIMESTAMPTZ
+) LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT r.id, r.booking_id, r.rating, r.title, r.comment,
+    COALESCE(b.candidate_email, p.email), COALESCE(m.display_name, 'Mentor'), r.created_at
+  FROM reviews r
+  JOIN bookings b ON b.id = r.booking_id
+  LEFT JOIN profiles p ON p.id = b.candidate_id
+  JOIN mentors m ON m.id = r.mentor_id
+  WHERE r.status = 'pending'
+  ORDER BY r.created_at ASC;
+$$;
+GRANT EXECUTE ON FUNCTION admin_reviews_queue() TO authenticated;
+
+CREATE OR REPLACE FUNCTION admin_moderate_review(p_review_id UUID, p_decision TEXT, p_admin_user_id UUID DEFAULT NULL)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE rv reviews;
+BEGIN
+  IF p_decision NOT IN ('approve', 'reject') THEN RAISE EXCEPTION 'decision must be approve or reject'; END IF;
+  SELECT * INTO rv FROM reviews WHERE id = p_review_id FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Review not found'; END IF;
+  IF rv.status <> 'pending' THEN RAISE EXCEPTION 'Review is not awaiting moderation (status %)', rv.status; END IF;
+
+  UPDATE reviews SET
+    status = CASE WHEN p_decision = 'approve' THEN 'published' ELSE 'rejected' END,
+    published_at = CASE WHEN p_decision = 'approve' THEN NOW() ELSE NULL END,
+    reviewed_by = p_admin_user_id
+  WHERE id = p_review_id;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION admin_moderate_review(UUID, TEXT, UUID) TO authenticated;
