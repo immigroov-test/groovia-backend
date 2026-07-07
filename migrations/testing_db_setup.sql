@@ -2197,6 +2197,150 @@ RETURNS TEXT LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
 $$;
 GRANT EXECUTE ON FUNCTION booking_status(UUID) TO anon, authenticated;
 
+-- ── 4d. Quote-based booking creation ────────────────────────────────────────────
+-- Ported from immigroov's 0069_payment_reservation_flow.sql + 0072's extension,
+-- stripped of the referral params 0086_referral_checkout_wiring.sql later added
+-- (referral attribution is a separate, later migration module — out of scope
+-- here). This REPLACES book_session's direct-to-confirmed booking creation:
+-- every booking now starts 'pending' (a 10-minute payment hold) and only
+-- becomes 'confirmed' via confirm_booking_payment, exactly like immigroov's
+-- spec. book_session itself is left in place (not dropped) but is no longer
+-- called by the FastAPI layer after the Payments G commit — see the note
+-- there on why it isn't destructively removed.
+--
+-- Identity resolution mirrors book_session's existing pattern exactly: if no
+-- candidate_id is given, look up profiles by email but do NOT create one —
+-- profiles is Supabase-Auth-owned (populated by the handle_new_user trigger),
+-- unlike immigroov's users table which book_session_guest could insert into
+-- freely. A guest who never signs up simply has candidate_id = NULL and their
+-- identity lives in candidate_email/candidate_name.
+CREATE OR REPLACE FUNCTION reserve_booking(
+  p_quote_id UUID, p_mentor_id UUID, p_service_id UUID, p_slot_time TIMESTAMPTZ,
+  p_email TEXT, p_name TEXT DEFAULT NULL, p_timezone TEXT DEFAULT 'UTC',
+  p_answers JSONB DEFAULT '[]', p_specific_availability_id UUID DEFAULT NULL,
+  p_candidate_id UUID DEFAULT NULL
+) RETURNS TABLE(booking_id UUID, amount NUMERIC, currency TEXT, hold_expires_at TIMESTAMPTZ)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  q pricing_quotes%ROWTYPE;
+  s JSONB;
+  v_booking_id UUID;
+  v_hold_expires_at TIMESTAMPTZ := NOW() + INTERVAL '10 minutes';
+BEGIN
+  IF p_email IS NULL OR POSITION('@' IN p_email) = 0 THEN
+    RAISE EXCEPTION 'A valid email is required';
+  END IF;
+
+  -- Load & lock the quote; validate it is a fresh, unused, matching offer.
+  SELECT * INTO q FROM pricing_quotes WHERE id = p_quote_id FOR UPDATE;
+  IF q.id IS NULL THEN RAISE EXCEPTION 'QUOTE_EXPIRED: quote not found' USING errcode = 'P0001'; END IF;
+  IF q.used THEN RAISE EXCEPTION 'QUOTE_EXPIRED: quote already used' USING errcode = 'P0001'; END IF;
+  IF q.expires_at < NOW() THEN
+    RAISE EXCEPTION 'QUOTE_EXPIRED: quote has expired — please refresh the price' USING errcode = 'P0001';
+  END IF;
+  IF q.service_id <> p_service_id OR q.mentor_id <> p_mentor_id THEN
+    RAISE EXCEPTION 'QUOTE_EXPIRED: quote does not match this booking' USING errcode = 'P0001';
+  END IF;
+
+  IF NOT is_slot_available(p_mentor_id, p_service_id, p_slot_time) THEN
+    RAISE EXCEPTION 'That time is not available — please choose another slot';
+  END IF;
+
+  IF p_candidate_id IS NULL THEN
+    SELECT id INTO p_candidate_id FROM profiles WHERE LOWER(email) = LOWER(p_email);
+  END IF;
+
+  s := q.snapshot;  -- the binding contract; committed verbatim, no recompute
+
+  BEGIN
+    INSERT INTO bookings(
+      mentor_id, candidate_id, candidate_email, candidate_name,
+      service_id, slot_time, status, attendee_timezone,
+      specific_availability_id, source,
+      customer_currency, fx_customer_inr, fx_mentor_inr, payment_hold_expires_at
+    ) VALUES (
+      p_mentor_id, p_candidate_id, LOWER(p_email), p_name,
+      p_service_id, p_slot_time, 'pending', p_timezone,
+      p_specific_availability_id, 'direct',
+      s->>'customer_currency', NULLIF((s->>'fx_customer_inr')::numeric, 0), NULLIF((s->>'fx_mentor_inr')::numeric, 0),
+      v_hold_expires_at
+    ) RETURNING id INTO v_booking_id;
+  EXCEPTION WHEN exclusion_violation OR unique_violation THEN
+    RAISE EXCEPTION 'That time was just taken — please choose another slot' USING errcode = 'P0001';
+  END;
+
+  INSERT INTO booking_question_answers(booking_id, question_id, answer_text)
+  SELECT v_booking_id, (a->>'question_id')::UUID, a->>'answer_text'
+  FROM jsonb_array_elements(COALESCE(p_answers, '[]'::JSONB)) a
+  WHERE a ? 'question_id' AND (a->>'answer_text') IS NOT NULL AND (a->>'answer_text') <> '';
+
+  INSERT INTO customer_payments(booking_id, amount, currency, state)
+    VALUES (v_booking_id, (s->>'gross_customer')::numeric, UPPER(s->>'customer_currency'), 'created');
+
+  -- Mentor payout basis is computed from the quote snapshot exactly as at
+  -- quote time — no discount/referral logic exists yet to touch it (that's a
+  -- later module; when it lands, it must only reduce the customer-facing
+  -- figures, never this mentor payout basis — see immigroov's 0086 for why).
+  INSERT INTO mentor_payouts(
+      mentor_id, booking_id, amount, gross_amount, fee_pct, platform_fee_amount,
+      net_amount_customer_currency, net_amount_mentor_currency, exchange_rate_used,
+      customer_currency, mentor_currency, ppp_multiplier, payout_state
+    ) VALUES (
+      p_mentor_id, v_booking_id,
+      ROUND((s->>'set_price')::numeric * (s->>'ppp_multiplier')::numeric, 2),
+      (s->>'gross_customer')::numeric, (s->>'fee_pct')::numeric, (s->>'fee_amount')::numeric,
+      (s->>'net_customer')::numeric, (s->>'net_mentor')::numeric, (s->>'fx_mentor_customer')::numeric,
+      UPPER(s->>'customer_currency'), s->>'mentor_currency', (s->>'ppp_multiplier')::numeric, 'pending'
+    );
+
+  INSERT INTO booking_pricing(
+      booking_id, pricing_version, ppp_version, fx_provider,
+      mentor_currency, customer_currency, set_price, ppp_multiplier,
+      fx_mentor_customer, fx_customer_inr, fx_mentor_inr,
+      gross_customer, fee_pct, fee_amount, net_customer, net_mentor
+    ) VALUES (
+      v_booking_id, (s->>'pricing_version')::int, (s->>'ppp_version')::int, s->>'fx_provider',
+      s->>'mentor_currency', s->>'customer_currency', (s->>'set_price')::numeric, (s->>'ppp_multiplier')::numeric,
+      (s->>'fx_mentor_customer')::numeric, (s->>'fx_customer_inr')::numeric, (s->>'fx_mentor_inr')::numeric,
+      (s->>'gross_customer')::numeric, (s->>'fee_pct')::numeric, (s->>'fee_amount')::numeric,
+      (s->>'net_customer')::numeric, (s->>'net_mentor')::numeric
+    );
+
+  UPDATE pricing_quotes SET used = TRUE, booking_id = v_booking_id WHERE id = p_quote_id;  -- one-time use
+
+  RETURN QUERY SELECT v_booking_id, (s->>'gross_customer')::numeric, UPPER(s->>'customer_currency'), v_hold_expires_at;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION reserve_booking(UUID, UUID, UUID, TIMESTAMPTZ, TEXT, TEXT, TEXT, JSONB, UUID, UUID) TO anon, authenticated;
+
+-- Finalize a payment hold into a confirmed booking. Idempotent (a webhook
+-- retry or a duplicate confirm call is a no-op once already confirmed).
+-- Guards against confirming a hold that already expired (the janitor / a
+-- reconciliation pass may have moved it on) — callers must treat HOLD_EXPIRED
+-- as "issue a refund", not retry.
+CREATE OR REPLACE FUNCTION confirm_booking_payment(p_booking_id UUID, p_provider_ref TEXT)
+RETURNS TEXT LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE b bookings;
+BEGIN
+  SELECT * INTO b FROM bookings WHERE id = p_booking_id FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Booking % not found', p_booking_id; END IF;
+  IF b.status = 'confirmed' THEN RETURN 'already_confirmed'; END IF;
+  IF b.status <> 'pending' OR b.payment_hold_expires_at IS NULL THEN
+    RAISE EXCEPTION 'HOLD_EXPIRED: booking % is no longer awaiting payment (status %)', p_booking_id, b.status
+      USING errcode = 'P0001';
+  END IF;
+
+  UPDATE bookings SET status = 'confirmed', payment_hold_expires_at = NULL WHERE id = p_booking_id;
+  UPDATE customer_payments SET state = 'captured', provider = 'razorpay', provider_payment_id = p_provider_ref
+    WHERE booking_id = p_booking_id AND state = 'created';
+  UPDATE mentor_payouts SET method = COALESCE(method, 'manual'), payout_state = COALESCE(payout_state, 'pending')
+    WHERE booking_id = p_booking_id;
+
+  RETURN 'confirmed';
+END;
+$$;
+REVOKE ALL ON FUNCTION confirm_booking_payment(UUID, TEXT) FROM PUBLIC, anon, authenticated;
+
 -- ── 5. Cancel flow (REPLACES the old block-on-late cancel_booking) ────────────
 -- >=24h: cancelled immediately · 2–24h (user): opens a cancel request for mentor
 -- approval · <2h: blocked. Mentor cancel is always allowed (>=2h) and is free
