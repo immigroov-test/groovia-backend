@@ -504,6 +504,19 @@ UPDATE profiles SET role = 'admin' WHERE lower(email) = 'yokeshmd99@gmail.com' A
 -- Does this email already have a PASSWORD? signInWithOtp creates an auth.users row
 -- immediately (unconfirmed, no password), so "row exists" ≠ "can log in with a password".
 -- Returns one row (has_password) if the email exists, zero rows if not.
+-- Re-runnable guard: an existing DB may already hold older versions of these
+-- functions with different result columns. CREATE OR REPLACE cannot change a
+-- function's return type / OUT columns, so drop them first.
+DROP FUNCTION IF EXISTS email_account_status(text);
+DROP FUNCTION IF EXISTS get_available_slots(uuid, uuid, date, date);
+DROP FUNCTION IF EXISTS booking_times_display(uuid);
+DROP FUNCTION IF EXISTS avail_list_weekly(uuid);
+DROP FUNCTION IF EXISTS avail_list_specific(uuid);
+DROP FUNCTION IF EXISTS avail_get_rules(uuid);
+DROP FUNCTION IF EXISTS service_list(uuid);
+DROP FUNCTION IF EXISTS question_list(uuid);
+DROP FUNCTION IF EXISTS book_session(uuid, uuid, timestamptz, text, text, text, jsonb, uuid, uuid);
+
 CREATE OR REPLACE FUNCTION email_account_status(p_email text)
 RETURNS TABLE (has_password boolean)
 LANGUAGE sql SECURITY DEFINER SET search_path = public, auth AS $$
