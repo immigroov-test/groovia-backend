@@ -78,6 +78,19 @@ class ServiceDraft(BaseModel):
     is_active: bool = True
 
 
+class BookingRules(BaseModel):
+    days_ahead: int = 30
+    min_notice_hours: float = 2
+    cancel_hours: int = 24
+
+
+class DateOverrideDraft(BaseModel):
+    slot_date: str                      # YYYY-MM-DD
+    is_blackout: bool = False
+    start_time: Optional[str] = None    # HH:MM (custom hours)
+    end_time: Optional[str] = None
+
+
 class MentorSignupBody(BaseModel):
     display_name: str
     headline: Optional[str] = None
@@ -96,6 +109,8 @@ class MentorSignupBody(BaseModel):
     agreed_to_mentor_terms: bool = False
     weekly_availability: list[WeeklySlot] = []
     services: list[ServiceDraft] = []
+    booking_rules: Optional[BookingRules] = None
+    date_overrides: list[DateOverrideDraft] = []
 
     @field_validator("years_lived_experience")
     @classmethod
@@ -159,6 +174,26 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
             db.create_service(mentor_id=mentor_id, title=svc.title, duration=svc.duration, is_active=svc.is_active)
         except Exception:
             logger.exception("Service create failed during signup for mentor %s", mentor_id)
+    # Booking rules (mandatory) -> stored on the mentor row via avail_set_rules.
+    if body.booking_rules:
+        try:
+            db.set_availability_rules(
+                mentor_id=mentor_id,
+                days_ahead=body.booking_rules.days_ahead,
+                min_notice_hours=body.booking_rules.min_notice_hours,
+                cancel_hours=body.booking_rules.cancel_hours,
+            )
+        except Exception:
+            logger.exception("Booking rules save failed during signup for mentor %s", mentor_id)
+    # Date overrides (optional) -> specific_availability via block/override RPCs.
+    for ov in body.date_overrides:
+        try:
+            if ov.is_blackout:
+                db.block_date(mentor_id=mentor_id, slot_date=ov.slot_date)
+            elif ov.start_time and ov.end_time:
+                db.override_date(mentor_id=mentor_id, slot_date=ov.slot_date, start_time=ov.start_time, end_time=ov.end_time)
+        except Exception:
+            logger.exception("Date override save failed during signup for mentor %s", mentor_id)
     _, mentor_email = db.get_mentor_email(mentor_id)
     if mentor_email:
         background_tasks.add_task(
