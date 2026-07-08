@@ -3365,3 +3365,133 @@ INSERT INTO platform_settings (key, value, description) VALUES
   ('referral_attribution_window_days', '60', 'Days an attribution_records row stays valid before expiring'),
   ('referral_payout_min_working_days', '5', 'Minimum working days after session completion before a commission is payout-eligible')
 ON CONFLICT (key) DO NOTHING;
+
+CREATE OR REPLACE FUNCTION referral_setting(p_key TEXT)
+RETURNS TEXT LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT value FROM platform_settings WHERE key = p_key;
+$$;
+
+-- ── 7. Affiliate onboarding (admin-created, invite-only) ────────────────────
+-- Admin-only in immigroov too (its RPCs are ungated, "a known, pre-existing
+-- gap, not something newly introduced here" per 0078's own comment) — here,
+-- require_admin is enforced at the FastAPI layer (Referral 8 commit), same
+-- as every other admin_* RPC already in this file.
+
+CREATE OR REPLACE FUNCTION admin_create_affiliate(
+  p_email TEXT, p_type TEXT, p_mentor_id UUID DEFAULT NULL,
+  p_payout_details JSONB DEFAULT NULL, p_audience_corridor TEXT DEFAULT NULL
+) RETURNS UUID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_id UUID; v_email TEXT := LOWER(TRIM(COALESCE(p_email, ''))); v_profile_id UUID;
+BEGIN
+  IF v_email = '' OR POSITION('@' IN v_email) = 0 THEN
+    RAISE EXCEPTION 'A valid email is required';
+  END IF;
+  IF p_type NOT IN ('mentor', 'non_mentor') THEN
+    RAISE EXCEPTION 'Affiliate type must be mentor or non_mentor';
+  END IF;
+  IF p_type = 'mentor' AND p_mentor_id IS NULL THEN
+    RAISE EXCEPTION 'A mentor affiliate must reference an existing mentor_id';
+  END IF;
+
+  -- Link immediately if this email already has an account; otherwise the
+  -- affiliate row carries just the email until link_affiliate_by_email()
+  -- attaches it on first login — same pattern as mentors.
+  SELECT id INTO v_profile_id FROM profiles WHERE LOWER(email) = v_email;
+
+  INSERT INTO affiliates (profile_id, email, type, mentor_id, payout_details, audience_corridor, agreed_terms_at)
+    VALUES (v_profile_id, v_email, p_type, p_mentor_id, p_payout_details, p_audience_corridor, NOW())
+    RETURNING id INTO v_id;
+  RETURN v_id;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION admin_create_affiliate(TEXT, TEXT, UUID, JSONB, TEXT) TO authenticated;
+
+CREATE OR REPLACE FUNCTION admin_create_referral_link(p_affiliate_id UUID, p_slug TEXT, p_is_house_channel BOOLEAN DEFAULT FALSE)
+RETURNS UUID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_id UUID; v_clean TEXT := LOWER(TRIM(p_slug));
+BEGIN
+  IF v_clean !~ '^[a-z0-9-]{3,40}$' THEN
+    RAISE EXCEPTION 'Slug must be 3-40 characters, lowercase letters/numbers/hyphens only';
+  END IF;
+  INSERT INTO affiliate_links (affiliate_id, slug, is_house_channel)
+    VALUES (p_affiliate_id, v_clean, p_is_house_channel)
+    RETURNING id INTO v_id;
+  RETURN v_id;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION admin_create_referral_link(UUID, TEXT, BOOLEAN) TO authenticated;
+
+-- Denylist ported verbatim from immigroov's 0078/0085 (admin_create_referral_code).
+CREATE OR REPLACE FUNCTION admin_create_referral_code(
+  p_affiliate_id UUID, p_code TEXT, p_redemption_cap INT, p_expires_at TIMESTAMPTZ, p_discount_pct NUMERIC
+) RETURNS UUID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_id UUID; v_clean TEXT := UPPER(TRIM(p_code));
+  v_denylist TEXT[] := ARRAY['FUCK','SHIT','BITCH','ASS','CUNT','DAMN'];
+BEGIN
+  IF v_clean !~ '^[A-Z0-9_-]{3,20}$' THEN
+    RAISE EXCEPTION 'Code must be 3-20 characters, letters/numbers/hyphen/underscore only';
+  END IF;
+  IF EXISTS (SELECT 1 FROM UNNEST(v_denylist) w WHERE v_clean LIKE '%'||w||'%') THEN
+    RAISE EXCEPTION 'Code failed the profanity check — choose another';
+  END IF;
+  IF p_redemption_cap IS NULL OR p_redemption_cap < 1 THEN
+    RAISE EXCEPTION 'Redemption cap must be at least 1';
+  END IF;
+  IF p_expires_at IS NULL OR p_expires_at <= NOW() THEN
+    RAISE EXCEPTION 'Expiry date must be in the future';
+  END IF;
+  IF p_discount_pct IS NULL OR p_discount_pct < 0 OR p_discount_pct > 100 THEN
+    RAISE EXCEPTION 'Discount percent must be between 0 and 100';
+  END IF;
+  INSERT INTO referral_codes (affiliate_id, code_string, redemption_cap, expires_at, discount_pct)
+    VALUES (p_affiliate_id, v_clean, p_redemption_cap, p_expires_at, p_discount_pct)
+    RETURNING id INTO v_id;
+  RETURN v_id;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION admin_create_referral_code(UUID, TEXT, INT, TIMESTAMPTZ, NUMERIC) TO authenticated;
+
+-- Consolidates onboarding into one call: create the affiliate + their one
+-- link + their one code, matching "the admin creates the affiliate account
+-- directly" as a single action. Reuses the three building blocks above
+-- rather than duplicating their validation.
+-- NOT ported: immigroov's p_first_name param (stored on the freely-insertable
+-- users row it creates). There is no profile to set a name on here until the
+-- affiliate signs up and link_affiliate_by_email() attaches their account —
+-- architecture difference, not a dropped business rule.
+CREATE OR REPLACE FUNCTION admin_onboard_affiliate(
+  p_email TEXT, p_type TEXT, p_slug TEXT, p_code TEXT,
+  p_redemption_cap INT, p_expires_at TIMESTAMPTZ, p_discount_pct NUMERIC,
+  p_mentor_id UUID DEFAULT NULL, p_payout_details JSONB DEFAULT NULL,
+  p_audience_corridor TEXT DEFAULT NULL, p_is_house_channel BOOLEAN DEFAULT FALSE
+) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_affiliate_id UUID; v_link_id UUID; v_code_id UUID;
+BEGIN
+  v_affiliate_id := admin_create_affiliate(p_email, p_type, p_mentor_id, p_payout_details, p_audience_corridor);
+  v_link_id := admin_create_referral_link(v_affiliate_id, p_slug, p_is_house_channel);
+  v_code_id := admin_create_referral_code(v_affiliate_id, p_code, p_redemption_cap, p_expires_at, p_discount_pct);
+  RETURN jsonb_build_object('affiliate_id', v_affiliate_id, 'link_id', v_link_id, 'code_id', v_code_id);
+END;
+$$;
+GRANT EXECUTE ON FUNCTION admin_onboard_affiliate(TEXT, TEXT, TEXT, TEXT, INT, TIMESTAMPTZ, NUMERIC, UUID, JSONB, TEXT, BOOLEAN) TO authenticated;
+
+-- Public, read-only code check for the checkout UI. referral_codes itself is
+-- locked to the owning affiliate only, so guests/customers need a narrow
+-- RPC that reveals just enough to show "code applied — X% off" before
+-- payment, without exposing affiliate_id, redemption counts, or any other
+-- row data.
+CREATE OR REPLACE FUNCTION validate_referral_code(p_code TEXT)
+RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT CASE WHEN EXISTS (
+      SELECT 1 FROM referral_codes
+      WHERE code_string = UPPER(TRIM(COALESCE(p_code, '')))
+        AND expires_at > NOW() AND redemption_count < redemption_cap
+    )
+    THEN jsonb_build_object('valid', true, 'discount_pct',
+      (SELECT discount_pct FROM referral_codes
+        WHERE code_string = UPPER(TRIM(p_code)) AND expires_at > NOW() AND redemption_count < redemption_cap))
+    ELSE jsonb_build_object('valid', false, 'discount_pct', 0)
+  END;
+$$;
+GRANT EXECUTE ON FUNCTION validate_referral_code(TEXT) TO anon, authenticated;
