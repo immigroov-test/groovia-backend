@@ -32,10 +32,13 @@ def set_guest(user: AuthUser = Depends(get_current_user)):
 def sync_account(user: AuthUser = Depends(get_current_user)):
     """Run once right after login. If this email was pre-approved as a mentor by an
     admin (a mentors row with a matching email and no linked account yet), attach it
-    to this account so they get mentor access without registering again."""
+    to this account so they get mentor access without registering again. Same check
+    for a pre-onboarded affiliate — an account can be both."""
     mentor = db.link_mentor_by_email(user.id, user.email)
+    affiliate = db.link_affiliate_by_email(user.id, user.email)
     return {
         "linked": bool(mentor),
         "role": "mentor" if mentor else "candidate",
         "mentor_status": mentor.get("status") if mentor else None,
+        "affiliate_linked": bool(affiliate),
     }

@@ -5,6 +5,7 @@ from .direct_booking import *
 from .pricing import *
 from .payments import *
 from .reviews import *
+from .referrals import *
 
 
 def client():

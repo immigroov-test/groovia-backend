@@ -33,6 +33,8 @@ class ReserveBody(BaseModel):
     timezone: str = "UTC"
     answers: list[BookingAnswerItem] = []
     specific_availability_id: Optional[str] = None
+    referral_session_token: Optional[str] = None
+    referral_code: Optional[str] = None
 
     @field_validator("email")
     @classmethod
@@ -63,6 +65,8 @@ def reserve(body: ReserveBody, user: Optional[AuthUser] = Depends(get_current_us
             answers=answers_json,
             specific_availability_id=body.specific_availability_id,
             candidate_id=candidate_id,
+            referral_session_token=body.referral_session_token,
+            referral_code=body.referral_code,
         )
         return result
     except Exception as e:

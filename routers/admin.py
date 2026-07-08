@@ -202,3 +202,129 @@ def reject_review(review_id: str, user: AuthUser = Depends(require_admin)):
         if "not awaiting moderation" in msg.lower():
             raise HTTPException(status_code=409, detail=msg)
         raise HTTPException(status_code=500, detail="Failed to reject review")
+
+
+# ── Referral/affiliate program ────────────────────────────────────────────────
+
+class OnboardAffiliateBody(BaseModel):
+    email: str
+    type: str
+    slug: str
+    code: str
+    redemption_cap: int
+    expires_at: str
+    discount_pct: float
+    mentor_id: Optional[str] = None
+    payout_details: Optional[dict] = None
+    audience_corridor: Optional[str] = None
+    is_house_channel: bool = False
+
+
+@router.post("/referrals/onboard")
+def onboard_affiliate(body: OnboardAffiliateBody, user: AuthUser = Depends(require_admin)):
+    """Creates the affiliate + their one link + their one code in a single call."""
+    try:
+        return db.admin_onboard_affiliate(
+            email=body.email, type_=body.type, slug=body.slug, code=body.code,
+            redemption_cap=body.redemption_cap, expires_at=body.expires_at, discount_pct=body.discount_pct,
+            mentor_id=body.mentor_id, payout_details=body.payout_details,
+            audience_corridor=body.audience_corridor, is_house_channel=body.is_house_channel,
+        )
+    except Exception as e:
+        msg = str(e)
+        if any(s in msg for s in ("must be", "required", "check", "Discount", "Redemption", "Expiry")):
+            raise HTTPException(status_code=400, detail=msg)
+        logger.exception("admin_onboard_affiliate failed")
+        raise HTTPException(status_code=500, detail="Failed to onboard affiliate")
+
+
+@router.get("/referrals/affiliates")
+def affiliates_overview(user: AuthUser = Depends(require_admin)):
+    return db.admin_affiliates_overview()
+
+
+@router.get("/referrals/bookings")
+def referral_bookings_overview(user: AuthUser = Depends(require_admin)):
+    return db.admin_referral_bookings_overview()
+
+
+@router.get("/referrals/queue")
+def referral_review_queue(user: AuthUser = Depends(require_admin)):
+    """Escalated fraud flags awaiting a human decision, oldest first."""
+    return db.admin_referral_review_queue()
+
+
+@router.get("/referrals/steering-report")
+def mentor_steering_report(user: AuthUser = Depends(require_admin)):
+    """Informational-only: which mentors each affiliate concentrates referrals
+    toward this month. No auto-escalation — a founder-level read, not a gate."""
+    return db.admin_mentor_steering_report()
+
+
+class ResolveFraudFlagBody(BaseModel):
+    decision: str  # approve | approve_with_note | reject_and_hold
+    note: Optional[str] = None
+
+
+@router.post("/referrals/flags/{flag_id}/resolve")
+def resolve_fraud_flag(flag_id: str, body: ResolveFraudFlagBody, user: AuthUser = Depends(require_admin)):
+    try:
+        db.admin_resolve_fraud_flag(flag_id, body.decision, body.note)
+        return {"resolved": True}
+    except Exception as e:
+        msg = str(e)
+        if "not found" in msg.lower():
+            raise HTTPException(status_code=404, detail=msg)
+        if "must be" in msg.lower():
+            raise HTTPException(status_code=400, detail=msg)
+        raise HTTPException(status_code=500, detail="Failed to resolve fraud flag")
+
+
+class AdminNoteBody(BaseModel):
+    note: str
+
+
+@router.post("/referrals/affiliates/{affiliate_id}/freeze")
+def freeze_affiliate(affiliate_id: str, body: AdminNoteBody, user: AuthUser = Depends(require_admin)):
+    try:
+        db.admin_freeze_affiliate(affiliate_id, body.note)
+        return {"frozen": True}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/referrals/affiliates/{affiliate_id}/unfreeze")
+def unfreeze_affiliate(affiliate_id: str, body: AdminNoteBody, user: AuthUser = Depends(require_admin)):
+    try:
+        db.admin_unfreeze_affiliate(affiliate_id, body.note)
+        return {"frozen": False}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.post("/referrals/ledger/{ledger_id}/void")
+def void_commission_ledger_entry(ledger_id: str, body: AdminNoteBody, user: AuthUser = Depends(require_admin)):
+    try:
+        db.admin_void_commission_ledger_entry(ledger_id, body.note)
+        return {"voided": True}
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/referrals/payout-preview")
+def payout_batch_preview(batch_date: str, user: AuthUser = Depends(require_admin)):
+    """batch_date: ISO date (YYYY-MM-DD). Preview only — nothing is finalized."""
+    return db.admin_payout_batch_preview(batch_date)
+
+
+class FinalizePayoutBatchBody(BaseModel):
+    batch_date: str
+
+
+@router.post("/referrals/payout-finalize")
+def finalize_payout_batch(body: FinalizePayoutBatchBody, user: AuthUser = Depends(require_admin)):
+    """Sweeps every eligible commission_ledger entry into a finalized batch and
+    marks them 'paid'. Does NOT move any money — matches immigroov's V1 scope
+    (eligibility tracking + 'paid' flagging only; the actual transfer is manual)."""
+    batch_id = db.admin_finalize_payout_batch(body.batch_date)
+    return {"batch_id": batch_id}
