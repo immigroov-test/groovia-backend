@@ -2684,6 +2684,66 @@ END;
 $$;
 GRANT EXECUTE ON FUNCTION claim_due_mentor_reminders(TEXT, INT, INT) TO authenticated;
 
+-- ── Dispatcher-wide lease lock ────────────────────────────────────────────────
+-- Render Cron Jobs have no built-in mutex: if a dispatcher tick's runtime ever
+-- exceeds its schedule interval (plausible once process_refunds/
+-- reconcile_payments/sweep_verify_payments are wired in — each loops calling
+-- Razorpay once per row), Render can start the next tick's container while the
+-- previous one is still running, and every job in this file would then risk
+-- running twice concurrently. See DISPATCHER_SAFETY_CHECKLIST.md's headline
+-- finding #2.
+--
+-- NOT implemented as a literal pg_advisory_lock: this codebase talks to
+-- Postgres exclusively through PostgREST/supabase-py's stateless RPC calls
+-- (see MIGRATION_STATUS.md's architecture-decision note — the one persistent
+-- raw connection, SUPABASE_DB_URL, is reserved for LangGraph's checkpointer).
+-- A session-level advisory lock acquired in one RPC call has no guarantee of
+-- surviving to the matching unlock call on a connection-pooled interface like
+-- PostgREST — it can silently release the moment that request's connection
+-- returns to the pool, which defeats the purpose. A TTL-based lease row is the
+-- correct equivalent for this connection model: self-expiring (so a crashed
+-- dispatcher doesn't wedge the lock forever), and atomic under concurrency via
+-- the UPDATE-if-expired-else-INSERT pattern below (a UNIQUE constraint
+-- collision on the INSERT is what actually prevents two concurrent acquirers
+-- from both succeeding — the "TOCTOU" gap a naive check-then-insert would have
+-- is closed by letting Postgres's own constraint be the arbiter, not app code).
+CREATE TABLE IF NOT EXISTS dispatcher_locks (
+  lock_name   TEXT PRIMARY KEY,
+  locked_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  expires_at  TIMESTAMPTZ NOT NULL
+);
+
+CREATE OR REPLACE FUNCTION try_acquire_dispatcher_lock(p_lock_name TEXT, p_ttl_seconds INT)
+RETURNS BOOLEAN LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  -- Fast path: an expired lease for this name already exists — reclaim it in place.
+  UPDATE dispatcher_locks
+    SET locked_at = NOW(), expires_at = NOW() + (p_ttl_seconds || ' seconds')::interval
+    WHERE lock_name = p_lock_name AND expires_at < NOW();
+  IF FOUND THEN RETURN TRUE; END IF;
+
+  -- No row yet (first-ever acquire) — INSERT. If a concurrent caller's INSERT
+  -- wins the race, ours raises unique_violation and we correctly report
+  -- "not acquired" rather than silently overwriting a live lease.
+  BEGIN
+    INSERT INTO dispatcher_locks(lock_name, locked_at, expires_at)
+      VALUES (p_lock_name, NOW(), NOW() + (p_ttl_seconds || ' seconds')::interval);
+    RETURN TRUE;
+  EXCEPTION WHEN unique_violation THEN
+    RETURN FALSE;   -- someone else holds a live (non-expired) lease
+  END;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION try_acquire_dispatcher_lock(TEXT, INT) TO authenticated;
+
+CREATE OR REPLACE FUNCTION release_dispatcher_lock(p_lock_name TEXT)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  DELETE FROM dispatcher_locks WHERE lock_name = p_lock_name;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION release_dispatcher_lock(TEXT) TO authenticated;
+
 -- pg_cron schedules — guarded so the migration still succeeds where pg_cron is
 -- not enabled. Enable it in Supabase (Database → Extensions → pg_cron), then
 -- re-run just this block to activate the jobs.
