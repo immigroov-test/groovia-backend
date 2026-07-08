@@ -455,6 +455,22 @@ def expire_payment_holds(user: AuthUser = Depends(require_admin)):
         raise HTTPException(status_code=502, detail=f"Failed to expire stale holds: {e}")
 
 
+@router.post("/payments/verify-sweep")
+def verify_sweep(user: AuthUser = Depends(require_admin)):
+    """Admin-triggered stand-in for immigroov's razorpay-verify sweep mode —
+    a cron backstop for missed/delayed webhooks. Ports to db.sweep_verify_payments,
+    which calls the same db.verify_order used by POST /payments/verify (the
+    single-booking, post-Checkout path) — see that function's docstring for why
+    this is safe to run concurrently with itself or with a live webhook delivery
+    for the same payment. Primary trigger will be the dispatcher once it exists
+    (see INFRASTRUCTURE_ARCHITECTURE_PLAN.md); this is the manual override."""
+    try:
+        return db.sweep_verify_payments()
+    except Exception as e:
+        logger.exception("sweep_verify_payments failed")
+        raise HTTPException(status_code=502, detail=f"Verify sweep failed: {e}")
+
+
 @router.post("/fx/refresh")
 def refresh_fx_rates(user: AuthUser = Depends(require_admin)):
     """Admin-triggered stand-in for immigroov's pg_cron `fx-refresh-6h` job.

@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import logging
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import httpx
@@ -248,6 +249,108 @@ def fetch_razorpay_payment(payment_id: str) -> dict[str, Any]:
     resp = httpx.get(f"{_RAZORPAY_BASE}/payments/{payment_id}", auth=_auth(), timeout=15.0)
     resp.raise_for_status()
     return resp.json()
+
+
+def fetch_razorpay_order_payments(order_id: str) -> list[dict[str, Any]]:
+    resp = httpx.get(f"{_RAZORPAY_BASE}/orders/{order_id}/payments", auth=_auth(), timeout=15.0)
+    resp.raise_for_status()
+    return resp.json().get("items", [])
+
+
+# ── Webhook-independent verification (ports immigroov's razorpay-verify) ───────
+# The webhook can be delayed or dropped (closed tab, missed delivery, especially
+# in test mode). finalize_captured_payment is the ONE place that decides what to
+# do with a captured Razorpay payment — shared by the webhook handler
+# (routers/payments.py::_handle_webhook_event) and this module's verify_order/
+# sweep_verify_payments, so the race-sensitive HOLD_EXPIRED branch is
+# implemented exactly once, not duplicated between two callers.
+#
+# Concurrency contract (see DISPATCHER_SAFETY_CHECKLIST.md's razorpay_verify_sweep
+# finding): confirm_booking_payment takes a row lock (SELECT ... FOR UPDATE) and
+# is itself idempotent (returns 'already_confirmed' once confirmed) — safe to
+# call twice concurrently for the same booking. The HOLD_EXPIRED branch is safe
+# under concurrency for a DIFFERENT reason: issue_razorpay_refund's idempotency
+# key is deterministic (booking_id + amount_minor, not a version counter that
+# could race), so two concurrent callers hitting HOLD_EXPIRED for the same
+# payment both send Razorpay the identical key and get back the SAME refund —
+# no double refund is possible, by construction of the key, not by locking.
+def finalize_captured_payment(local_payment: dict[str, Any], remote_payment: dict[str, Any]) -> str:
+    """local_payment: a customer_payments row (needs 'id', 'booking_id').
+    remote_payment: a Razorpay payment object (needs 'id', 'amount') already
+    fetched from Razorpay directly — never trust a webhook body verbatim.
+    Returns 'confirmed' | 'already_confirmed' | 'refunded'."""
+    razorpay_payment_id = remote_payment["id"]
+    try:
+        result = confirm_booking_payment(local_payment["booking_id"], razorpay_payment_id)
+    except Exception as e:
+        if "HOLD_EXPIRED" not in str(e):
+            raise
+        # The 10-minute hold lapsed before the payment landed — the money
+        # arrived for a slot we can no longer honour. Issue a full refund
+        # rather than silently keeping the charge. Money REALLY was captured
+        # by Razorpay before we refunded it, so the state machine must visit
+        # 'captured' first — going straight to 'refunded' from 'created' is
+        # not a legal transition (set_payment_state's own CHECK), which is
+        # what this fixes relative to the original webhook-only version of
+        # this branch (that gap was never exercised until something actually
+        # raced this path, hence not caught by the existing HTTP-layer tests).
+        issue_razorpay_refund(
+            payment_id=razorpay_payment_id,
+            amount_minor=remote_payment.get("amount", 0),
+            booking_id=local_payment["booking_id"],
+        )
+        set_payment_state(local_payment["id"], "captured")
+        set_payment_state(local_payment["id"], "refunded")
+        return "refunded"
+    record_provider_payload(local_payment["id"], remote_payment)
+    return result
+
+
+def verify_order(order_id: str) -> dict[str, Any]:
+    """Single-order, webhook-independent verify — the frontend calls this right
+    after Checkout succeeds, in case the webhook hasn't landed yet. Idempotent:
+    a payment already resolved (captured/refunded/partially_refunded) short-
+    circuits without calling Razorpay again."""
+    local = get_payment_by_provider_order(order_id)
+    if not local:
+        return {"order_id": order_id, "error": "unknown order"}
+    if local.get("state") in ("captured", "refunded", "partially_refunded"):
+        return {"order_id": order_id, "confirmed": local["state"] == "captured", "status": "already"}
+
+    items = fetch_razorpay_order_payments(order_id)
+    captured = next((p for p in items if p.get("status") == "captured"), None)
+    if not captured:
+        return {"order_id": order_id, "confirmed": False, "status": items[0]["status"] if items else "none"}
+
+    result = finalize_captured_payment(local, captured)
+    return {"order_id": order_id, "confirmed": result in ("confirmed", "already_confirmed"), "status": result}
+
+
+def sweep_verify_payments(window_minutes: int = 60, limit: int = 100) -> dict[str, Any]:
+    """Cron backstop for missed/delayed webhooks — verifies every recent still-
+    'created' payment that has an order id. Mirrors immigroov's razorpay-verify
+    sweep mode (no-body invocation). Each order is verified independently so one
+    failure doesn't stop the rest of the sweep."""
+    since = (datetime.now(timezone.utc) - timedelta(minutes=window_minutes)).isoformat()
+    rows = (
+        _supabase.table("customer_payments")
+        .select("provider_order_id")
+        .eq("state", "created")
+        .not_.is_("provider_order_id", "null")
+        .gte("created_at", since)
+        .limit(limit)
+        .execute()
+    )
+    results = []
+    for r in rows.data or []:
+        order_id = r["provider_order_id"]
+        try:
+            results.append(verify_order(order_id))
+        except Exception as e:
+            logger.exception("sweep_verify_payments failed order=%s", order_id)
+            results.append({"order_id": order_id, "error": str(e)})
+    confirmed = sum(1 for x in results if x.get("confirmed"))
+    return {"ok": True, "swept": len(results), "confirmed": confirmed, "results": results}
 
 
 # ── Admin financials ──────────────────────────────────────────────────────────

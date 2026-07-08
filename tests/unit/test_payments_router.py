@@ -8,9 +8,10 @@ import hashlib
 import hmac
 import json
 import uuid
-from unittest.mock import patch
+from unittest.mock import call, patch
 
 import db
+import db.payments as payments
 import config
 
 
@@ -172,8 +173,8 @@ def test_webhook_payment_captured_confirms_booking(client):
          patch.object(db, "mark_payment_event_processed") as mocked_mark, \
          patch.object(db, "get_payment_by_provider_order", return_value=local_payment), \
          patch.object(db, "fetch_razorpay_payment", return_value=remote_payment), \
-         patch.object(db, "confirm_booking_payment", return_value="confirmed") as mocked_confirm, \
-         patch.object(db, "record_provider_payload"), \
+         patch.object(payments, "confirm_booking_payment", return_value="confirmed") as mocked_confirm, \
+         patch.object(payments, "record_provider_payload"), \
          patch.object(db, "get_booking_notify_info", return_value=None):
         resp = _post_webhook(client, "payment.captured", entity, event_id="evt_captured")
     assert resp.status_code == 200
@@ -191,13 +192,23 @@ def test_webhook_payment_captured_hold_expired_triggers_refund(client):
          patch.object(db, "mark_payment_event_processed") as mocked_mark, \
          patch.object(db, "get_payment_by_provider_order", return_value=local_payment), \
          patch.object(db, "fetch_razorpay_payment", return_value=remote_payment), \
-         patch.object(db, "confirm_booking_payment", side_effect=Exception("HOLD_EXPIRED: too late")), \
-         patch.object(db, "issue_razorpay_refund") as mocked_refund, \
-         patch.object(db, "set_payment_state") as mocked_state:
+         patch.object(payments, "confirm_booking_payment", side_effect=Exception("HOLD_EXPIRED: too late")), \
+         patch.object(payments, "issue_razorpay_refund") as mocked_refund, \
+         patch.object(payments, "set_payment_state") as mocked_state:
         resp = _post_webhook(client, "payment.captured", entity, event_id="evt_expired")
     assert resp.status_code == 200
     mocked_refund.assert_called_once_with(payment_id="pay_xyz", amount_minor=10000, booking_id=booking_id)
-    mocked_state.assert_called_once_with(local_payment["id"], "refunded")
+    # Money was genuinely captured by Razorpay before we refunded it, so the
+    # state machine must visit 'captured' before 'refunded' — 'created' ->
+    # 'refunded' directly is not a legal transition (set_payment_state's own
+    # CHECK). Regression coverage for a bug this refactor fixed: the original
+    # webhook-only version of this branch called set_payment_state once,
+    # straight to 'refunded', which would have raised in production the first
+    # time this branch actually ran against a real 'created'-state payment.
+    assert mocked_state.call_args_list == [
+        call(local_payment["id"], "captured"),
+        call(local_payment["id"], "refunded"),
+    ]
     mocked_mark.assert_called_once_with("evt_expired")
 
 
@@ -310,3 +321,218 @@ def test_to_minor_zero_decimal_currency():
 
 def test_from_minor_round_trip():
     assert db.from_minor(db.to_minor(99.99, "INR"), "INR") == 99.99
+
+
+# ── db.finalize_captured_payment (shared webhook/verify/sweep confirm logic) ───
+# See DISPATCHER_SAFETY_CHECKLIST.md's razorpay_verify_sweep finding and this
+# function's own docstring in db/payments.py for the concurrency contract this
+# is regression-testing.
+
+def test_finalize_captured_payment_confirms_and_records_payload():
+    local = {"id": str(uuid.uuid4()), "booking_id": str(uuid.uuid4())}
+    remote = {"id": "pay_1", "amount": 5000}
+    with patch.object(payments, "confirm_booking_payment", return_value="confirmed") as mocked_confirm, \
+         patch.object(payments, "record_provider_payload") as mocked_record, \
+         patch.object(payments, "issue_razorpay_refund") as mocked_refund:
+        result = payments.finalize_captured_payment(local, remote)
+    assert result == "confirmed"
+    mocked_confirm.assert_called_once_with(local["booking_id"], "pay_1")
+    mocked_record.assert_called_once_with(local["id"], remote)
+    mocked_refund.assert_not_called()
+
+
+def test_finalize_captured_payment_already_confirmed_is_a_clean_no_op():
+    """Idempotent main path: calling this twice for an already-confirmed
+    booking (e.g. the webhook landed, then a verify-sweep also picks it up)
+    never touches Razorpay a second time."""
+    local = {"id": str(uuid.uuid4()), "booking_id": str(uuid.uuid4())}
+    remote = {"id": "pay_1", "amount": 5000}
+    with patch.object(payments, "confirm_booking_payment", return_value="already_confirmed"), \
+         patch.object(payments, "record_provider_payload") as mocked_record, \
+         patch.object(payments, "issue_razorpay_refund") as mocked_refund:
+        result = payments.finalize_captured_payment(local, remote)
+    assert result == "already_confirmed"
+    mocked_record.assert_called_once_with(local["id"], remote)
+    mocked_refund.assert_not_called()
+
+
+def test_finalize_captured_payment_hold_expired_visits_captured_before_refunded():
+    """Regression test for the state-machine bug fixed in this refactor: going
+    straight from 'created' to 'refunded' is not a legal transition per
+    set_payment_state's own CHECK (see migrations/production_db_setup.sql) —
+    the payment was genuinely captured by Razorpay before we refund it, so the
+    state machine must visit 'captured' first."""
+    local = {"id": str(uuid.uuid4()), "booking_id": str(uuid.uuid4())}
+    remote = {"id": "pay_1", "amount": 5000}
+    with patch.object(payments, "confirm_booking_payment", side_effect=Exception("HOLD_EXPIRED: too late")), \
+         patch.object(payments, "issue_razorpay_refund") as mocked_refund, \
+         patch.object(payments, "set_payment_state") as mocked_state:
+        result = payments.finalize_captured_payment(local, remote)
+    assert result == "refunded"
+    mocked_refund.assert_called_once_with(payment_id="pay_1", amount_minor=5000, booking_id=local["booking_id"])
+    assert mocked_state.call_args_list == [call(local["id"], "captured"), call(local["id"], "refunded")]
+
+
+def test_finalize_captured_payment_reraises_non_hold_expired_errors():
+    local = {"id": str(uuid.uuid4()), "booking_id": str(uuid.uuid4())}
+    remote = {"id": "pay_1", "amount": 5000}
+    with patch.object(payments, "confirm_booking_payment", side_effect=RuntimeError("db is down")):
+        try:
+            payments.finalize_captured_payment(local, remote)
+            assert False, "expected the non-HOLD_EXPIRED error to propagate"
+        except RuntimeError as e:
+            assert "db is down" in str(e)
+
+
+def test_finalize_captured_payment_concurrent_hold_expired_calls_share_one_idempotency_key():
+    """Demonstrates the actual race this function is safe against: two
+    'concurrent' callers (simulated sequentially here — a true DB-level race
+    can't be reproduced without live Postgres, same limitation noted
+    throughout MIGRATION_STATUS.md) both hit HOLD_EXPIRED for the SAME
+    payment. Both attempt a refund (that part can't be prevented at the
+    Python layer without a lock this function doesn't take), but what
+    prevents an actual double refund is that both calls compute the exact
+    same Razorpay idempotency key — booking_id + amount_minor, not a version
+    counter — so Razorpay itself collapses them into one real refund. This
+    test asserts that determinism directly: the key must be byte-identical
+    across both calls."""
+    local = {"id": str(uuid.uuid4()), "booking_id": str(uuid.uuid4())}
+    remote = {"id": "pay_1", "amount": 5000}
+
+    captured_keys = []
+
+    def fake_issue_refund(*, payment_id, amount_minor, booking_id):
+        # Mirrors the real key formula in db/payments.py::issue_razorpay_refund.
+        captured_keys.append(f"refund-{booking_id}-{amount_minor}")
+        return {"id": "rfnd_1", "status": "processed"}
+
+    with patch.object(payments, "confirm_booking_payment", side_effect=Exception("HOLD_EXPIRED: too late")), \
+         patch.object(payments, "issue_razorpay_refund", side_effect=fake_issue_refund), \
+         patch.object(payments, "set_payment_state"):
+        payments.finalize_captured_payment(local, remote)   # "run 1"
+        payments.finalize_captured_payment(local, remote)   # "run 2" — the race
+
+    assert len(captured_keys) == 2
+    assert captured_keys[0] == captured_keys[1], (
+        "both racing calls must produce the identical Razorpay idempotency key, "
+        "or a real double refund becomes possible"
+    )
+
+
+# ── db.verify_order ──────────────────────────────────────────────────────────
+
+def test_verify_order_unknown_order():
+    with patch.object(payments, "get_payment_by_provider_order", return_value=None):
+        result = payments.verify_order("order_missing")
+    assert result == {"order_id": "order_missing", "error": "unknown order"}
+
+
+def test_verify_order_already_captured_short_circuits_without_calling_razorpay():
+    local = {"id": str(uuid.uuid4()), "booking_id": str(uuid.uuid4()), "state": "captured"}
+    with patch.object(payments, "get_payment_by_provider_order", return_value=local), \
+         patch.object(payments, "fetch_razorpay_order_payments") as mocked_fetch:
+        result = payments.verify_order("order_1")
+    assert result == {"order_id": "order_1", "confirmed": True, "status": "already"}
+    mocked_fetch.assert_not_called()
+
+
+def test_verify_order_no_captured_payment_yet():
+    local = {"id": str(uuid.uuid4()), "booking_id": str(uuid.uuid4()), "state": "created"}
+    with patch.object(payments, "get_payment_by_provider_order", return_value=local), \
+         patch.object(payments, "fetch_razorpay_order_payments", return_value=[{"status": "authorized"}]):
+        result = payments.verify_order("order_1")
+    assert result == {"order_id": "order_1", "confirmed": False, "status": "authorized"}
+
+
+def test_verify_order_captured_payment_finalizes():
+    local = {"id": str(uuid.uuid4()), "booking_id": str(uuid.uuid4()), "state": "created"}
+    captured = {"id": "pay_1", "status": "captured", "amount": 5000}
+    with patch.object(payments, "get_payment_by_provider_order", return_value=local), \
+         patch.object(payments, "fetch_razorpay_order_payments", return_value=[captured]), \
+         patch.object(payments, "finalize_captured_payment", return_value="confirmed") as mocked_finalize:
+        result = payments.verify_order("order_1")
+    assert result == {"order_id": "order_1", "confirmed": True, "status": "confirmed"}
+    mocked_finalize.assert_called_once_with(local, captured)
+
+
+# ── db.sweep_verify_payments ─────────────────────────────────────────────────
+
+def test_sweep_verify_payments_processes_each_candidate_independently():
+    rows = [{"provider_order_id": "order_1"}, {"provider_order_id": "order_2"}]
+
+    def fake_verify(order_id):
+        if order_id == "order_1":
+            raise RuntimeError("razorpay timeout")
+        return {"order_id": order_id, "confirmed": True, "status": "confirmed"}
+
+    class FakeQuery:
+        def select(self, *a, **k): return self
+        def eq(self, *a, **k): return self
+        @property
+        def not_(self): return self
+        def is_(self, *a, **k): return self
+        def gte(self, *a, **k): return self
+        def limit(self, *a, **k): return self
+        def execute(self):
+            class R:
+                data = rows
+            return R()
+
+    with patch.object(payments, "_supabase") as mock_supabase, \
+         patch.object(payments, "verify_order", side_effect=fake_verify) as mocked_verify:
+        mock_supabase.table.return_value = FakeQuery()
+        result = payments.sweep_verify_payments()
+
+    assert result["swept"] == 2
+    assert result["confirmed"] == 1
+    assert mocked_verify.call_count == 2
+    # The failure on order_1 must not stop order_2 from being processed.
+    assert result["results"][0]["error"] == "razorpay timeout"
+    assert result["results"][1]["confirmed"] is True
+
+
+# ── POST /payments/verify (single-booking, request-driven) ─────────────────────
+
+def test_verify_endpoint_by_order_id(client):
+    with patch.object(db, "verify_order", return_value={"order_id": "order_1", "confirmed": True, "status": "confirmed"}) as mocked:
+        resp = client.post("/payments/verify", json={"order_id": "order_1"})
+    assert resp.status_code == 200
+    assert resp.json()["confirmed"] is True
+    mocked.assert_called_once_with("order_1")
+
+
+def test_verify_endpoint_by_booking_id_resolves_order(client):
+    booking_id = str(uuid.uuid4())
+    with patch.object(db, "get_payment_by_booking", return_value={"provider_order_id": "order_9"}), \
+         patch.object(db, "verify_order", return_value={"order_id": "order_9", "confirmed": False, "status": "none"}) as mocked:
+        resp = client.post("/payments/verify", json={"booking_id": booking_id})
+    assert resp.status_code == 200
+    mocked.assert_called_once_with("order_9")
+
+
+def test_verify_endpoint_no_order_maps_to_404(client):
+    with patch.object(db, "get_payment_by_booking", return_value=None):
+        resp = client.post("/payments/verify", json={"booking_id": str(uuid.uuid4())})
+    assert resp.status_code == 404
+
+
+# ── POST /admin/payments/verify-sweep ───────────────────────────────────────────
+
+def test_admin_verify_sweep_requires_admin(client):
+    resp = client.post("/admin/payments/verify-sweep")
+    assert resp.status_code in (401, 403)
+
+
+def test_admin_verify_sweep_happy_path(client):
+    from core.auth import AuthUser, get_current_user
+    admin_user = AuthUser(id=str(uuid.uuid4()), email="admin@example.com", role="authenticated")
+    client.app.dependency_overrides[get_current_user] = lambda: admin_user
+    try:
+        with patch.object(db, "get_profile_role", return_value="admin"), \
+             patch.object(db, "sweep_verify_payments", return_value={"ok": True, "swept": 3, "confirmed": 1, "results": []}) as mocked:
+            resp = client.post("/admin/payments/verify-sweep")
+        assert resp.status_code == 200
+        assert resp.json()["swept"] == 3
+        mocked.assert_called_once()
+    finally:
+        client.app.dependency_overrides.clear()

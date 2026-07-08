@@ -171,22 +171,12 @@ def _handle_webhook_event(event_type: str, payload: dict, background_tasks: Back
             return
         # Re-fetch from Razorpay rather than trusting the webhook body verbatim.
         remote = db.fetch_razorpay_payment(razorpay_payment_id)
-        try:
-            result = db.confirm_booking_payment(local["booking_id"], razorpay_payment_id)
-        except Exception as e:
-            if "HOLD_EXPIRED" in str(e):
-                # The 10-minute hold lapsed before the payment landed — the
-                # money arrived for a slot we can no longer honour. Issue a
-                # full refund rather than silently keeping the charge.
-                db.issue_razorpay_refund(
-                    payment_id=razorpay_payment_id,
-                    amount_minor=remote.get("amount", 0),
-                    booking_id=local["booking_id"],
-                )
-                db.set_payment_state(local["id"], "refunded")
-                return
-            raise
-        db.record_provider_payload(local["id"], remote)
+        # finalize_captured_payment is shared with /payments/verify and the
+        # verify-sweep job so the HOLD_EXPIRED/auto-refund branch has exactly
+        # one implementation — see its docstring in db/payments.py for the
+        # concurrency contract (safe to race with a verify/sweep call for the
+        # same payment).
+        result = db.finalize_captured_payment(local, remote)
         if result == "confirmed":
             background_tasks.add_task(_send_confirmation_email, local["booking_id"])
 
@@ -232,6 +222,35 @@ def _send_confirmation_email(booking_id: str) -> None:
         _send_booking_confirmation(booking_id, "", candidate_email, info.get("candidate_name"))
     except Exception:
         logger.warning("payment confirmation email failed booking=%s", booking_id)
+
+
+# ── Webhook-independent verify (post-Checkout backstop, one booking at a time) ──
+# The scheduled sweep (verify every recently-stuck payment) lives in
+# db.sweep_verify_payments, invoked by an admin endpoint today
+# (POST /admin/payments/verify-sweep) and eventually the dispatcher — see
+# INFRASTRUCTURE_ARCHITECTURE_PLAN.md. This endpoint is the OTHER caller of the
+# same db.verify_order function, for the single-booking, request-driven case:
+# the frontend calls it right after Checkout succeeds, in case the webhook is
+# delayed. One function, two callers — not duplicated logic.
+
+class VerifyBody(BaseModel):
+    order_id: Optional[str] = None
+    booking_id: Optional[str] = None
+
+
+@router.post("/verify")
+def verify(body: VerifyBody):
+    order_id = body.order_id
+    if not order_id and body.booking_id:
+        payment = db.get_payment_by_booking(body.booking_id)
+        order_id = payment.get("provider_order_id") if payment else None
+    if not order_id:
+        raise HTTPException(status_code=404, detail="No order found for this booking")
+    try:
+        return db.verify_order(order_id)
+    except httpx.HTTPStatusError as e:
+        logger.exception("verify_order failed order=%s", order_id)
+        raise HTTPException(status_code=502, detail=f"Could not verify payment: {e}")
 
 
 # ── Checkout config + mock confirm ──────────────────────────────────────────────
