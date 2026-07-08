@@ -103,7 +103,9 @@ def get_mentor_by_profile_id(profile_id: str) -> Optional[dict[str, Any]]:
         return None
     res = (
         _supabase.table("mentors")
-        .select("id, slug, display_name, status, session_duration_minutes, rejection_reason")
+        .select("id, slug, display_name, status, session_duration_minutes, rejection_reason, "
+                "headline, bio, photo_url, country, city, languages, expertise_country_codes, "
+                "professional_domains, years_lived_experience, public_notes")
         .eq("profile_id", profile_id)
         .limit(1)
         .execute()
