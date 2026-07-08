@@ -389,3 +389,51 @@ def block_payout(booking_id: str, body: BlockPayoutBody, user: AuthUser = Depend
     surface; a future admin UI can wire it up."""
     db.set_payout_blocked(booking_id, body.reason)
     return {"blocked": True}
+
+
+# ── Webinars ───────────────────────────────────────────────────────────────────
+
+@router.get("/webinars")
+def admin_webinars(user: AuthUser = Depends(require_admin)):
+    """Cross-mentor platform view — every webinar, any status/visibility."""
+    return db.admin_webinars()
+
+
+@router.get("/webinars/{webinar_id}/registrants")
+def admin_webinar_registrants(webinar_id: str, user: AuthUser = Depends(require_admin)):
+    """Same underlying RPC as the mentor's own registrant view — admin has no
+    ownership restriction here, matching immigroov's admin console."""
+    return db.webinar_registrants(webinar_id)
+
+
+@router.post("/webinars/send-reminders")
+def send_webinar_reminders(user: AuthUser = Depends(require_admin)):
+    """Admin-triggered stand-in for immigroov's pg_cron `webinar-reminders`
+    job (every 10 min, no request context — impossible to reproduce as a
+    true cron job without SQL-side HTTP or a scheduler groovia doesn't have
+    yet). Finds due (1-day/1-hour) reminders, sends one email per registrant,
+    and marks each (webinar, stage) as sent so it never re-fires. Wiring
+    this to an actual timer (cron/cloud scheduler hitting this endpoint) is
+    explicitly out of scope for this migration pass — see the SQL comment on
+    due_webinar_reminders."""
+    due = db.due_webinar_reminders()
+    sent = 0
+    marked: set[tuple[str, str]] = set()
+    for row in due:
+        try:
+            mailer.send_transactional(row["registrant_email"], "webinar_reminder", {
+                "recipient_name": row.get("registrant_name") or "",
+                "webinar_title": row.get("title") or "",
+                "start_time": str(row.get("start_time") or ""),
+                "room_url": row.get("room_url") or "",
+                "stage": row.get("stage"),
+            })
+            sent += 1
+        except Exception:
+            logger.warning("webinar reminder email failed webinar=%s stage=%s", row.get("webinar_id"), row.get("stage"))
+            continue
+        key = (row["webinar_id"], row["stage"])
+        if key not in marked:
+            db.mark_webinar_reminded(row["webinar_id"], row["stage"])
+            marked.add(key)
+    return {"emails_sent": sent, "webinars_marked": len(marked)}

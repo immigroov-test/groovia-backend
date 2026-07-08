@@ -30,6 +30,7 @@ from routers import quote as quote_router
 from routers import referrals as referrals_router
 from routers import reviews as reviews_router
 from routers import services as services_router
+from routers import webinars as webinars_router
 
 if config.MOCK_SERVICES:
     from routers import dev as dev_router
@@ -124,6 +125,7 @@ api.include_router(quote_router.router)
 api.include_router(referrals_router.router)
 api.include_router(reviews_router.router)
 api.include_router(services_router.router)
+api.include_router(webinars_router.router)
 
 if config.MOCK_SERVICES:
     api.include_router(dev_router.router)

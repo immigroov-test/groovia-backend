@@ -306,3 +306,77 @@ def deactivate_mentor(user: AuthUser = Depends(get_current_user)):
     except ValueError:
         raise HTTPException(status_code=404, detail="Mentor not found")
     return {"deactivated": True}
+
+
+# ── Webinars (mentor self-service) ────────────────────────────────────────────
+# Ownership is enforced here, not in the RPC — immigroov's create_webinar/
+# cancel_webinar/mentor_webinars/webinar_registrants trust whatever
+# p_mentor_id/p_webinar_id is passed with no server-side check at all. Every
+# endpoint below resolves the caller's own mentor row from their JWT first.
+
+class CreateWebinarBody(BaseModel):
+    title: str
+    description: Optional[str] = None
+    start_time: str
+    duration: int = 60
+    capacity: Optional[int] = None
+    visibility: str = "public"
+
+    @field_validator("visibility")
+    @classmethod
+    def validate_visibility(cls, v: str) -> str:
+        if v not in ("public", "invite"):
+            raise ValueError("visibility must be 'public' or 'invite'")
+        return v
+
+
+@router.get("/webinars")
+def list_my_webinars(user: AuthUser = Depends(get_current_user)):
+    mentor = db.get_mentor_by_profile_id(user.id)
+    if not mentor:
+        raise HTTPException(status_code=404, detail="No mentor profile for this account")
+    return db.mentor_webinars(mentor["id"])
+
+
+@router.post("/webinars")
+def create_my_webinar(body: CreateWebinarBody, user: AuthUser = Depends(get_current_user)):
+    mentor = db.get_mentor_by_profile_id(user.id)
+    if not mentor:
+        raise HTTPException(status_code=404, detail="No mentor profile for this account")
+    try:
+        webinar_id = db.create_webinar(
+            mentor["id"], body.title, body.description, body.start_time,
+            duration=body.duration, capacity=body.capacity, visibility=body.visibility,
+        )
+        return {"id": webinar_id}
+    except Exception as e:
+        msg = str(e)
+        if "required" in msg.lower() or "must be in the future" in msg.lower():
+            raise HTTPException(status_code=400, detail=msg)
+        logger.exception("create_webinar failed mentor=%s", mentor["id"])
+        raise HTTPException(status_code=500, detail="Failed to create webinar")
+
+
+def _require_own_webinar(user: AuthUser, webinar_id: str) -> dict:
+    mentor = db.get_mentor_by_profile_id(user.id)
+    if not mentor:
+        raise HTTPException(status_code=404, detail="No mentor profile for this account")
+    owner_id = db.get_webinar_mentor_id(webinar_id)
+    if owner_id is None:
+        raise HTTPException(status_code=404, detail="Webinar not found")
+    if owner_id != mentor["id"]:
+        raise HTTPException(status_code=403, detail="You do not own this webinar")
+    return mentor
+
+
+@router.post("/webinars/{webinar_id}/cancel")
+def cancel_my_webinar(webinar_id: str, user: AuthUser = Depends(get_current_user)):
+    _require_own_webinar(user, webinar_id)
+    db.cancel_webinar(webinar_id)
+    return {"cancelled": True}
+
+
+@router.get("/webinars/{webinar_id}/registrants")
+def my_webinar_registrants(webinar_id: str, user: AuthUser = Depends(get_current_user)):
+    _require_own_webinar(user, webinar_id)
+    return db.webinar_registrants(webinar_id)

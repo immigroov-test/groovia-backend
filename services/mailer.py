@@ -461,6 +461,41 @@ def _booking_admin_notice(d: dict) -> tuple[str, str]:
     return f"[Admin] {title}: {candidate} × {mentor}", _base(body)
 
 
+def _webinar_registered(d: dict) -> tuple[str, str]:
+    title = d.get("webinar_title", "")
+    name = _e(d.get("recipient_name", "") or "there")
+    url = d.get("room_url", "")
+    body = (
+        f'<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">You\'re registered: {_e(title)}</h1>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {name},</p>'
+        '<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
+        f"You're registered for <strong>{_e(title)}</strong>. We'll send reminders 1 day and 1 hour before it starts."
+        "</p>"
+        + _info_row("Date & Time", d.get("start_time", ""))
+        + (_btn(url, "Join link") if url else "")
+    )
+    return f"You're registered: {title}", _base(body)
+
+
+def _webinar_reminder(d: dict) -> tuple[str, str]:
+    title = d.get("webinar_title", "")
+    stage = d.get("stage", "1h")
+    name = _e(d.get("recipient_name", "") or "there")
+    url = d.get("room_url", "")
+    when = "tomorrow" if stage == "1d" else "in about an hour"
+    heading = f"Tomorrow: {title}" if stage == "1d" else f"Starting soon: {title}"
+    body = (
+        f'<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">{_e(heading)}</h1>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {name},</p>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
+        f"Your webinar <strong>{_e(title)}</strong> is {when}."
+        "</p>"
+        + _info_row("Date & Time", d.get("start_time", ""))
+        + (_btn(url, "Join link") if url else "")
+    )
+    return heading, _base(body)
+
+
 _TEMPLATES = {
     "booking_admin_notice": _booking_admin_notice,
     "mentor_application_received": _mentor_application_received,
@@ -481,6 +516,8 @@ _TEMPLATES = {
     "reschedule_requested": _reschedule_requested,
     "cancel_requested": _cancel_requested,
     "no_show_reported": _no_show_reported,
+    "webinar_registered": _webinar_registered,
+    "webinar_reminder": _webinar_reminder,
 }
 
 

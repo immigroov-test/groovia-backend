@@ -6,6 +6,7 @@ from .pricing import *
 from .payments import *
 from .reviews import *
 from .referrals import *
+from .webinars import *
 
 
 def client():
