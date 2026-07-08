@@ -1319,9 +1319,18 @@ GRANT EXECUTE ON FUNCTION is_valid_timezone(TEXT) TO anon, authenticated;
 -- the frozen business spec. Price-level factors (US = 1.00). PPP only applies
 -- to services where the mentor enabled is_ppp.
 -- ============================================================================
+-- factor has NO upper-bound CHECK — immigroov's own source (0023_ppp_pricing.sql)
+-- has no constraint on this column at all, and its seed data includes
+-- higher-cost-of-living countries priced ABOVE the US baseline (NO=1.05,
+-- CH=1.15), which a `factor <= 1` constraint (added during an earlier pass
+-- of this port, not part of the source) would reject outright — confirmed
+-- the hard way: applying this migration against a live database failed on
+-- exactly that seed row before this fix. `factor > 0` is kept as a sane
+-- floor (a non-positive multiplier is never valid), not something the
+-- source enforces either, but it doesn't contradict any actual data.
 CREATE TABLE IF NOT EXISTS ppp_factors (
   country_code  CHAR(2)      PRIMARY KEY,
-  factor        NUMERIC(5,4) NOT NULL CHECK (factor > 0 AND factor <= 1),
+  factor        NUMERIC(5,4) NOT NULL CHECK (factor > 0),
   updated_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
 
@@ -1563,7 +1572,7 @@ RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE v_snap JSONB; v_hash TEXT; v_id UUID; v_exp TIMESTAMPTZ;
 BEGIN
   v_snap := compute_booking_price(p_service_id, p_customer_country);
-  v_hash := encode(digest(v_snap::text, 'sha256'), 'hex');
+  v_hash := encode(extensions.digest(v_snap::text, 'sha256'), 'hex');
   INSERT INTO pricing_quotes(service_id, mentor_id, customer_country, customer_currency,
       pricing_version, ppp_version, fx_provider, snapshot, pricing_hash)
     VALUES (p_service_id, (v_snap->>'mentor_id')::uuid, UPPER(COALESCE(p_customer_country, '')),
@@ -3766,7 +3775,7 @@ DECLARE
   v_hash TEXT; v_click_affiliate UUID; v_code_affiliate UUID; v_window_days INT;
   v_existing attribution_records;
 BEGIN
-  v_hash := encode(digest(LOWER(TRIM(p_email)), 'sha256'), 'hex');
+  v_hash := encode(extensions.digest(LOWER(TRIM(p_email)), 'sha256'), 'hex');
   v_window_days := COALESCE(referral_setting('referral_attribution_window_days')::int, 60);
   SELECT * INTO v_existing FROM attribution_records WHERE email_hash = v_hash;
 
@@ -3808,7 +3817,7 @@ DECLARE v_email TEXT; v_hash TEXT;
 BEGIN
   v_email := referral_email_for_booking(p_booking_id);
   IF v_email IS NULL THEN RETURN; END IF;
-  v_hash := encode(digest(LOWER(TRIM(v_email)), 'sha256'), 'hex');
+  v_hash := encode(extensions.digest(LOWER(TRIM(v_email)), 'sha256'), 'hex');
   UPDATE attribution_records SET frozen = TRUE, frozen_at = NOW() WHERE email_hash = v_hash AND NOT frozen;
 END;
 $$;
@@ -3822,7 +3831,7 @@ DECLARE v_email TEXT; v_hash TEXT;
 BEGIN
   v_email := referral_email_for_booking(p_booking_id);
   IF v_email IS NULL THEN RETURN; END IF;
-  v_hash := encode(digest(LOWER(TRIM(v_email)), 'sha256'), 'hex');
+  v_hash := encode(extensions.digest(LOWER(TRIM(v_email)), 'sha256'), 'hex');
   UPDATE attribution_records
     SET frozen = FALSE, expires_at = expires_at + (NOW() - frozen_at), frozen_at = NULL
     WHERE email_hash = v_hash AND frozen;
@@ -3921,7 +3930,7 @@ BEGIN
   -- Code redemption speed (only relevant if this referral came from a code;
   -- inactive unless referral_code_speed_high_value_inr is set).
   v_email := referral_email_for_booking(cl.booking_id);
-  v_hash := encode(digest(LOWER(TRIM(v_email)), 'sha256'), 'hex');
+  v_hash := encode(extensions.digest(LOWER(TRIM(v_email)), 'sha256'), 'hex');
   SELECT * INTO v_att FROM attribution_records WHERE email_hash = v_hash;
   IF v_att.source_type = 'code' THEN
     SELECT * INTO v_code FROM referral_codes WHERE affiliate_id = cl.affiliate_id;
@@ -3967,7 +3976,7 @@ BEGIN
   LOOP
     v_email := r.candidate_email;
     IF v_email IS NULL THEN CONTINUE; END IF;
-    v_hash := encode(digest(LOWER(TRIM(v_email)), 'sha256'), 'hex');
+    v_hash := encode(extensions.digest(LOWER(TRIM(v_email)), 'sha256'), 'hex');
 
     SELECT * INTO v_att FROM attribution_records WHERE email_hash = v_hash;
     IF NOT FOUND OR v_att.affiliate_id IS NULL OR v_att.frozen
