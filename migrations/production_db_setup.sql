@@ -1373,6 +1373,11 @@ ALTER TABLE bookings ADD COLUMN IF NOT EXISTS no_show_by TEXT;          -- 'ment
 ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS no_show_strikes INT NOT NULL DEFAULT 0;
 ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS last_no_show_at TIMESTAMPTZ;
 ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS rejection_reason TEXT;   -- admin's note shown to a rejected mentor
+-- Profile-change review for APPROVED mentors: the proposed edit is held here while the live
+-- mentors row stays visible/bookable. On approval the backend applies these to the live
+-- columns and clears them; on reject it just clears them. NULL = no revision awaiting review.
+ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS pending_changes JSONB;
+ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS pending_submitted_at TIMESTAMPTZ;
 ALTER TABLE reschedule_offers ADD COLUMN IF NOT EXISTS was_late BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE reschedule_offers ADD COLUMN IF NOT EXISTS respond_by TIMESTAMPTZ;
 

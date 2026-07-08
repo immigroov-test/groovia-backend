@@ -47,6 +47,10 @@ WHERE profile_id IS NULL
 --     auto-linked to a seed mentor such as "Maya Singh". Mail still lands in your inbox.
 UPDATE mentors SET email = 'yokeshd1999+seed@gmail.com' WHERE profile_id IS NULL;
 
+-- 4c. Clear any pending profile-change revisions so mentors start with no edit under review.
+UPDATE mentors SET pending_changes = NULL, pending_submitted_at = NULL
+WHERE pending_changes IS NOT NULL OR pending_submitted_at IS NOT NULL;
+
 -- 5. Clear LangGraph checkpoint tables (created by AsyncPostgresSaver)
 DO $$ BEGIN
   IF to_regclass('public.checkpoints') IS NOT NULL THEN
