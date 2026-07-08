@@ -79,6 +79,15 @@ def confirm_booking_payment(booking_id: str, provider_ref: str) -> str:
     return res.data
 
 
+def expire_stale_holds() -> int:
+    """Release payment holds whose 10-min window lapsed (bookings.status
+    'pending' -> 'cancelled', customer_payments.state 'created' -> 'failed').
+    Ports immigroov's expire_stale_holds (cron 'expire-payment-holds', every
+    minute) — service-role only, same as the source. Returns rows affected."""
+    res = _supabase.rpc("expire_stale_holds", {}).execute()
+    return res.data or 0
+
+
 def set_provider_order(booking_id: str, order_id: str) -> None:
     _supabase.rpc("set_provider_order", {"p_booking_id": booking_id, "p_order_id": order_id}).execute()
 

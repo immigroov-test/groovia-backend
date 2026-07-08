@@ -439,6 +439,21 @@ def send_webinar_reminders(user: AuthUser = Depends(require_admin)):
     return {"emails_sent": sent, "webinars_marked": len(marked)}
 
 
+@router.post("/payments/expire-holds")
+def expire_payment_holds(user: AuthUser = Depends(require_admin)):
+    """Admin-triggered stand-in for immigroov's pg_cron `expire-payment-holds`
+    job (every minute). Without this running, an abandoned checkout's 10-min
+    hold never releases — the slot stays blocked forever (bookings_no_overlap)
+    and the orphaned payment row never flips to 'failed'. Same stand-in
+    pattern as /admin/fx/refresh above; needs a real per-minute scheduler."""
+    try:
+        count = db.expire_stale_holds()
+        return {"holds_expired": count}
+    except Exception as e:
+        logger.exception("expire_stale_holds failed")
+        raise HTTPException(status_code=502, detail=f"Failed to expire stale holds: {e}")
+
+
 @router.post("/fx/refresh")
 def refresh_fx_rates(user: AuthUser = Depends(require_admin)):
     """Admin-triggered stand-in for immigroov's pg_cron `fx-refresh-6h` job.

@@ -2370,6 +2370,29 @@ END;
 $$;
 REVOKE ALL ON FUNCTION confirm_booking_payment(UUID, TEXT) FROM PUBLIC, anon, authenticated;
 
+-- Ports immigroov's expire_stale_holds (0069) — the janitor for reserve_booking's
+-- 10-min payment hold. Without something calling this, a 'pending' hold whose
+-- payer never completes checkout occupies the slot forever (bookings_no_overlap
+-- blocks every other customer from that slot indefinitely) and the orphaned
+-- customer_payments row sits at 'created' forever instead of 'failed'. Service-role
+-- only, same as the source — never grant to anon/authenticated.
+CREATE OR REPLACE FUNCTION expire_stale_holds()
+RETURNS INT LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_count INT;
+BEGIN
+  WITH expired AS (
+    UPDATE bookings SET status = 'cancelled', payment_hold_expires_at = NULL
+     WHERE status = 'pending' AND payment_hold_expires_at IS NOT NULL AND payment_hold_expires_at < NOW()
+     RETURNING id
+  )
+  UPDATE customer_payments cp SET state = 'failed'
+   FROM expired e WHERE cp.booking_id = e.id AND cp.state = 'created';
+  GET DIAGNOSTICS v_count = ROW_COUNT;
+  RETURN v_count;
+END;
+$$;
+REVOKE ALL ON FUNCTION expire_stale_holds() FROM PUBLIC, anon, authenticated;
+
 -- ── 5. Cancel flow (REPLACES the old block-on-late cancel_booking) ────────────
 -- >=24h: cancelled immediately · 2–24h (user): opens a cancel request for mentor
 -- approval · <2h: blocked. Mentor cancel is always allowed (>=2h) and is free
