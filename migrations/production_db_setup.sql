@@ -2431,6 +2431,9 @@ BEGIN
   UPDATE booking_requests SET status = 'withdrawn', resolved_at = NOW()
     WHERE booking_id = p_booking_id AND status = 'pending';
   PERFORM notify_booking_event(p_booking_id, 'no_show');
+  IF p_no_show_party = 'mentor' THEN
+    PERFORM freeze_referral_attribution(p_booking_id);  -- referral system hook (immigroov 0078)
+  END IF;
   RETURN b;
 END;
 $$;
@@ -2458,6 +2461,7 @@ BEGIN
   ELSE
     RAISE EXCEPTION 'Unknown choice %', p_choice;
   END IF;
+  PERFORM unfreeze_referral_attribution(p_booking_id);  -- referral system hook (immigroov 0078); fires for all 3 choices
   RETURN b;
 END;
 $$;
@@ -3276,3 +3280,109 @@ RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $
   END;
 $$;
 GRANT EXECUTE ON FUNCTION validate_referral_code(TEXT) TO anon, authenticated;
+
+-- ── 8. Attribution pipeline (click -> durable per-email record) ────────────
+-- Ported from immigroov's 0078 (base logic) reconciled with 0098 (email
+-- hooks). The email hooks themselves are NOT ported — immigroov sends them
+-- via pg_net (app_send_email) directly from SQL; groovia has no SQL-side
+-- HTTP capability. Same gap as the Reviews module's review-request email:
+-- flagged, not silently dropped. The FastAPI layer (Referral 8 commit) can
+-- send the "referral tracked" email as a BackgroundTask after calling
+-- resolve_referral_attribution, since that call always happens inside a real
+-- request (confirm_booking_payment / confirm-mock), unlike the cron-driven
+-- review-token case. "Commission approved" (from run_referral_fraud_checks)
+-- has no such request context — it fires from process_referral_commissions,
+-- a cron job — so that one has the same architecture gap as the review
+-- nudge email and is deferred the same way.
+
+CREATE OR REPLACE FUNCTION log_referral_click(p_slug TEXT, p_session_token TEXT)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_affiliate_id UUID;
+BEGIN
+  SELECT affiliate_id INTO v_affiliate_id FROM affiliate_links WHERE slug = LOWER(TRIM(p_slug));
+  IF NOT FOUND THEN RETURN; END IF;  -- unknown slug: fail silently, don't break the visitor's page load
+  INSERT INTO referral_click_events (affiliate_id, session_token) VALUES (v_affiliate_id, p_session_token);
+END;
+$$;
+GRANT EXECUTE ON FUNCTION log_referral_click(TEXT, TEXT) TO anon, authenticated;
+
+CREATE OR REPLACE FUNCTION referral_email_for_booking(p_booking_id UUID)
+RETURNS TEXT LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT COALESCE(b.candidate_email, p.email)
+  FROM bookings b LEFT JOIN profiles p ON p.id = b.candidate_id
+  WHERE b.id = p_booking_id;
+$$;
+
+-- Called at checkout. Precedence: a code entered THIS checkout always wins;
+-- otherwise a link click logged against THIS session overwrites any prior
+-- attribution; if neither happened this checkout, whatever attribution
+-- already existed for this email is left as-is (this is what makes
+-- "return via a later generic link" a no-op).
+CREATE OR REPLACE FUNCTION resolve_referral_attribution(p_session_token TEXT, p_email TEXT, p_code TEXT DEFAULT NULL)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_hash TEXT; v_click_affiliate UUID; v_code_affiliate UUID; v_window_days INT;
+  v_existing attribution_records;
+BEGIN
+  v_hash := encode(digest(LOWER(TRIM(p_email)), 'sha256'), 'hex');
+  v_window_days := COALESCE(referral_setting('referral_attribution_window_days')::int, 60);
+  SELECT * INTO v_existing FROM attribution_records WHERE email_hash = v_hash;
+
+  IF p_code IS NOT NULL AND TRIM(p_code) <> '' THEN
+    SELECT affiliate_id INTO v_code_affiliate FROM referral_codes
+      WHERE code_string = UPPER(TRIM(p_code)) AND expires_at > NOW() AND redemption_count < redemption_cap;
+  END IF;
+
+  SELECT affiliate_id INTO v_click_affiliate FROM referral_click_events
+    WHERE session_token = p_session_token ORDER BY clicked_at DESC LIMIT 1;
+
+  IF v_existing.frozen THEN
+    RETURN;  -- a no-show rebooking decision is pending for this customer — leave attribution untouched
+  END IF;
+
+  IF v_code_affiliate IS NOT NULL THEN
+    INSERT INTO attribution_records (email_hash, affiliate_id, source_type, created_at, expires_at)
+      VALUES (v_hash, v_code_affiliate, 'code', NOW(), NOW() + (v_window_days || ' days')::interval)
+      ON CONFLICT (email_hash) DO UPDATE SET
+        affiliate_id = EXCLUDED.affiliate_id, source_type = 'code',
+        created_at = NOW(), expires_at = NOW() + (v_window_days || ' days')::interval, updated_at = NOW();
+    UPDATE referral_codes SET redemption_count = redemption_count + 1 WHERE affiliate_id = v_code_affiliate;
+  ELSIF v_click_affiliate IS NOT NULL THEN
+    INSERT INTO attribution_records (email_hash, affiliate_id, source_type, created_at, expires_at)
+      VALUES (v_hash, v_click_affiliate, 'link', NOW(), NOW() + (v_window_days || ' days')::interval)
+      ON CONFLICT (email_hash) DO UPDATE SET
+        affiliate_id = EXCLUDED.affiliate_id, source_type = 'link',
+        created_at = NOW(), expires_at = NOW() + (v_window_days || ' days')::interval, updated_at = NOW();
+  END IF;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION resolve_referral_attribution(TEXT, TEXT, TEXT) TO authenticated, service_role;
+
+-- Freezes the 60-day (default) clock the moment a mentor no-show is logged
+-- against a referred booking. Called from flag_no_show below.
+CREATE OR REPLACE FUNCTION freeze_referral_attribution(p_booking_id UUID)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_email TEXT; v_hash TEXT;
+BEGIN
+  v_email := referral_email_for_booking(p_booking_id);
+  IF v_email IS NULL THEN RETURN; END IF;
+  v_hash := encode(digest(LOWER(TRIM(v_email)), 'sha256'), 'hex');
+  UPDATE attribution_records SET frozen = TRUE, frozen_at = NOW() WHERE email_hash = v_hash AND NOT frozen;
+END;
+$$;
+
+-- Unfreezes once a rebooking decision is made, extending expires_at by
+-- however long it sat frozen so the customer doesn't lose attribution time
+-- to the wait.
+CREATE OR REPLACE FUNCTION unfreeze_referral_attribution(p_booking_id UUID)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_email TEXT; v_hash TEXT;
+BEGIN
+  v_email := referral_email_for_booking(p_booking_id);
+  IF v_email IS NULL THEN RETURN; END IF;
+  v_hash := encode(digest(LOWER(TRIM(v_email)), 'sha256'), 'hex');
+  UPDATE attribution_records
+    SET frozen = FALSE, expires_at = expires_at + (NOW() - frozen_at), frozen_at = NULL
+    WHERE email_hash = v_hash AND frozen;
+END;
+$$;
