@@ -68,6 +68,51 @@ services:
       - key: ADMIN_EMAIL
         sync: false           # ops inbox copied on booking/reschedule/cancel (e.g. yokeshmd99@gmail.com)
 
+  # ── Scheduler (production) ───────────────────────────────────────────────────
+  # Fires jobs/run_due.py — see INFRASTRUCTURE_ARCHITECTURE_PLAN.md §3 for why
+  # this is ONE Render Cron Job (not one per task) and DISPATCHER_SAFETY_CHECKLIST.md
+  # for why every job it registers is safe to run on a shared 5-minute tick.
+  # Needs the full same env as groovia-api (config.py's fail-fast boot check
+  # requires it even though the dispatcher itself only touches Supabase/Resend/
+  # Razorpay) — duplicated below rather than shared via an env group, matching
+  # this file's existing prod/staging convention.
+  - type: cron
+    name: groovia-scheduler
+    runtime: docker
+    plan: starter
+    region: frankfurt
+    branch: main
+    dockerfilePath: ./Dockerfile
+    dockerCommand: python -m jobs.run_due
+    schedule: "*/5 * * * *"    # every 5 min — see architecture plan §3a for the timing justification
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: EXA_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: RESEND_API_KEY
+        sync: false
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: RAZORPAY_KEY_ID
+        sync: false
+      - key: RAZORPAY_KEY_SECRET
+        sync: false
+      - key: RAZORPAY_WEBHOOK_SECRET
+        sync: false
+      - key: FRONTEND_URL
+        sync: false           # used in reminder/reference email links (CORS_ORIGINS not needed — no HTTP server here)
+
   # ── Staging (tracks `staging` branch) ────────────────────────────────────────
   # Point ALL Supabase secrets below at the SEPARATE staging Supabase project,
   # and CORS_ORIGINS / FRONTEND_URL at the staging Vercel URL. See STAGING_SETUP.md.
@@ -131,3 +176,43 @@ services:
         sync: false           # ops inbox copied on booking/reschedule/cancel (e.g. yokeshmd99@gmail.com)
       - key: MOCK_SERVICES
         value: "false"        # set "true" to mock Resend/webhooks on staging instead
+
+  # ── Scheduler (staging) ──────────────────────────────────────────────────────
+  - type: cron
+    name: groovia-scheduler-staging
+    runtime: docker
+    plan: starter
+    region: frankfurt
+    branch: staging
+    dockerfilePath: ./Dockerfile
+    dockerCommand: python -m jobs.run_due
+    schedule: "*/5 * * * *"
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: EXA_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false           # staging Supabase project URL
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false           # staging Supabase service role key
+      - key: SUPABASE_JWT_SECRET
+        sync: false           # staging Supabase JWT secret
+      - key: DATABASE_URL
+        sync: false           # staging Supabase SESSION pooler URI
+      - key: RESEND_API_KEY
+        sync: false
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: RAZORPAY_KEY_ID
+        sync: false
+      - key: RAZORPAY_KEY_SECRET
+        sync: false
+      - key: RAZORPAY_WEBHOOK_SECRET
+        sync: false
+      - key: FRONTEND_URL
+        sync: false           # no HTTP server here, so CORS_ORIGINS isn't needed
+      - key: MOCK_SERVICES
+        value: "false"        # keep in sync with groovia-api-staging above
