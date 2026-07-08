@@ -2951,3 +2951,186 @@ BEGIN
 END;
 $$;
 GRANT EXECUTE ON FUNCTION admin_moderate_review(UUID, TEXT, UUID) TO authenticated;
+
+
+-- ###########################################################################
+-- Referral / affiliate commission system — ported from immigroov's
+-- 0078_referral_system.sql (main build-out) + fix-up migrations 0084, 0085,
+-- 0086 (checkout wiring — booking columns only, functions handled in a later
+-- commit), 0088, 0089-0091 (admin overview bugfixes), 0092-0098. The LATEST
+-- definition of every function/table is what's ported — e.g. commission_ledger
+-- amounts include the 0093 FX-conversion fix and process_referral_commissions
+-- includes the 0096 booking-matching fix, from the start, not as a later patch.
+--
+-- immigroov's ORIGINAL referral_links table (0001_initial_schema.sql:
+-- referrer_mentor_id, referred_user_id, type) is confirmed dead — nothing in
+-- 0078+ reads or writes it. NOT ported; the tables below are an entirely
+-- parallel system, not an evolution of that one.
+--
+-- Naming adaptation (architecture, not business rule): immigroov's
+-- affiliates.user_id -> profile_id here, matching groovia's existing FK
+-- naming convention (mentors.profile_id, etc.) for a UUID reference to
+-- profiles(id). All UUID-vs-bigint PK adaptations follow the same pattern
+-- used in every prior module.
+-- ###########################################################################
+
+-- ── 1. Core affiliate identity ─────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS affiliates (
+  id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  profile_id         UUID NOT NULL UNIQUE REFERENCES profiles(id) ON DELETE CASCADE,
+  mentor_id          UUID REFERENCES mentors(id) ON DELETE SET NULL,
+  type               TEXT NOT NULL CHECK (type IN ('mentor', 'non_mentor')),
+  payout_details     JSONB,
+  audience_corridor  TEXT,
+  status             TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'frozen')),
+  agreed_terms_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT affiliates_mentor_type_chk CHECK (type <> 'mentor' OR mentor_id IS NOT NULL)
+);
+ALTER TABLE affiliates ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS affiliates_self_read ON affiliates;
+CREATE POLICY affiliates_self_read ON affiliates FOR SELECT USING (profile_id = auth.uid());
+
+CREATE TABLE IF NOT EXISTS affiliate_links (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  affiliate_id      UUID NOT NULL UNIQUE REFERENCES affiliates(id) ON DELETE CASCADE,
+  slug              TEXT NOT NULL UNIQUE,
+  is_house_channel  BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE affiliate_links ENABLE ROW LEVEL SECURITY;
+
+CREATE TABLE IF NOT EXISTS referral_codes (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  affiliate_id      UUID NOT NULL UNIQUE REFERENCES affiliates(id) ON DELETE CASCADE,
+  code_string       TEXT NOT NULL UNIQUE,
+  redemption_cap    INT NOT NULL,
+  expires_at        TIMESTAMPTZ NOT NULL,
+  redemption_count  INT NOT NULL DEFAULT 0,
+  discount_pct      NUMERIC NOT NULL DEFAULT 0,  -- added 0085: per-code customer discount
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE referral_codes ENABLE ROW LEVEL SECURITY;
+
+-- ── 2. Attribution pipeline (click -> durable per-email record) ────────────
+
+-- Stage 1: ephemeral click log, keyed by browser session token.
+CREATE TABLE IF NOT EXISTS referral_click_events (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  affiliate_id  UUID NOT NULL REFERENCES affiliates(id) ON DELETE CASCADE,
+  session_token TEXT NOT NULL,
+  clicked_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_referral_click_events_session ON referral_click_events(session_token, clicked_at DESC);
+ALTER TABLE referral_click_events ENABLE ROW LEVEL SECURITY;
+
+-- Stage 2: durable, email-keyed attribution. One active row per customer
+-- email — overwritten per the precedence rules in resolve_referral_attribution,
+-- not versioned.
+CREATE TABLE IF NOT EXISTS attribution_records (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  email_hash    TEXT NOT NULL UNIQUE,
+  affiliate_id  UUID REFERENCES affiliates(id) ON DELETE SET NULL,
+  source_type   TEXT NOT NULL CHECK (source_type IN ('link', 'code')),
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  expires_at    TIMESTAMPTZ NOT NULL,
+  frozen        BOOLEAN NOT NULL DEFAULT FALSE,  -- paused while a mentor no-show rebooking decision is pending
+  frozen_at     TIMESTAMPTZ,
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE attribution_records ENABLE ROW LEVEL SECURITY;  -- no select policies — internal (RPC-only), same masking as booking_ledger
+
+-- ── 3. Commission ledger + payout batching ──────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS commission_ledger (
+  id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  booking_id             UUID NOT NULL UNIQUE REFERENCES bookings(id) ON DELETE CASCADE,
+  session_completed_at   TIMESTAMPTZ NOT NULL,
+  mentor_id              UUID NOT NULL REFERENCES mentors(id) ON DELETE CASCADE,
+  affiliate_id           UUID NOT NULL REFERENCES affiliates(id) ON DELETE CASCADE,
+  split_snapshot         JSONB NOT NULL,  -- {mentor_pct, immigroov_pct, promoter_pct} at calculation time
+  commission_amount_inr  NUMERIC(12,2) NOT NULL,
+  status                 TEXT NOT NULL DEFAULT 'pending_review' CHECK (status IN ('pending_review', 'approved', 'paid')),
+  payout_batch_id        UUID,  -- FK added below, after payout_batches exists
+  created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE commission_ledger ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS commission_ledger_self_read ON commission_ledger;
+CREATE POLICY commission_ledger_self_read ON commission_ledger FOR SELECT USING (
+  affiliate_id IN (SELECT id FROM affiliates WHERE profile_id = auth.uid())
+);
+
+CREATE TABLE IF NOT EXISTS payout_batches (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  batch_date  DATE NOT NULL UNIQUE,
+  status      TEXT NOT NULL DEFAULT 'preview' CHECK (status IN ('preview', 'finalized')),
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE payout_batches ENABLE ROW LEVEL SECURITY;
+
+ALTER TABLE commission_ledger
+  ADD CONSTRAINT commission_ledger_payout_batch_fkey
+  FOREIGN KEY (payout_batch_id) REFERENCES payout_batches(id) ON DELETE SET NULL;
+
+-- ── 4. Fraud review + admin audit trail ─────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS fraud_flags (
+  id                          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  affiliate_id                UUID NOT NULL REFERENCES affiliates(id) ON DELETE CASCADE,
+  booking_id                  UUID REFERENCES bookings(id) ON DELETE SET NULL,
+  vector_type                 TEXT NOT NULL CHECK (vector_type IN (
+                                 'duplicate_person', 'volume_spike', 'geography_mismatch',
+                                 'code_speed', 'cancel_rebook_cycling', 'mentor_steering', 'chargeback'
+                               )),
+  status                      TEXT NOT NULL DEFAULT 'escalated' CHECK (status IN ('auto_cleared', 'escalated', 'resolved')),
+  reviewer                    UUID REFERENCES profiles(id),
+  decision                    TEXT CHECK (decision IN ('approve', 'approve_with_note', 'reject_and_hold')),
+  note                        TEXT,
+  created_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  resolved_at                 TIMESTAMPTZ,
+  escalated_to_cofounder_at   TIMESTAMPTZ
+);
+ALTER TABLE fraud_flags ENABLE ROW LEVEL SECURITY;  -- no select policies — admin RPCs only
+
+CREATE TABLE IF NOT EXISTS referral_admin_actions (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  action      TEXT NOT NULL,
+  target_type TEXT NOT NULL,
+  target_id   UUID NOT NULL,
+  note        TEXT NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE referral_admin_actions ENABLE ROW LEVEL SECURITY;
+
+-- ── 5. Booking + ledger schema additions ────────────────────────────────────
+
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS referral_session_token TEXT;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS referral_code TEXT;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS referral_discount_applied_pct NUMERIC;
+
+-- booking_ledger gains a 4th party ('promoter') and a 5th kind ('commission')
+-- for affiliate commission entries — same table Payments already uses, just
+-- a wider CHECK. Auto-generated constraint names (Postgres default naming
+-- for an unnamed column CHECK): <table>_<column>_check.
+ALTER TABLE booking_ledger DROP CONSTRAINT IF EXISTS booking_ledger_party_check;
+ALTER TABLE booking_ledger ADD CONSTRAINT booking_ledger_party_check
+  CHECK (party IN ('customer', 'mentor', 'platform', 'promoter'));
+ALTER TABLE booking_ledger DROP CONSTRAINT IF EXISTS booking_ledger_kind_check;
+ALTER TABLE booking_ledger ADD CONSTRAINT booking_ledger_kind_check
+  CHECK (kind IN ('penalty', 'refund', 'credit', 'charge', 'commission'));
+
+-- ── 6. Platform settings — all tunable, none hardcoded (immigroov's own design) ─
+
+INSERT INTO platform_settings (key, value, description) VALUES
+  ('referral_tier_starter_max', '4', 'Non-mentor affiliate: max referrals/month to stay Starter tier'),
+  ('referral_tier_growth_max', '14', 'Non-mentor affiliate: max referrals/month to stay Growth tier (above = Partner)'),
+  ('referral_volume_spike_autoapprove_multiplier', '3', 'Auto-approve today''s commission count up to this multiple of the 30-day daily average'),
+  ('referral_volume_spike_escalate_multiplier', '5', 'Escalate for manual review above this multiple of the 30-day daily average'),
+  ('referral_code_redemption_speed_minutes', '30', 'Minutes; a code used faster than this is a potential speed-fraud signal'),
+  ('referral_code_speed_high_value_inr', '', 'INR threshold above which fast code redemption escalates; empty = check inactive'),
+  ('referral_mentor_steering_threshold_pct', '', '% concentration to a single mentor; empty = dashboard-only, no auto-escalation'),
+  ('referral_manual_review_escalation_days', '5', 'Working days a flagged case can sit before auto-escalating to the co-founder'),
+  ('referral_attribution_window_days', '60', 'Days an attribution_records row stays valid before expiring'),
+  ('referral_payout_min_working_days', '5', 'Minimum working days after session completion before a commission is payout-eligible')
+ON CONFLICT (key) DO NOTHING;
