@@ -3605,3 +3605,238 @@ BEGIN
     WHERE email_hash = v_hash AND frozen;
 END;
 $$;
+
+-- ── 9. Commission calculator + fraud engine ─────────────────────────────────
+-- Ported from immigroov's 0078 (base) reconciled through 0084 (pct::int cast
+-- fix — applied from the start here, not as a later patch), 0093 (FX
+-- conversion fix — commission_amount_inr multiplies by fx_customer_inr, also
+-- applied from the start), 0096 (booking-matching fix — only bookings that
+-- themselves carry referral_code/referral_session_token are considered,
+-- preventing retroactive claims on unrelated older sessions).
+--
+-- Two vectors from immigroov's fraud engine are explicit no-ops there too,
+-- not something dropped in this port: self-referral via device/IP/payment
+-- fingerprint (no such data captured anywhere), and geography mismatch (no
+-- customer-geography column exists). Mentor-steering is deliberately
+-- informational-only (dashboard report, no auto-escalation) per the
+-- founder's original decision.
+--
+-- log_event(...) calls from the source are NOT ported — groovia has no
+-- audit-log mechanism of that shape (its own booking_events table is an
+-- email-outbox, a different thing entirely; see the Payments module's notes
+-- on this exact naming collision). Money-relevant state (commission_ledger,
+-- fraud_flags, booking_ledger) is unaffected; only the human-readable
+-- timeline entry is missing, same gap noted throughout every prior module.
+
+-- "Cannot advance a tier while flagged": the affiliate is held at whatever
+-- tier they'd already reached THIS month before their first active flag
+-- appeared — not reset to Starter. A flag never blocks tier progress already
+-- earned; it only stops further advancement.
+CREATE OR REPLACE FUNCTION current_affiliate_tier(p_affiliate_id UUID)
+RETURNS TEXT LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_type TEXT; v_starter_max INT; v_growth_max INT;
+  v_count_now INT; v_count_at_flag INT; v_first_flag_at TIMESTAMPTZ;
+  v_rank_now INT; v_rank_at_flag INT; v_rank INT;
+BEGIN
+  SELECT type INTO v_type FROM affiliates WHERE id = p_affiliate_id;
+  IF v_type = 'mentor' THEN RETURN 'flat_peer_rate'; END IF;  -- mentor-to-mentor referrals never tier
+
+  v_starter_max := COALESCE(referral_setting('referral_tier_starter_max')::int, 4);
+  v_growth_max := COALESCE(referral_setting('referral_tier_growth_max')::int, 14);
+
+  SELECT COUNT(*) INTO v_count_now FROM commission_ledger
+    WHERE affiliate_id = p_affiliate_id AND status IN ('approved', 'paid')
+      AND date_trunc('month', session_completed_at) = date_trunc('month', NOW());
+  v_rank_now := CASE WHEN v_count_now <= v_starter_max THEN 1 WHEN v_count_now <= v_growth_max THEN 2 ELSE 3 END;
+
+  SELECT MIN(created_at) INTO v_first_flag_at FROM fraud_flags
+    WHERE affiliate_id = p_affiliate_id AND status = 'escalated'
+      AND date_trunc('month', created_at) = date_trunc('month', NOW());
+
+  IF v_first_flag_at IS NULL THEN
+    v_rank := v_rank_now;  -- no active flag this month: free to advance normally
+  ELSE
+    SELECT COUNT(*) INTO v_count_at_flag FROM commission_ledger
+      WHERE affiliate_id = p_affiliate_id AND status IN ('approved', 'paid')
+        AND date_trunc('month', session_completed_at) = date_trunc('month', NOW())
+        AND created_at < v_first_flag_at;
+    v_rank_at_flag := CASE WHEN v_count_at_flag <= v_starter_max THEN 1 WHEN v_count_at_flag <= v_growth_max THEN 2 ELSE 3 END;
+    v_rank := LEAST(v_rank_now, v_rank_at_flag);  -- capped at the tier already reached before the flag
+  END IF;
+
+  RETURN CASE v_rank WHEN 1 THEN 'starter' WHEN 2 THEN 'growth' ELSE 'partner' END;
+END;
+$$;
+
+-- Deterministic fraud checks. If ANY vector fires, the ledger entry stays
+-- pending_review; if none do, it's auto-approved.
+CREATE OR REPLACE FUNCTION run_referral_fraud_checks(p_ledger_id UUID)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  cl commission_ledger;
+  v_avg30 NUMERIC; v_today_count INT; v_spike_escalate NUMERIC;
+  v_email TEXT; v_hash TEXT; v_att attribution_records; v_code referral_codes;
+  v_speed_minutes NUMERIC; v_speed_high_value NUMERIC;
+  v_flagged BOOLEAN := FALSE;
+BEGIN
+  SELECT * INTO cl FROM commission_ledger WHERE id = p_ledger_id;
+
+  -- Volume spike: today's count vs. the trailing 30-day daily average.
+  v_spike_escalate := referral_setting('referral_volume_spike_escalate_multiplier')::numeric;
+  SELECT COUNT(*) INTO v_today_count FROM commission_ledger
+    WHERE affiliate_id = cl.affiliate_id AND session_completed_at::date = cl.session_completed_at::date;
+  SELECT COUNT(*)::numeric / 30.0 INTO v_avg30 FROM commission_ledger
+    WHERE affiliate_id = cl.affiliate_id
+      AND session_completed_at >= cl.session_completed_at - INTERVAL '30 days'
+      AND session_completed_at < cl.session_completed_at;
+  IF v_avg30 > 0 AND v_today_count / v_avg30 > COALESCE(v_spike_escalate, 5) THEN
+    INSERT INTO fraud_flags (affiliate_id, booking_id, vector_type, status) VALUES (cl.affiliate_id, cl.booking_id, 'volume_spike', 'escalated');
+    v_flagged := TRUE;
+  END IF;
+
+  -- Code redemption speed (only relevant if this referral came from a code;
+  -- inactive unless referral_code_speed_high_value_inr is set).
+  v_email := referral_email_for_booking(cl.booking_id);
+  v_hash := encode(digest(LOWER(TRIM(v_email)), 'sha256'), 'hex');
+  SELECT * INTO v_att FROM attribution_records WHERE email_hash = v_hash;
+  IF v_att.source_type = 'code' THEN
+    SELECT * INTO v_code FROM referral_codes WHERE affiliate_id = cl.affiliate_id;
+    v_speed_minutes := COALESCE(referral_setting('referral_code_redemption_speed_minutes')::numeric, 30);
+    v_speed_high_value := NULLIF(referral_setting('referral_code_speed_high_value_inr'), '')::numeric;
+    IF v_speed_high_value IS NOT NULL
+       AND EXTRACT(EPOCH FROM (v_att.created_at - v_code.created_at)) / 60.0 <= v_speed_minutes
+       AND cl.commission_amount_inr > v_speed_high_value THEN
+      INSERT INTO fraud_flags (affiliate_id, booking_id, vector_type, status) VALUES (cl.affiliate_id, cl.booking_id, 'code_speed', 'escalated');
+      v_flagged := TRUE;
+    END IF;
+  END IF;
+
+  -- Cancel/rebook cycling — reuses the existing bookings.reschedule_count column.
+  IF (SELECT reschedule_count FROM bookings WHERE id = cl.booking_id) >= 3 THEN
+    INSERT INTO fraud_flags (affiliate_id, booking_id, vector_type, status) VALUES (cl.affiliate_id, cl.booking_id, 'cancel_rebook_cycling', 'escalated');
+    v_flagged := TRUE;
+  END IF;
+
+  IF NOT v_flagged THEN
+    UPDATE commission_ledger SET status = 'approved' WHERE id = p_ledger_id;
+    -- "Commission approved" email deferred — see the module-level note above.
+  END IF;
+END;
+$$;
+
+-- Runs on a schedule (cron block below), not on booking creation — the
+-- business rule is completion-only. Idempotent: only processes bookings
+-- that don't already have a commission_ledger row.
+CREATE OR REPLACE FUNCTION process_referral_commissions()
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  r RECORD;
+  v_email TEXT; v_hash TEXT; v_att attribution_records; v_aff affiliates;
+  v_gross NUMERIC; v_mentor_pct NUMERIC; v_immigroov_pct NUMERIC; v_promoter_pct NUMERIC;
+  v_tier TEXT; v_ledger_id UUID; v_already_had_session BOOLEAN;
+BEGIN
+  FOR r IN
+    SELECT b.* FROM bookings b
+    WHERE b.status = 'completed'
+      AND (b.referral_code IS NOT NULL OR b.referral_session_token IS NOT NULL)
+      AND NOT EXISTS (SELECT 1 FROM commission_ledger cl WHERE cl.booking_id = b.id)
+  LOOP
+    v_email := r.candidate_email;
+    IF v_email IS NULL THEN CONTINUE; END IF;
+    v_hash := encode(digest(LOWER(TRIM(v_email)), 'sha256'), 'hex');
+
+    SELECT * INTO v_att FROM attribution_records WHERE email_hash = v_hash;
+    IF NOT FOUND OR v_att.affiliate_id IS NULL OR v_att.frozen
+       OR v_att.expires_at < COALESCE(r.slot_end, r.slot_time, NOW()) THEN
+      CONTINUE;  -- organic, lapsed, or still awaiting a no-show decision — no ledger entry
+    END IF;
+
+    -- Referral credit applies to the customer's lifetime first paid session only.
+    SELECT EXISTS(
+      SELECT 1 FROM bookings b2
+      WHERE b2.id <> r.id AND b2.status = 'completed'
+        AND b2.candidate_email = v_email
+        AND b2.slot_time < r.slot_time
+    ) INTO v_already_had_session;
+    IF v_already_had_session THEN CONTINUE; END IF;
+
+    SELECT * INTO v_aff FROM affiliates WHERE id = v_att.affiliate_id;
+    IF v_aff.status <> 'active' THEN CONTINUE; END IF;
+
+    -- The founder's own house channel always pays 0% promoter fee — owned
+    -- marketing, not a paid acquisition channel. No commission_ledger row is
+    -- created (equivalent to organic for payout purposes; click/attribution
+    -- data is still captured for analytics).
+    IF v_att.source_type = 'link' AND EXISTS (
+      SELECT 1 FROM affiliate_links al WHERE al.affiliate_id = v_aff.id AND al.is_house_channel
+    ) THEN
+      CONTINUE;
+    END IF;
+
+    SELECT amount INTO v_gross FROM customer_payments WHERE booking_id = r.id ORDER BY created_at DESC LIMIT 1;
+    IF v_gross IS NULL THEN CONTINUE; END IF;
+
+    IF v_aff.mentor_id = r.mentor_id THEN
+      -- Self-referral: the promoter is the mentor who delivered the session.
+      v_mentor_pct := 90; v_immigroov_pct := 10; v_promoter_pct := 0;
+    ELSIF v_aff.type = 'mentor' THEN
+      -- Mentor-to-mentor peer referral — flat, never tiered.
+      v_mentor_pct := 70; v_immigroov_pct := 20; v_promoter_pct := 10;
+    ELSE
+      -- Non-mentor influencer — tiered by this-month completed-referral count.
+      v_tier := current_affiliate_tier(v_aff.id);
+      v_mentor_pct := 70;
+      CASE v_tier
+        WHEN 'growth'  THEN v_immigroov_pct := 19; v_promoter_pct := 11;
+        WHEN 'partner' THEN v_immigroov_pct := 15; v_promoter_pct := 15;
+        ELSE                v_immigroov_pct := 22; v_promoter_pct := 8;  -- starter, and the fraud-gated fallback
+      END CASE;
+    END IF;
+
+    INSERT INTO commission_ledger (booking_id, session_completed_at, mentor_id, affiliate_id, split_snapshot, commission_amount_inr, status)
+      VALUES (r.id, COALESCE(r.slot_end, NOW()), r.mentor_id, v_aff.id,
+              jsonb_build_object('mentor_pct', v_mentor_pct, 'immigroov_pct', v_immigroov_pct, 'promoter_pct', v_promoter_pct),
+              round(v_gross * COALESCE(r.fx_customer_inr, 1) * v_promoter_pct / 100.0, 2), 'pending_review')
+      RETURNING id INTO v_ledger_id;
+
+    IF v_promoter_pct > 0 THEN
+      PERFORM add_ledger(r.id, 'promoter', 'commission', round(v_gross * v_promoter_pct / 100.0, 2), v_promoter_pct::int,
+                          'Referral commission — affiliate #'||v_aff.id);
+    END IF;
+
+    PERFORM run_referral_fraud_checks(v_ledger_id);
+  END LOOP;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION escalate_stale_fraud_flags()
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_days INT;
+BEGIN
+  v_days := COALESCE(referral_setting('referral_manual_review_escalation_days')::int, 5);
+  UPDATE fraud_flags
+    SET escalated_to_cofounder_at = NOW()
+    WHERE status = 'escalated' AND escalated_to_cofounder_at IS NULL
+      AND created_at < NOW() - (v_days || ' days')::interval;
+END;
+$$;
+
+-- pg_cron schedules — same pattern as the existing resolve-requests/auto-complete
+-- jobs (guarded so the migration still succeeds where pg_cron isn't enabled).
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN
+    IF EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'referral-commissions') THEN
+      PERFORM cron.unschedule('referral-commissions');
+    END IF;
+    PERFORM cron.schedule('referral-commissions', '*/15 * * * *', 'SELECT process_referral_commissions()');
+
+    IF EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'referral-escalations') THEN
+      PERFORM cron.unschedule('referral-escalations');
+    END IF;
+    PERFORM cron.schedule('referral-escalations', '0 3 * * *', 'SELECT escalate_stale_fraud_flags()');
+  ELSE
+    RAISE NOTICE 'pg_cron not enabled — skipping referral cron schedules.';
+  END IF;
+END $$;
