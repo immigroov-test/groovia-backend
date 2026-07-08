@@ -1995,11 +1995,23 @@ GRANT EXECUTE ON FUNCTION booking_status(UUID) TO anon, authenticated;
 -- unlike immigroov's users table which book_session_guest could insert into
 -- freely. A guest who never signs up simply has candidate_id = NULL and their
 -- identity lives in candidate_email/candidate_name.
+-- Discount design (per immigroov's 0086_referral_checkout_wiring.sql):
+-- discount_pct lives on the referral_codes row (not a global setting), so
+-- each affiliate code carries its own predictable, fixed rate. Immigroov
+-- absorbs the discount: only the customer-facing figures (customer_payments,
+-- booking_pricing's informational gross/fee/net) are reduced. The mentor's
+-- actual payout basis (mentor_payouts) is UNTOUCHED — computed from the
+-- original quote snapshot exactly as before, so the mentor is paid in full
+-- regardless of any discount applied. redemption_count only increments at
+-- CONFIRMATION time (inside resolve_referral_attribution, called from
+-- confirm_booking_payment) — an abandoned, never-paid reservation must not
+-- consume a code's redemption cap.
 CREATE OR REPLACE FUNCTION reserve_booking(
   p_quote_id UUID, p_mentor_id UUID, p_service_id UUID, p_slot_time TIMESTAMPTZ,
   p_email TEXT, p_name TEXT DEFAULT NULL, p_timezone TEXT DEFAULT 'UTC',
   p_answers JSONB DEFAULT '[]', p_specific_availability_id UUID DEFAULT NULL,
-  p_candidate_id UUID DEFAULT NULL
+  p_candidate_id UUID DEFAULT NULL,
+  p_referral_session_token TEXT DEFAULT NULL, p_referral_code TEXT DEFAULT NULL
 ) RETURNS TABLE(booking_id UUID, amount NUMERIC, currency TEXT, hold_expires_at TIMESTAMPTZ)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE
@@ -2007,6 +2019,7 @@ DECLARE
   s JSONB;
   v_booking_id UUID;
   v_hold_expires_at TIMESTAMPTZ := NOW() + INTERVAL '10 minutes';
+  v_discount_pct NUMERIC := 0; v_gross NUMERIC; v_fee_amount NUMERIC; v_net_customer NUMERIC;
 BEGIN
   IF p_email IS NULL OR POSITION('@' IN p_email) = 0 THEN
     RAISE EXCEPTION 'A valid email is required';
@@ -2033,18 +2046,29 @@ BEGIN
 
   s := q.snapshot;  -- the binding contract; committed verbatim, no recompute
 
+  IF p_referral_code IS NOT NULL AND TRIM(p_referral_code) <> '' THEN
+    SELECT discount_pct INTO v_discount_pct FROM referral_codes
+      WHERE code_string = UPPER(TRIM(p_referral_code)) AND expires_at > NOW() AND redemption_count < redemption_cap;
+    v_discount_pct := COALESCE(v_discount_pct, 0);
+  END IF;
+  v_gross := ROUND((s->>'gross_customer')::numeric * (1 - v_discount_pct / 100.0), 2);
+  v_fee_amount := ROUND(v_gross * (s->>'fee_pct')::numeric / 100.0, 2);
+  v_net_customer := v_gross - v_fee_amount;
+
   BEGIN
     INSERT INTO bookings(
       mentor_id, candidate_id, candidate_email, candidate_name,
       service_id, slot_time, status, attendee_timezone,
       specific_availability_id, source,
-      customer_currency, fx_customer_inr, fx_mentor_inr, payment_hold_expires_at
+      customer_currency, fx_customer_inr, fx_mentor_inr, payment_hold_expires_at,
+      referral_session_token, referral_code, referral_discount_applied_pct
     ) VALUES (
       p_mentor_id, p_candidate_id, LOWER(p_email), p_name,
       p_service_id, p_slot_time, 'pending', p_timezone,
       p_specific_availability_id, 'direct',
       s->>'customer_currency', NULLIF((s->>'fx_customer_inr')::numeric, 0), NULLIF((s->>'fx_mentor_inr')::numeric, 0),
-      v_hold_expires_at
+      v_hold_expires_at,
+      NULLIF(TRIM(COALESCE(p_referral_session_token, '')), ''), NULLIF(TRIM(COALESCE(p_referral_code, '')), ''), v_discount_pct
     ) RETURNING id INTO v_booking_id;
   EXCEPTION WHEN exclusion_violation OR unique_violation THEN
     RAISE EXCEPTION 'That time was just taken — please choose another slot' USING errcode = 'P0001';
@@ -2056,12 +2080,10 @@ BEGIN
   WHERE a ? 'question_id' AND (a->>'answer_text') IS NOT NULL AND (a->>'answer_text') <> '';
 
   INSERT INTO customer_payments(booking_id, amount, currency, state)
-    VALUES (v_booking_id, (s->>'gross_customer')::numeric, UPPER(s->>'customer_currency'), 'created');
+    VALUES (v_booking_id, v_gross, UPPER(s->>'customer_currency'), 'created');
 
-  -- Mentor payout basis is computed from the quote snapshot exactly as at
-  -- quote time — no discount/referral logic exists yet to touch it (that's a
-  -- later module; when it lands, it must only reduce the customer-facing
-  -- figures, never this mentor payout basis — see immigroov's 0086 for why).
+  -- Mentor payout basis is computed from the ORIGINAL quote snapshot only —
+  -- the discount never reaches here (see the function-level note above).
   INSERT INTO mentor_payouts(
       mentor_id, booking_id, amount, gross_amount, fee_pct, platform_fee_amount,
       net_amount_customer_currency, net_amount_mentor_currency, exchange_rate_used,
@@ -2069,8 +2091,8 @@ BEGIN
     ) VALUES (
       p_mentor_id, v_booking_id,
       ROUND((s->>'set_price')::numeric * (s->>'ppp_multiplier')::numeric, 2),
-      (s->>'gross_customer')::numeric, (s->>'fee_pct')::numeric, (s->>'fee_amount')::numeric,
-      (s->>'net_customer')::numeric, (s->>'net_mentor')::numeric, (s->>'fx_mentor_customer')::numeric,
+      v_gross, (s->>'fee_pct')::numeric, v_fee_amount,
+      v_net_customer, (s->>'net_mentor')::numeric, (s->>'fx_mentor_customer')::numeric,
       UPPER(s->>'customer_currency'), s->>'mentor_currency', (s->>'ppp_multiplier')::numeric, 'pending'
     );
 
@@ -2083,22 +2105,23 @@ BEGIN
       v_booking_id, (s->>'pricing_version')::int, (s->>'ppp_version')::int, s->>'fx_provider',
       s->>'mentor_currency', s->>'customer_currency', (s->>'set_price')::numeric, (s->>'ppp_multiplier')::numeric,
       (s->>'fx_mentor_customer')::numeric, (s->>'fx_customer_inr')::numeric, (s->>'fx_mentor_inr')::numeric,
-      (s->>'gross_customer')::numeric, (s->>'fee_pct')::numeric, (s->>'fee_amount')::numeric,
-      (s->>'net_customer')::numeric, (s->>'net_mentor')::numeric
+      v_gross, (s->>'fee_pct')::numeric, v_fee_amount, v_net_customer, (s->>'net_mentor')::numeric
     );
 
   UPDATE pricing_quotes SET used = TRUE, booking_id = v_booking_id WHERE id = p_quote_id;  -- one-time use
 
-  RETURN QUERY SELECT v_booking_id, (s->>'gross_customer')::numeric, UPPER(s->>'customer_currency'), v_hold_expires_at;
+  RETURN QUERY SELECT v_booking_id, v_gross, UPPER(s->>'customer_currency'), v_hold_expires_at;
 END;
 $$;
-GRANT EXECUTE ON FUNCTION reserve_booking(UUID, UUID, UUID, TIMESTAMPTZ, TEXT, TEXT, TEXT, JSONB, UUID, UUID) TO anon, authenticated;
+GRANT EXECUTE ON FUNCTION reserve_booking(UUID, UUID, UUID, TIMESTAMPTZ, TEXT, TEXT, TEXT, JSONB, UUID, UUID, TEXT, TEXT) TO anon, authenticated;
 
 -- Finalize a payment hold into a confirmed booking. Idempotent (a webhook
 -- retry or a duplicate confirm call is a no-op once already confirmed).
 -- Guards against confirming a hold that already expired (the janitor / a
 -- reconciliation pass may have moved it on) — callers must treat HOLD_EXPIRED
--- as "issue a refund", not retry.
+-- as "issue a refund", not retry. Resolves referral attribution here (not in
+-- reserve_booking) so it fires exactly once, only for bookings that were
+-- genuinely paid — matching immigroov's confirm_booking_payment exactly.
 CREATE OR REPLACE FUNCTION confirm_booking_payment(p_booking_id UUID, p_provider_ref TEXT)
 RETURNS TEXT LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE b bookings;
@@ -2116,6 +2139,12 @@ BEGIN
     WHERE booking_id = p_booking_id AND state = 'created';
   UPDATE mentor_payouts SET method = COALESCE(method, 'manual'), payout_state = COALESCE(payout_state, 'pending')
     WHERE booking_id = p_booking_id;
+
+  IF b.referral_session_token IS NOT NULL OR b.referral_code IS NOT NULL THEN
+    IF b.candidate_email IS NOT NULL THEN
+      PERFORM resolve_referral_attribution(b.referral_session_token, b.candidate_email, b.referral_code);
+    END IF;
+  END IF;
 
   RETURN 'confirmed';
 END;
