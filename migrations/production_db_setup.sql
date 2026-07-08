@@ -1143,7 +1143,9 @@ CREATE OR REPLACE FUNCTION book_session(
   p_candidate_id             UUID     DEFAULT NULL
 ) RETURNS TABLE(booking_id UUID, status TEXT)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
-DECLARE v_booking_id UUID;
+DECLARE
+  v_booking_id UUID;
+  v_timezone TEXT := CASE WHEN is_valid_timezone(p_timezone) THEN p_timezone ELSE 'UTC' END;
 BEGIN
   IF NOT is_slot_available(p_mentor_id, p_service_id, p_slot_time) THEN
     RAISE EXCEPTION 'That time is not available — please choose another slot';
@@ -1159,7 +1161,7 @@ BEGIN
     specific_availability_id, source
   ) VALUES (
     p_mentor_id, p_candidate_id, LOWER(p_email), p_name,
-    p_service_id, p_slot_time, 'confirmed', p_timezone,
+    p_service_id, p_slot_time, 'confirmed', v_timezone,
     p_specific_availability_id, 'direct'
   ) RETURNING id INTO v_booking_id;
 
@@ -1311,6 +1313,40 @@ RETURNS BOOLEAN LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS
   SELECT EXISTS (SELECT 1 FROM pg_timezone_names WHERE name = p_tz);
 $$;
 GRANT EXECUTE ON FUNCTION is_valid_timezone(TEXT) TO anon, authenticated;
+
+-- Defense-in-depth, matching immigroov's own
+-- CHECK (customer_timezone is null or is_valid_timezone(customer_timezone))
+-- (0005_timezones_and_booking_actions.sql). reserve_booking/book_session
+-- validate p_timezone before insert (see their own comments), but this
+-- catches any other write path (present or future) that forgets to.
+-- mentors.timezone/app_timezone get the same guard: mentor signup/profile
+-- edit (routers/mentor.py) writes the client-supplied timezone string
+-- straight through with no validation, and app_timezone is what every
+-- display-formatting query in this file actually reads
+-- (COALESCE(m.app_timezone, 'UTC')) — the same crash-downstream risk as
+-- bookings.attendee_timezone, just lower-traffic (set once at onboarding
+-- rather than per booking).
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'bookings_attendee_timezone_check'
+  ) THEN
+    ALTER TABLE bookings ADD CONSTRAINT bookings_attendee_timezone_check
+      CHECK (attendee_timezone IS NULL OR is_valid_timezone(attendee_timezone));
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'mentors_timezone_check'
+  ) THEN
+    ALTER TABLE mentors ADD CONSTRAINT mentors_timezone_check
+      CHECK (is_valid_timezone(timezone));
+  END IF;
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint WHERE conname = 'mentors_app_timezone_check'
+  ) THEN
+    ALTER TABLE mentors ADD CONSTRAINT mentors_app_timezone_check
+      CHECK (app_timezone IS NULL OR is_valid_timezone(app_timezone));
+  END IF;
+END $$;
 
 -- ============================================================================
 -- ppp_factors  (Purchasing Power Parity price adjustments per country)
@@ -2066,6 +2102,16 @@ DECLARE
   v_booking_id UUID;
   v_hold_expires_at TIMESTAMPTZ := NOW() + INTERVAL '10 minutes';
   v_discount_pct NUMERIC := 0; v_gross NUMERIC; v_fee_amount NUMERIC; v_net_customer NUMERIC;
+  -- immigroov's own history (0021_book_session_timezone_fix.sql) documents
+  -- exactly this failure mode: an invalid/garbage timezone string accepted
+  -- at booking time, then hard-crashing later at display time
+  -- ("invalid input syntax for type ... / time zone not recognized" from
+  -- AT TIME ZONE) — reproduced live against a real database before this fix
+  -- landed. Every booking-creation RPC in the source validates with
+  -- is_valid_timezone() and falls back to UTC rather than trusting client
+  -- input; this port had dropped that guard even though is_valid_timezone()
+  -- itself was ported and sitting unused.
+  v_timezone TEXT := CASE WHEN is_valid_timezone(p_timezone) THEN p_timezone ELSE 'UTC' END;
 BEGIN
   IF p_email IS NULL OR POSITION('@' IN p_email) = 0 THEN
     RAISE EXCEPTION 'A valid email is required';
@@ -2110,7 +2156,7 @@ BEGIN
       referral_session_token, referral_code, referral_discount_applied_pct
     ) VALUES (
       p_mentor_id, p_candidate_id, LOWER(p_email), p_name,
-      p_service_id, p_slot_time, 'pending', p_timezone,
+      p_service_id, p_slot_time, 'pending', v_timezone,
       p_specific_availability_id, 'direct',
       s->>'customer_currency', NULLIF((s->>'fx_customer_inr')::numeric, 0), NULLIF((s->>'fx_mentor_inr')::numeric, 0),
       v_hold_expires_at,
