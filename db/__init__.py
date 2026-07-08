@@ -7,6 +7,7 @@ from .payments import *
 from .reviews import *
 from .referrals import *
 from .webinars import *
+from .reminders import *
 
 
 def client():

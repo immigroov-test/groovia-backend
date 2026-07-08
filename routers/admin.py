@@ -475,6 +475,37 @@ def verify_sweep(user: AuthUser = Depends(require_admin)):
         raise HTTPException(status_code=502, detail=f"Verify sweep failed: {e}")
 
 
+@router.post("/bookings/send-reminders")
+def send_customer_reminders(user: AuthUser = Depends(require_admin)):
+    """Admin-triggered stand-in for immigroov's pg_cron `reminders-24h` +
+    `reminders-1h` jobs. Both stages are claim-then-send from day one (see
+    db/reminders.py and DISPATCHER_SAFETY_CHECKLIST.md) — safe to call
+    repeatedly or concurrently; a booking already claimed for a stage in this
+    tick is simply absent from the next call's results. Primary trigger will
+    be the dispatcher once it exists (INFRASTRUCTURE_ARCHITECTURE_PLAN.md)."""
+    try:
+        stage_24h = db.send_customer_reminders_24h()
+        stage_1h = db.send_customer_reminders_1h()
+        return {"reminder_24h": stage_24h, "reminder_1h": stage_1h}
+    except Exception as e:
+        logger.exception("send_customer_reminders failed")
+        raise HTTPException(status_code=502, detail=f"Failed to send session reminders: {e}")
+
+
+@router.post("/bookings/send-mentor-reminders")
+def send_mentor_reminders(user: AuthUser = Depends(require_admin)):
+    """Admin-triggered stand-in for immigroov's pg_cron `mentor-reminders-1h` +
+    `mentor-reminders-10m` jobs. Same claim-then-send safety as
+    send_customer_reminders above."""
+    try:
+        stage_1h = db.send_mentor_reminders_1h()
+        stage_10m = db.send_mentor_reminders_10m()
+        return {"mentor_1h": stage_1h, "mentor_10m": stage_10m}
+    except Exception as e:
+        logger.exception("send_mentor_reminders failed")
+        raise HTTPException(status_code=502, detail=f"Failed to send mentor reminders: {e}")
+
+
 @router.post("/fx/refresh")
 def refresh_fx_rates(user: AuthUser = Depends(require_admin)):
     """Admin-triggered stand-in for immigroov's pg_cron `fx-refresh-6h` job.

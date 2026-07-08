@@ -277,6 +277,25 @@ def _session_reminder_1h(d: dict) -> tuple[str, str]:
     return f"Your session with {other} starts in 1 hour", _base(body)
 
 
+def _session_reminder_soon(d: dict) -> tuple[str, str]:
+    """Mentor-only 10-minute-out nudge (immigroov's mentor_10m). No 24h/1h
+    equivalent exists for this stage — see the founder's call in
+    0083_mentor_reminders.sql (mentors get closer-to-start reminders only,
+    since attendance depends on both parties joining)."""
+    recipient = _e(d.get("recipient_name", ""))
+    other = d.get("other_party_name", "your mentee")
+    url = d.get("meeting_url", "")
+    body = (
+        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Your session starts in about 10 minutes</h1>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {recipient},</p>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
+        f"Your session with <strong>{_e(other)}</strong> starts in about 10 minutes."
+        "</p>"
+        + (_btn(url, "Join meeting") if url else "")
+    )
+    return f"Your session with {other} starts in about 10 minutes", _base(body)
+
+
 def _review_request(d: dict) -> tuple[str, str]:
     candidate = _e(d.get("candidate_name", ""))
     mentor = d.get("mentor_name", "your mentor")
@@ -506,6 +525,7 @@ _TEMPLATES = {
     "booking_confirmed_mentor": _booking_confirmed_mentor,
     "session_reminder_24h": _session_reminder_24h,
     "session_reminder_1h": _session_reminder_1h,
+    "session_reminder_soon": _session_reminder_soon,
     "review_request": _review_request,
     "mentor_five_star_review": _mentor_five_star_review,
     "welcome_candidate": _welcome_candidate,

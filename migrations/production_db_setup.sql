@@ -2612,6 +2612,78 @@ BEGIN
 END;
 $$;
 
+-- Session reminder emails (immigroov: process_due_reminders / process_mentor_reminders,
+-- 4 pg_cron jobs — reminders-24h, reminders-1h, mentor-reminders-1h, mentor-reminders-10m).
+-- Sends email, so this is FastAPI/dispatcher-managed, not pg_cron — see
+-- INFRASTRUCTURE_ARCHITECTURE_PLAN.md §1. No scheduler exists yet; these back
+-- admin-triggerable endpoints only until the dispatcher lands.
+--
+-- Built claim-then-send from day one (not a retrofit): booking_reminders'
+-- existing UNIQUE(booking_id, kind) is used as the atomic claim, not just a
+-- post-send dedup record. The INSERT ... ON CONFLICT DO NOTHING ... RETURNING
+-- IS the claim — Postgres's row-level locking on that INSERT guarantees a
+-- given (booking, kind) is returned to at most one caller, so the FastAPI
+-- layer only sends for bookings this specific call actually claimed. This is
+-- the same pattern claim_due_webinar_reminders() uses, and the reason
+-- DISPATCHER_SAFETY_CHECKLIST.md classifies this job as safe-by-construction
+-- rather than "needs a fix before porting" — there is no separate mark step
+-- to forget.
+CREATE OR REPLACE FUNCTION claim_due_customer_reminders(p_kind TEXT, p_lo_minutes INT, p_hi_minutes INT)
+RETURNS TABLE(
+  booking_id UUID, email TEXT, first_name TEXT, slot_utc TIMESTAMPTZ,
+  customer_tz TEXT, other_party_name TEXT, meeting_url TEXT
+) LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  RETURN QUERY
+  WITH claimed AS (
+    INSERT INTO booking_reminders(booking_id, kind)
+    SELECT b.id, p_kind
+    FROM bookings b
+    WHERE b.status IN ('confirmed','rescheduled')
+      AND b.slot_time BETWEEN NOW() + (p_lo_minutes || ' minutes')::interval
+                           AND NOW() + (p_hi_minutes || ' minutes')::interval
+    ON CONFLICT (booking_id, kind) DO NOTHING
+    RETURNING booking_id
+  )
+  SELECT b.id, COALESCE(b.candidate_email, p.email), COALESCE(p.display_name, p.full_name, b.candidate_name),
+         b.slot_time, COALESCE(b.attendee_timezone, p.timezone, 'UTC'), m.display_name, b.meeting_url
+  FROM claimed c
+  JOIN bookings b ON b.id = c.booking_id
+  LEFT JOIN profiles p ON p.id = b.candidate_id
+  JOIN mentors m ON m.id = b.mentor_id
+  WHERE COALESCE(b.candidate_email, p.email) IS NOT NULL;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION claim_due_customer_reminders(TEXT, INT, INT) TO authenticated;
+
+CREATE OR REPLACE FUNCTION claim_due_mentor_reminders(p_kind TEXT, p_lo_minutes INT, p_hi_minutes INT)
+RETURNS TABLE(
+  booking_id UUID, email TEXT, first_name TEXT, slot_utc TIMESTAMPTZ,
+  mentor_tz TEXT, other_party_name TEXT, meeting_url TEXT
+) LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  RETURN QUERY
+  WITH claimed AS (
+    INSERT INTO booking_reminders(booking_id, kind)
+    SELECT b.id, p_kind
+    FROM bookings b
+    WHERE b.status IN ('confirmed','rescheduled')
+      AND b.slot_time BETWEEN NOW() + (p_lo_minutes || ' minutes')::interval
+                           AND NOW() + (p_hi_minutes || ' minutes')::interval
+    ON CONFLICT (booking_id, kind) DO NOTHING
+    RETURNING booking_id
+  )
+  SELECT b.id, COALESCE(p.email, m.email), COALESCE(p.display_name, p.full_name, m.display_name),
+         b.slot_time, COALESCE(m.app_timezone, 'UTC'), COALESCE(b.candidate_name, b.candidate_email), b.meeting_url
+  FROM claimed c
+  JOIN bookings b ON b.id = c.booking_id
+  JOIN mentors m ON m.id = b.mentor_id
+  LEFT JOIN profiles p ON p.id = m.profile_id
+  WHERE COALESCE(p.email, m.email) IS NOT NULL;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION claim_due_mentor_reminders(TEXT, INT, INT) TO authenticated;
+
 -- pg_cron schedules — guarded so the migration still succeeds where pg_cron is
 -- not enabled. Enable it in Supabase (Database → Extensions → pg_cron), then
 -- re-run just this block to activate the jobs.
