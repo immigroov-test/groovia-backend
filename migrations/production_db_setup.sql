@@ -3922,3 +3922,275 @@ BEGIN
 END;
 $$;
 GRANT EXECUTE ON FUNCTION affiliate_dashboard_summary(UUID) TO authenticated;
+
+-- ── 13. Admin financials: read-side reporting ───────────────────────────────
+-- Ported from immigroov's admin_payouts/admin_ledger/admin_booking_detail,
+-- reconciled through their full migration histories (admin_payouts: 0052 ->
+-- 0063 -> 0064 -> 0066 -> 0074 FINAL; admin_ledger: 0049 -> 0063 FINAL;
+-- admin_booking_detail: 0050 -> 0051 -> 0054 -> 0066 -> 0071 -> 0077 FINAL).
+-- mark_payout_paid / set_payout_blocked already exist (ported in the
+-- Payments module) — this module only adds the read-side reporting RPCs and
+-- wires the write-side ones up at the FastAPI layer.
+--
+-- Grant posture: immigroov's own migration comments repeatedly flag that
+-- these three read RPCs were left GRANTed to anon+authenticated in every
+-- migration reviewed — an acknowledged, never-fixed gap in the source. That
+-- is NOT reproduced here: every other admin_* RPC in this codebase (reviews
+-- moderation, referral admin, etc.) is GRANTed to authenticated only and
+-- gated by require_admin at the FastAPI layer — these three follow the same
+-- established posture rather than reintroducing a known security hole.
+--
+-- mentor_earnings_summary (materialized view) / mentor_earnings(p_mentor_id)
+-- are deliberately NOT ported as part of this module: the materialized view
+-- is never queried anywhere in immigroov's own admin UI and its refresh cron
+-- was never actually scheduled in the migrations reviewed (dead code); the
+-- live function, mentor_earnings(p_mentor_id), is mentor-facing (a future
+-- mentor earnings dashboard), not part of AdminManager.tsx's admin surface —
+-- out of scope for "Admin financials" as drawn by this module's own RPC
+-- boundary (admin_payouts/admin_ledger/admin_booking_detail/mark_payout_paid/
+-- set_payout_blocked). Flagged here, not silently dropped.
+
+-- Every payout-actionable booking (excludes pending/pending_payment/cancelled,
+-- same set immigroov's FINAL 0074 body filters to), newest first. Prefers the
+-- authoritative mentor_payouts snapshot; falls back to a computed figure only
+-- for the (here, theoretically unreachable — reserve_booking always writes a
+-- full mentor_payouts row) case where it's missing, matching immigroov's own
+-- defensive fallback design.
+CREATE OR REPLACE FUNCTION admin_payouts()
+RETURNS TABLE(
+  booking_id UUID, created_at TIMESTAMPTZ, status TEXT, slot_time TIMESTAMPTZ,
+  service_title TEXT, mentor_name TEXT, mentee_email TEXT,
+  gross NUMERIC, currency TEXT,
+  fee_pct NUMERIC, deduction NUMERIC, net_payout NUMERIC,
+  mentor_net NUMERIC, mentor_currency TEXT, fx_rate NUMERIC, ppp NUMERIC,
+  method TEXT, payout_status TEXT
+) LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT
+    b.id, b.created_at, b.status::text, b.slot_time,
+    s.title, m.display_name, b.candidate_email,
+    COALESCE(mp.gross_amount, cp.amount),
+    COALESCE(mp.customer_currency, cp.currency),
+    COALESCE(mp.fee_pct, fee.pct),
+    COALESCE(mp.platform_fee_amount, ROUND(cp.amount * fee.pct / 100.0, 2)),
+    COALESCE(mp.net_amount_customer_currency, ROUND(cp.amount * (1 - fee.pct / 100.0), 2)),
+    mp.net_amount_mentor_currency,
+    mp.mentor_currency,
+    mp.exchange_rate_used,
+    mp.ppp_multiplier,
+    -- Always 'manual': RazorpayX auto-payout is out of scope for this module
+    -- (see mentor_payouts.method's own column comment) — immigroov's
+    -- 'auto_inr' fallback describes an automated transfer path groovia has
+    -- never built, so reproducing that label here would claim a capability
+    -- that doesn't exist.
+    COALESCE(mp.method, 'manual'),
+    COALESCE(mp.payout_state, 'pending')
+  FROM bookings b
+  JOIN services s ON s.id = b.service_id
+  JOIN mentors m ON m.id = b.mentor_id
+  LEFT JOIN LATERAL (
+    SELECT amount, currency FROM customer_payments WHERE booking_id = b.id ORDER BY created_at DESC LIMIT 1
+  ) cp ON TRUE
+  LEFT JOIN LATERAL (
+    SELECT * FROM mentor_payouts WHERE booking_id = b.id ORDER BY created_at DESC LIMIT 1
+  ) mp ON TRUE
+  CROSS JOIN LATERAL (
+    SELECT COALESCE(
+      CASE WHEN s.set_price > 0 AND NULLIF(s.platform_fee, 0) IS NOT NULL
+           THEN ROUND(s.platform_fee / s.set_price * 100.0, 4) END,
+      (SELECT value::numeric FROM platform_settings WHERE key = 'immigroov_commission_pct'),
+      15
+    ) AS pct
+  ) fee
+  WHERE b.status IN ('confirmed', 'rescheduled', 'completed', 'no_show')
+  ORDER BY b.created_at DESC, b.id DESC;
+$$;
+GRANT EXECUTE ON FUNCTION admin_payouts() TO authenticated;
+
+-- Flat, unfiltered read of every booking_ledger row, decorated with booking
+-- context — matches immigroov's FINAL (0063) body exactly: no date/status
+-- filter, no pagination (the admin UI filters client-side). Ordered by
+-- created_at (immigroov orders by its bigint id, which is chronological by
+-- construction; groovia's booking_ledger.id is a UUID, so created_at is the
+-- equivalent ordering key, with id as a tiebreaker for determinism).
+CREATE OR REPLACE FUNCTION admin_ledger()
+RETURNS TABLE (
+  id UUID, created_at TIMESTAMPTZ, booking_id UUID, party TEXT, kind TEXT, pct INT,
+  amount NUMERIC, currency TEXT, normalized_inr NUMERIC, reason TEXT,
+  service_title TEXT, mentor_name TEXT, mentee_email TEXT, booking_status TEXT
+) LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT
+    l.id, l.created_at, l.booking_id, l.party, l.kind, l.pct,
+    l.amount, l.currency, l.normalized_inr_amount, l.reason,
+    s.title, m.display_name, b.candidate_email, b.status::text
+  FROM booking_ledger l
+  JOIN bookings b ON b.id = l.booking_id
+  LEFT JOIN services s ON s.id = b.service_id
+  LEFT JOIN mentors m ON m.id = b.mentor_id
+  ORDER BY l.created_at DESC, l.id DESC;
+$$;
+GRANT EXECUTE ON FUNCTION admin_ledger() TO authenticated;
+
+-- Full booking detail for the admin drill-down: booking/payment/payout facts,
+-- a money-totals summary, and a reconstructed chronological timeline.
+--
+-- Timeline reconstruction: immigroov's FINAL body prefers a dedicated
+-- booking_events AUDIT-LOG table (added in its 0051) and only falls back to
+-- reconstructing from booking_requests/reschedule_offers for legacy
+-- pre-0051 bookings. groovia has NO such audit log — its own booking_events
+-- table is an EMAIL OUTBOX (see notify_booking_event above), a different
+-- thing entirely, not a human-readable event history, so it is never read
+-- here. Every booking's timeline is therefore reconstructed from
+-- booking_requests + reschedule_offers + booking_ledger — immigroov's
+-- "legacy fallback" path is groovia's only path. This is an architecture
+-- gap (no equivalent to log_event's audit trail exists, same gap noted in
+-- every prior module), not a business-rule change.
+--
+-- Known, faithfully-reproduced gap: immigroov's own FINAL (0077) body does
+-- NOT return mentor_country/mentee_country in the `booking` object, even
+-- though AdminManager.tsx's UI still reads both fields (they were present in
+-- 0054, dropped in 0066, never restored — an unfixed bug in the source
+-- itself). Per this migration's rule to port the final state exactly rather
+-- than silently fixing source bugs, mentor_country/mentee_country are
+-- likewise omitted here. Note groovia additionally has no candidate/customer
+-- country column on bookings at all, so mentee_country could not be restored
+-- even if this were fixed — mentor_country alone (mentors.country) could be
+-- added trivially, but is intentionally left out to match the source.
+--
+-- Known, faithfully-reproduced gap: `totals` sums exactly six (party, kind)
+-- ledger buckets (customer_refund/credit/charge/penalty, mentor_penalty/
+-- credit) — the same six immigroov's FINAL body sums. Neither immigroov nor
+-- this port adds buckets for the 'platform'/'promoter' parties or the
+-- 'commission' kind that the referral module's widened CHECK constraints
+-- allow — those rows appear in the raw `timeline` (via the ledger-entries
+-- branch below) but are not aggregated into `totals`. Matches the source.
+--
+-- Known gap: groovia's reschedule_offers has no `was_late` column (unlike
+-- immigroov's), so the "· past-deadline" timeline suffix immigroov shows is
+-- not reproducible — architecture/data gap, not a dropped business rule.
+CREATE OR REPLACE FUNCTION admin_booking_detail(p_booking_id UUID)
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_tz TEXT;
+  v_result JSONB;
+BEGIN
+  SELECT COALESCE(b.attendee_timezone, p.timezone, 'UTC') INTO v_tz
+  FROM bookings b LEFT JOIN profiles p ON p.id = b.candidate_id
+  WHERE b.id = p_booking_id;
+  IF v_tz IS NULL THEN RETURN NULL; END IF;  -- booking not found
+
+  WITH b AS (
+    SELECT * FROM bookings WHERE id = p_booking_id
+  ), cp AS (
+    SELECT amount, currency, state FROM customer_payments
+    WHERE booking_id = p_booking_id ORDER BY created_at DESC LIMIT 1
+  ), mp AS (
+    SELECT * FROM mentor_payouts WHERE booking_id = p_booking_id ORDER BY created_at DESC LIMIT 1
+  ), fee AS (
+    SELECT COALESCE(mp.fee_pct,
+      CASE WHEN s.set_price > 0 AND NULLIF(s.platform_fee, 0) IS NOT NULL
+           THEN ROUND(s.platform_fee / s.set_price * 100.0, 4) END,
+      (SELECT value::numeric FROM platform_settings WHERE key = 'immigroov_commission_pct'),
+      15) AS pct
+    FROM b JOIN services s ON s.id = b.service_id LEFT JOIN mp ON TRUE
+  ), ev AS (
+    -- (a) synthetic "created" event, payment-state-aware (matches immigroov's 0077)
+    SELECT b.created_at AS at, 'system'::text AS actor,
+      CASE
+        WHEN cp.state = 'captured' THEN 'Booking created & paid'
+        WHEN cp.state IN ('refunded', 'partially_refunded') THEN 'Booking created (later refunded)'
+        WHEN cp.state = 'failed' THEN 'Booking created — awaiting payment'
+        ELSE 'Booking created — awaiting payment'
+      END AS title,
+      CASE
+        WHEN cp.state = 'captured' THEN 'Paid ' || cp.amount || ' ' || cp.currency
+        WHEN cp.state = 'failed' THEN 'Payment not completed'
+        WHEN cp.amount IS NOT NULL THEN 'Reserved ' || cp.amount || ' ' || cp.currency || ' — awaiting payment'
+        ELSE NULL
+      END AS detail
+    FROM b LEFT JOIN cp ON TRUE
+
+    UNION ALL
+    -- (b) mentor confirmation
+    SELECT b.mentor_confirmed_at, 'mentor', 'Mentor confirmed availability', NULL
+    FROM b WHERE b.mentor_confirmed_at IS NOT NULL
+
+    UNION ALL
+    -- (d) booking_requests: creation
+    SELECT r.created_at, r.initiated_by, INITCAP(r.kind) || ' requested', r.note
+    FROM booking_requests r WHERE r.booking_id = p_booking_id
+
+    UNION ALL
+    -- (e) booking_requests: resolution
+    SELECT r.resolved_at, 'system', INITCAP(r.kind) || ' request ' || r.status,
+      CASE WHEN r.status = 'auto_approved' THEN 'No response in time — auto-approved' ELSE NULL END
+    FROM booking_requests r WHERE r.booking_id = p_booking_id AND r.resolved_at IS NOT NULL
+
+    UNION ALL
+    -- (f) reschedule_offers
+    SELECT o.created_at, o.proposed_by,
+      CASE
+        WHEN o.proposed_by = 'mentor' THEN 'Mentor proposed a new time window'
+        WHEN o.requested_date IS NOT NULL THEN 'Customer asked for a different date'
+        ELSE 'Reschedule offer'
+      END,
+      CASE
+        WHEN o.requested_date IS NOT NULL THEN
+          to_char(o.requested_date, 'YYYY-MM-DD') || ' · ' || o.status
+        ELSE
+          to_char(o.range_start AT TIME ZONE v_tz, 'YYYY-MM-DD HH24:MI') || '–' ||
+          to_char(o.range_end AT TIME ZONE v_tz, 'HH24:MI') || ' (' || v_tz || ') · ' || o.status ||
+          CASE WHEN o.selected_time IS NOT NULL
+               THEN ' · picked ' || to_char(o.selected_time AT TIME ZONE v_tz, 'YYYY-MM-DD HH24:MI')
+               ELSE '' END
+      END
+    FROM reschedule_offers o WHERE o.booking_id = p_booking_id
+
+    UNION ALL
+    -- (g) ledger entries — always included
+    SELECT l.created_at, l.party,
+      INITCAP(l.kind) || COALESCE(' ' || l.pct || '%', '') || COALESCE(' — ' || l.amount || ' ' || l.currency, ''),
+      l.reason
+    FROM booking_ledger l WHERE l.booking_id = p_booking_id
+  )
+  SELECT jsonb_build_object(
+    'booking', jsonb_build_object(
+      'id', b.id, 'status', b.status, 'created_at', b.created_at,
+      'slot_time', b.slot_time, 'slot_end', b.slot_end,
+      'reschedule_count', b.reschedule_count, 'no_show_by', b.no_show_by,
+      'mentor_confirmed_at', b.mentor_confirmed_at, 'meeting_url', b.meeting_url,
+      'service', s.title, 'duration', s.duration,
+      'mentor', m.display_name, 'mentee', b.candidate_email,
+      'mentee_tz', v_tz, 'mentor_tz', COALESCE(m.app_timezone, 'UTC')
+    ),
+    'payment', jsonb_build_object('amount', cp.amount, 'currency', cp.currency, 'status', cp.state),
+    'payout', jsonb_build_object(
+      'amount', mp.net_amount_mentor_currency, 'currency', mp.mentor_currency, 'status', mp.payout_state
+    ),
+    'totals', jsonb_build_object(
+      'paid', cp.amount, 'currency', cp.currency, 'fee_pct', fee.pct,
+      'platform_take', COALESCE(mp.platform_fee_amount, ROUND(cp.amount * fee.pct / 100.0, 2)),
+      'net_to_mentor', mp.net_amount_mentor_currency,
+      'mentor_currency', mp.mentor_currency, 'ppp_multiplier', mp.ppp_multiplier,
+      'customer_refund', (SELECT COALESCE(SUM(amount), 0) FROM booking_ledger WHERE booking_id = p_booking_id AND party = 'customer' AND kind = 'refund'),
+      'customer_credit', (SELECT COALESCE(SUM(amount), 0) FROM booking_ledger WHERE booking_id = p_booking_id AND party = 'customer' AND kind = 'credit'),
+      'customer_charge', (SELECT COALESCE(SUM(amount), 0) FROM booking_ledger WHERE booking_id = p_booking_id AND party = 'customer' AND kind = 'charge'),
+      'customer_penalty', (SELECT COALESCE(SUM(amount), 0) FROM booking_ledger WHERE booking_id = p_booking_id AND party = 'customer' AND kind = 'penalty'),
+      'mentor_penalty', (SELECT COALESCE(SUM(amount), 0) FROM booking_ledger WHERE booking_id = p_booking_id AND party = 'mentor' AND kind = 'penalty'),
+      'mentor_credit', (SELECT COALESCE(SUM(amount), 0) FROM booking_ledger WHERE booking_id = p_booking_id AND party = 'mentor' AND kind = 'credit')
+    ),
+    'timeline', (
+      SELECT COALESCE(jsonb_agg(jsonb_build_object('at', ev.at, 'actor', ev.actor, 'title', ev.title, 'detail', ev.detail) ORDER BY ev.at), '[]'::jsonb)
+      FROM ev WHERE ev.at IS NOT NULL
+    )
+  ) INTO v_result
+  FROM b
+  JOIN services s ON s.id = b.service_id
+  JOIN mentors m ON m.id = b.mentor_id
+  LEFT JOIN cp ON TRUE
+  LEFT JOIN mp ON TRUE
+  LEFT JOIN fee ON TRUE;
+
+  RETURN v_result;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION admin_booking_detail(UUID) TO authenticated;
