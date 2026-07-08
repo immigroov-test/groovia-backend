@@ -2976,9 +2976,16 @@ GRANT EXECUTE ON FUNCTION admin_moderate_review(UUID, TEXT, UUID) TO authenticat
 
 -- ── 1. Core affiliate identity ─────────────────────────────────────────────
 
+-- profile_id is nullable + email is a fallback column (fixed below, right
+-- after creation) so an admin can onboard an affiliate BEFORE they've signed
+-- up — mirroring the exact pattern already established for mentors
+-- (mentors.profile_id nullable + mentors.email fallback + link_mentor_by_email
+-- links the account on first login). immigroov doesn't have this problem
+-- (its users table is freely insertable), but groovia's profiles table is
+-- auth-trigger-owned, so this adaptation is required, not optional.
 CREATE TABLE IF NOT EXISTS affiliates (
   id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  profile_id         UUID NOT NULL UNIQUE REFERENCES profiles(id) ON DELETE CASCADE,
+  profile_id         UUID UNIQUE REFERENCES profiles(id) ON DELETE SET NULL,
   mentor_id          UUID REFERENCES mentors(id) ON DELETE SET NULL,
   type               TEXT NOT NULL CHECK (type IN ('mentor', 'non_mentor')),
   payout_details     JSONB,
@@ -2988,6 +2995,11 @@ CREATE TABLE IF NOT EXISTS affiliates (
   created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   CONSTRAINT affiliates_mentor_type_chk CHECK (type <> 'mentor' OR mentor_id IS NOT NULL)
 );
+-- Idempotent fix for a DB where this table was already created with the
+-- earlier (NOT NULL profile_id, no email) shape.
+ALTER TABLE affiliates ALTER COLUMN profile_id DROP NOT NULL;
+ALTER TABLE affiliates ADD COLUMN IF NOT EXISTS email TEXT;  -- contact email for a not-yet-signed-up affiliate
+CREATE UNIQUE INDEX IF NOT EXISTS idx_affiliates_email_lower ON affiliates(LOWER(email)) WHERE email IS NOT NULL;
 ALTER TABLE affiliates ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS affiliates_self_read ON affiliates;
 CREATE POLICY affiliates_self_read ON affiliates FOR SELECT USING (profile_id = auth.uid());
