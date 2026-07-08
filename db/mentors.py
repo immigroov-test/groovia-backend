@@ -416,9 +416,13 @@ def get_email_account_status(email: str) -> dict:
             return {"exists": False, "has_password": False}
         return {"exists": True, "has_password": bool(res.data[0].get("has_password"))}
     except Exception:
-        logger.exception("email_account_status RPC failed; falling back to profiles")
-        pid = get_profile_id_by_email(email)
-        return {"exists": pid is not None, "has_password": pid is not None}
+        # Degrade safely: treat the email as passwordless so the popup emails a
+        # verification/magic link (which works for both new and existing accounts)
+        # instead of wrongly demanding a password. Never infer "has a password" from a
+        # profile row: signInWithOtp creates a profile with NO password, so that would
+        # trap a mid-signup user on the login screen.
+        logger.exception("email_account_status RPC failed; treating email as passwordless (send link)")
+        return {"exists": False, "has_password": False}
 
 
 def get_profile_role(profile_id: str) -> Optional[str]:
