@@ -10,7 +10,7 @@ from content import (
 )
 
 MENTOR_ANSWER = (
-    "- **Maya Singh** — Software Engineer (NL Blue Card)\n"
+    "- **Maya Singh** - Software Engineer (NL Blue Card)\n"
     "  [Book a 1-on-1 Session](http://localhost:3000/mentors/maya-singh)\n"
     "To explore other mentors, please visit the [Mentor Directory](http://localhost:3000/mentors)."
 )
@@ -23,7 +23,7 @@ def test_full_guest_mentor_journey(client, mock_llm):
     mock_llm.bind_tools.return_value.ainvoke = AsyncMock(return_value=AIMessage(content=MENTOR_ANSWER))
 
     # Turn 1: resume upload → canned MSG_RESUME_UPLOADED, no LLM.
-    with patch("routers.chat.parse_pdf_to_text", return_value="John Doe — AI engineer, 3 yrs"):
+    with patch("routers.chat.parse_pdf_to_text", return_value="John Doe - AI engineer, 3 yrs"):
         r1 = client.post(
             "/chat",
             data={"message": "[SYSTEM_RESUME_UPLOADED]", "thread_id": thread},
@@ -50,7 +50,7 @@ def test_no_mentor_country_resets_cleanly(client, mock_llm):
     thread = str(uuid.uuid4())
     mock_llm.bind_tools.return_value.ainvoke = AsyncMock(return_value=AIMessage(content=MENTOR_ANSWER))
 
-    with patch("routers.chat.parse_pdf_to_text", return_value="John Doe — AI engineer"):
+    with patch("routers.chat.parse_pdf_to_text", return_value="John Doe - AI engineer"):
         client.post(
             "/chat",
             data={"message": "[SYSTEM_RESUME_UPLOADED]", "thread_id": thread},

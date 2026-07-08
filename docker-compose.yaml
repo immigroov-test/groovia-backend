@@ -1,4 +1,4 @@
-# docker-compose.yaml — local dev only.
+# docker-compose.yaml - local dev only.
 # Use this if you want to test the Docker build before pushing to Render.
 # Run the frontend separately via `npm run dev` inside groovia-frontend/.
 services:

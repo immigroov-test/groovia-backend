@@ -1,7 +1,7 @@
 # Claude Code internal files
 .claude/
 
-# Secrets — never commit. Ignore all .env* except the placeholder template.
+# Secrets - never commit. Ignore all .env* except the placeholder template.
 .env*
 !.env.example
 *.key
@@ -10,7 +10,7 @@
 secrets.json
 Meeting_1_feedback.txt
 
-# Third-party reference code — never push
+# Third-party reference code - never push
 immigroov-main/
 
 # Frontend is now its own repo (immigroov-test/groovia-frontend); never track it here.

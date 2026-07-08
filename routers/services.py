@@ -173,7 +173,7 @@ def delete_question(question_id: str, mentor: dict = Depends(require_mentor)):
 
 @router.get("/public/{mentor_slug}")
 def list_public_services(mentor_slug: str):
-    """Public endpoint — returns active services for a mentor profile page."""
+    """Public endpoint - returns active services for a mentor profile page."""
     mentor = db.get_mentor_by_slug(mentor_slug)
     if not mentor:
         raise HTTPException(status_code=404, detail="Mentor not found")
@@ -186,7 +186,7 @@ def list_public_services(mentor_slug: str):
 
 @router.get("/{service_id}/questions/public")
 def list_public_questions(service_id: str):
-    """Public endpoint — returns active intake questions for a service (shown during booking)."""
+    """Public endpoint - returns active intake questions for a service (shown during booking)."""
     try:
         return db.list_questions(service_id)
     except Exception:

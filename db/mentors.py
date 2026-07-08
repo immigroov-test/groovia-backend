@@ -44,7 +44,7 @@ def list_mentors_grouped_by_country(limit_per_country: int = 2) -> dict[str, lis
     """Return all approved+active mentors, grouped by every ISO-2 country in their expertise.
     Used by the report flow so the LLM gets real mentor data in-prompt and never has to
     call retrieve_matching_mentors per country.
-    Default is 2 — the report ends with a Mentor Directory link so users can browse more."""
+    Default is 2 - the report ends with a Mentor Directory link so users can browse more."""
     rows = (
         _supabase.table("mentors")
         .select("display_name, headline, slug, expertise_country_codes")
@@ -68,7 +68,7 @@ def list_mentors_grouped_by_country(limit_per_country: int = 2) -> dict[str, lis
 
 
 def mentors_available_for_country(country_code: str) -> bool:
-    """Cheap existence check — does the mentors table have any approved+active mentor
+    """Cheap existence check - does the mentors table have any approved+active mentor
     whose expertise covers this ISO-2 country code?"""
     if not country_code:
         return False
@@ -115,7 +115,7 @@ def link_mentor_by_email(profile_id: str, email: str) -> Optional[dict[str, Any]
     """Link a pre-approved mentor (created by an admin, matched by email, not yet
     attached to any account) to this user's profile, and grant the mentor role.
     Idempotent: if the user is already a mentor, returns that row. Returns None when
-    there is nothing to link. Safe by design — email ownership is proven by the login."""
+    there is nothing to link. Safe by design - email ownership is proven by the login."""
     if not profile_id or not email:
         return None
     email = email.strip().lower()
@@ -151,7 +151,7 @@ def link_mentor_by_email(profile_id: str, email: str) -> Optional[dict[str, Any]
 
 
 def get_mentor_by_id(mentor_id: str) -> Optional[dict[str, Any]]:
-    """Fetch a mentor row by primary key — used internally (never exposed to browser)."""
+    """Fetch a mentor row by primary key - used internally (never exposed to browser)."""
     if not mentor_id:
         return None
     res = (
@@ -240,14 +240,14 @@ def create_mentor_signup(
     return mentor_row
 
 
-# Non-critical: presentation-only fields — no re-approval needed.
+# Non-critical: presentation-only fields - no re-approval needed.
 _NON_CRITICAL_MENTOR_FIELDS = {
     "display_name", "headline", "bio", "photo_url",
     "phone", "city", "country", "social_links", "public_notes",
     "languages", "timezone", "session_duration_minutes",
 }
 
-# Critical: expertise claims — changes flip status back to pending_review.
+# Critical: expertise claims - changes flip status back to pending_review.
 _CRITICAL_MENTOR_FIELDS = {
     "expertise_country_codes", "years_lived_experience", "professional_domains",
 }
@@ -266,7 +266,7 @@ def update_mentor_profile(mentor_id: str, fields: dict[str, Any]) -> dict[str, A
 
 
 def update_mentor_critical_fields(mentor_id: str, fields: dict[str, Any]) -> dict[str, Any]:
-    """Update expertise/credibility fields — flips status to pending_review and increments submission_count."""
+    """Update expertise/credibility fields - flips status to pending_review and increments submission_count."""
     safe = {k: v for k, v in fields.items() if k in _CRITICAL_MENTOR_FIELDS}
     if not safe:
         raise ValueError("No valid critical fields to update")
@@ -393,7 +393,7 @@ def get_profile_id_by_email(email: str) -> Optional[str]:
 
 
 def set_profile_role_guest(profile_id: str) -> None:
-    """Mark a just-verified passwordless account as a guest — only if still a plain
+    """Mark a just-verified passwordless account as a guest - only if still a plain
     candidate (never downgrade a mentor/admin)."""
     if not profile_id:
         return
@@ -437,7 +437,7 @@ def get_profile_role(profile_id: str) -> Optional[str]:
 
 def save_profile_summary_if_empty(user_id: str, summary: str) -> None:
     """Persist the agent-extracted resume summary to the user's profile, but only
-    when the field is still NULL — a manual edit on the account page wins."""
+    when the field is still NULL - a manual edit on the account page wins."""
     if not summary:
         return
     try:
@@ -618,7 +618,7 @@ def get_booking_admin_detail(booking_id: str) -> Optional[dict[str, Any]]:
 
 
 def list_mentors_with_strikes() -> list[dict[str, Any]]:
-    """Mentors who have accrued no-show strikes — the admin ops queue."""
+    """Mentors who have accrued no-show strikes - the admin ops queue."""
     try:
         res = (
             _supabase.table("mentors")

@@ -73,7 +73,7 @@ def get_current_user(
 
 
 def _safe_alg(token: str) -> str:
-    """Best-effort read of the token's alg for diagnostics — never raises."""
+    """Best-effort read of the token's alg for diagnostics - never raises."""
     try:
         return jwt.get_unverified_header(token).get("alg", "?")
     except Exception:

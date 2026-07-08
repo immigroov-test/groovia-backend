@@ -134,7 +134,7 @@ def booking_detail(booking_id: str, user: AuthUser = Depends(require_admin)):
 
 @router.get("/no-show-strikes")
 def no_show_strikes(user: AuthUser = Depends(require_admin)):
-    """Mentors with accrued no-show strikes — the ops queue."""
+    """Mentors with accrued no-show strikes - the ops queue."""
     return db.list_mentors_with_strikes()
 
 

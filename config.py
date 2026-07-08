@@ -18,7 +18,7 @@ SUPABASE_DB_URL           = os.getenv("SUPABASE_DB_URL") or os.getenv("DATABASE_
 CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",") if o.strip()]
 PORT = int(os.getenv("PORT", 8000))  # Fly.io auto-injects PORT
 HOST = "0.0.0.0"
-# Where the frontend lives — used to build links inside LLM responses (e.g. "browse all mentors").
+# Where the frontend lives - used to build links inside LLM responses (e.g. "browse all mentors").
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
 
 # Models
@@ -43,7 +43,7 @@ EXA_NUM_RESULTS          = 3
 EXA_HIGHLIGHT_MAX_CHARS  = 1000
 
 # Resend transactional email.
-# NOTE: EMAIL_FROM must be a Resend-verified sender — either "onboarding@resend.dev"
+# NOTE: EMAIL_FROM must be a Resend-verified sender - either "onboarding@resend.dev"
 # (Resend's shared sandbox, which only delivers to the Resend account owner) or an
 # address at a domain you've verified in Resend (e.g. noreply@immigroov.com).
 # A personal gmail/outlook address will be REJECTED by Resend (every send fails).
@@ -89,7 +89,7 @@ _missing = [k for k, v in {
 if _missing:
     sys.exit(f"[FATAL] Missing required environment variables: {', '.join(_missing)}")
 
-# Resend is optional at startup — booking still creates events without it.
+# Resend is optional at startup - booking still creates events without it.
 if not RESEND_API_KEY:
     import warnings
-    warnings.warn("[WARN] RESEND_API_KEY not set — transactional emails will be skipped", stacklevel=1)
+    warnings.warn("[WARN] RESEND_API_KEY not set - transactional emails will be skipped", stacklevel=1)

@@ -178,7 +178,7 @@ CREATE INDEX IF NOT EXISTS idx_webhook_events_unprocessed
   ON webhook_events(received_at) WHERE processed_at IS NULL;
 
 -- ============================================================================
--- services (before bookings — bookings references it)
+-- services (before bookings - bookings references it)
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS services (
   id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -204,7 +204,7 @@ CREATE INDEX IF NOT EXISTS idx_services_active    ON services(mentor_id) WHERE i
 CREATE INDEX IF NOT EXISTS idx_services_pending   ON services(status) WHERE status = 'pending';
 
 -- ============================================================================
--- specific_availability (before bookings — bookings references it)
+-- specific_availability (before bookings - bookings references it)
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS specific_availability (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -270,7 +270,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_bookings_idempotency
   ON bookings(idempotency_key) WHERE idempotency_key IS NOT NULL;
 
 -- ============================================================================
--- mentor_availability (legacy manual fallback system — superseded by weekly_availability)
+-- mentor_availability (legacy manual fallback system - superseded by weekly_availability)
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS mentor_availability (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -761,7 +761,7 @@ BEGIN
   SELECT cancel_notice_hours INTO v_notice FROM mentors WHERE id = b.mentor_id;
   IF b.slot_time IS NOT NULL
      AND NOW() > b.slot_time - MAKE_INTERVAL(hours => COALESCE(v_notice, 24)) THEN
-    RAISE EXCEPTION 'Cancellations must be at least % hours before the session — please reschedule instead.',
+    RAISE EXCEPTION 'Cancellations must be at least % hours before the session - please reschedule instead.',
       COALESCE(v_notice, 24);
   END IF;
 
@@ -830,7 +830,7 @@ BEGIN
   IF p_slot_time <= NOW() THEN RAISE EXCEPTION 'Please pick a future time'; END IF;
   SELECT * INTO b FROM bookings WHERE id = o.booking_id;
   IF NOT is_slot_available(b.mentor_id, b.service_id, p_slot_time) THEN
-    RAISE EXCEPTION 'That time slot is no longer available — please pick another';
+    RAISE EXCEPTION 'That time slot is no longer available - please pick another';
   END IF;
   UPDATE reschedule_offers
     SET status = 'mentee_selected', selected_time = p_slot_time
@@ -1159,7 +1159,7 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE v_booking_id UUID;
 BEGIN
   IF NOT is_slot_available(p_mentor_id, p_service_id, p_slot_time) THEN
-    RAISE EXCEPTION 'That time is not available — please choose another slot';
+    RAISE EXCEPTION 'That time is not available - please choose another slot';
   END IF;
 
   IF p_candidate_id IS NULL THEN
@@ -1351,7 +1351,7 @@ DROP POLICY IF EXISTS ppp_factors_read ON ppp_factors;
 CREATE POLICY ppp_factors_read ON ppp_factors FOR SELECT USING (TRUE);
 
 -- ============================================================================
--- get_ppp_factor  — returns 1.0 for countries not in the table (full price)
+-- get_ppp_factor  - returns 1.0 for countries not in the table (full price)
 -- ============================================================================
 CREATE OR REPLACE FUNCTION get_ppp_factor(p_country_code TEXT)
 RETURNS NUMERIC LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
@@ -1434,7 +1434,7 @@ GRANT EXECUTE ON FUNCTION booking_deadline_state(TIMESTAMPTZ) TO anon, authentic
 GRANT EXECUTE ON FUNCTION response_window(TIMESTAMPTZ) TO anon, authenticated;
 
 -- ── 5. Cancel flow (REPLACES the old block-on-late cancel_booking) ────────────
--- >=24h: cancelled immediately · 2–24h (user): opens a cancel request for mentor
+-- >=24h: cancelled immediately · 2-24h (user): opens a cancel request for mentor
 -- approval · <2h: blocked. Mentor cancel is always allowed (>=2h) and is free
 -- >=24h, bumps the cancellation counter when late. Auth is enforced in FastAPI.
 CREATE OR REPLACE FUNCTION cancel_booking(p_booking_id UUID, p_cancelled_by TEXT DEFAULT 'user')
@@ -1449,7 +1449,7 @@ BEGIN
 
   v_state := booking_deadline_state(b.slot_time);
   IF v_state = 'buffer' THEN
-    RAISE EXCEPTION 'Within 2 hours of the session — it can no longer be cancelled here. Please contact the other party.';
+    RAISE EXCEPTION 'Within 2 hours of the session - it can no longer be cancelled here. Please contact the other party.';
   END IF;
 
   IF p_cancelled_by = 'mentor' THEN
@@ -1512,7 +1512,7 @@ END;
 $$;
 GRANT EXECUTE ON FUNCTION respond_booking_request(UUID, BOOLEAN) TO authenticated;
 
--- ── 7. force_autocancel (3rd reschedule attempt) — state only ─────────────────
+-- ── 7. force_autocancel (3rd reschedule attempt) - state only ─────────────────
 CREATE OR REPLACE FUNCTION force_autocancel(p_booking_id UUID, p_initiator TEXT)
 RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 BEGIN
@@ -1524,7 +1524,7 @@ END;
 $$;
 GRANT EXECUTE ON FUNCTION force_autocancel(UUID, TEXT) TO authenticated;
 
--- ── 8. Reschedule — mentor proposes a date + range ────────────────────────────
+-- ── 8. Reschedule - mentor proposes a date + range ────────────────────────────
 CREATE OR REPLACE FUNCTION mentor_propose_reschedule(
   p_booking_id UUID, p_date DATE, p_start TIMESTAMPTZ, p_end TIMESTAMPTZ
 ) RETURNS UUID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
@@ -1552,7 +1552,7 @@ BEGIN
 END;
 $$;
 
--- ── 9. Mentee accepts a slot in the proposed range — finalises directly ───────
+-- ── 9. Mentee accepts a slot in the proposed range - finalises directly ───────
 CREATE OR REPLACE FUNCTION mentee_accept_reschedule(p_offer_id UUID, p_slot_time TIMESTAMPTZ)
 RETURNS bookings LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE o reschedule_offers; b bookings;
@@ -1567,7 +1567,7 @@ BEGIN
   IF p_slot_time <= NOW() THEN RAISE EXCEPTION 'Please pick a future time'; END IF;
   SELECT * INTO b FROM bookings WHERE id = o.booking_id;
   IF NOT is_slot_available(b.mentor_id, b.service_id, p_slot_time) THEN
-    RAISE EXCEPTION 'That time is no longer available — pick another slot inside the range.';
+    RAISE EXCEPTION 'That time is no longer available - pick another slot inside the range.';
   END IF;
   UPDATE reschedule_offers SET status = 'accepted', selected_time = p_slot_time WHERE id = p_offer_id;
   UPDATE bookings SET slot_time = p_slot_time, slot_end = NULL, status = 'rescheduled',
@@ -1579,7 +1579,7 @@ BEGIN
 END;
 $$;
 
--- ── 10. Mentee rejects the mentor's proposal — booking cancelled ──────────────
+-- ── 10. Mentee rejects the mentor's proposal - booking cancelled ──────────────
 CREATE OR REPLACE FUNCTION mentee_reject_reschedule(p_offer_id UUID)
 RETURNS bookings LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE o reschedule_offers; b bookings;
@@ -1610,15 +1610,15 @@ BEGIN
     RETURN 'autocancelled';
   END IF;
   v_state := booking_deadline_state(b.slot_time);
-  IF v_state = 'buffer' THEN RAISE EXCEPTION 'Within 2 hours of the session — cannot reschedule.'; END IF;
+  IF v_state = 'buffer' THEN RAISE EXCEPTION 'Within 2 hours of the session - cannot reschedule.'; END IF;
   v_approved := EXISTS (SELECT 1 FROM booking_requests
                         WHERE booking_id = p_booking_id AND kind = 'reschedule'
                           AND status IN ('approved','auto_approved'));
   IF v_state <> 'free' AND NOT v_approved THEN
-    RAISE EXCEPTION 'A late reschedule needs mentor approval first — send a request.';
+    RAISE EXCEPTION 'A late reschedule needs mentor approval first - send a request.';
   END IF;
   IF NOT is_slot_available(b.mentor_id, b.service_id, p_slot_time) THEN
-    RAISE EXCEPTION 'That time is not available — pick another slot.';
+    RAISE EXCEPTION 'That time is not available - pick another slot.';
   END IF;
   UPDATE bookings SET slot_time = p_slot_time, slot_end = NULL, status = 'rescheduled',
                       reschedule_count = reschedule_count + 1
@@ -1646,7 +1646,7 @@ BEGIN
     RETURN NULL;
   END IF;
   IF booking_deadline_state(b.slot_time) = 'buffer' THEN
-    RAISE EXCEPTION 'Within 2 hours of the session — cannot reschedule.';
+    RAISE EXCEPTION 'Within 2 hours of the session - cannot reschedule.';
   END IF;
   UPDATE booking_requests SET status = 'withdrawn', resolved_at = NOW()
     WHERE booking_id = p_booking_id AND status = 'pending';
@@ -1665,7 +1665,7 @@ GRANT EXECUTE ON FUNCTION mentee_reject_reschedule(UUID) TO authenticated;
 GRANT EXECUTE ON FUNCTION customer_reschedule(UUID, TIMESTAMPTZ) TO authenticated;
 GRANT EXECUTE ON FUNCTION request_reschedule(UUID) TO authenticated;
 
--- ── 13. No-show: strike ladder (counting only — no payout penalty) ────────────
+-- ── 13. No-show: strike ladder (counting only - no payout penalty) ────────────
 CREATE OR REPLACE FUNCTION apply_mentor_strike(p_mentor_id UUID)
 RETURNS INT LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE v_str INT; v_last TIMESTAMPTZ;
@@ -1780,7 +1780,7 @@ BEGIN
 END;
 $$;
 
--- pg_cron schedules — guarded so the migration still succeeds where pg_cron is
+-- pg_cron schedules - guarded so the migration still succeeds where pg_cron is
 -- not enabled. Enable it in Supabase (Database → Extensions → pg_cron), then
 -- re-run just this block to activate the jobs.
 DO $$
@@ -1796,7 +1796,7 @@ BEGIN
     END IF;
     PERFORM cron.schedule('auto-complete', '*/15 * * * *', 'SELECT mark_past_bookings_completed()');
   ELSE
-    RAISE NOTICE 'pg_cron not enabled — skipping booking cron schedules. Enable it and re-run the cron block.';
+    RAISE NOTICE 'pg_cron not enabled - skipping booking cron schedules. Enable it and re-run the cron block.';
   END IF;
 END $$;
 
@@ -1805,7 +1805,7 @@ END $$;
 -- Booking read RPCs (folded in from 018_booking_reads.sql)
 -- ###########################################################################
 -- =============================================================================
--- 018 — Booking read RPCs for the lifecycle-v2 management UI
+-- 018 - Booking read RPCs for the lifecycle-v2 management UI
 --
 -- Both RPCs return one row per booking with everything the BookingManager needs
 -- to render deadline-aware actions: status, the live deadline_state, the latest

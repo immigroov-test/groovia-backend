@@ -243,7 +243,7 @@ class CriticalUpdateBody(BaseModel):
 
 @router.post("/profile/critical")
 def update_critical_fields(body: CriticalUpdateBody, user: AuthUser = Depends(get_current_user)):
-    """Update expertise fields — resets mentor status to pending_review for re-approval."""
+    """Update expertise fields - resets mentor status to pending_review for re-approval."""
     mentor = db.get_mentor_by_profile_id(user.id)
     if not mentor:
         raise HTTPException(status_code=404, detail="No mentor profile for this account")
@@ -308,7 +308,7 @@ def set_availability(body: AvailabilityBody, user: AuthUser = Depends(get_curren
 
 @router.post("/me/deactivate")
 def deactivate_mentor(user: AuthUser = Depends(get_current_user)):
-    """Self-service pause — sets mentor status to 'suspended', hiding them from browse."""
+    """Self-service pause - sets mentor status to 'suspended', hiding them from browse."""
     mentor = db.get_mentor_by_profile_id(user.id)
     if not mentor:
         raise HTTPException(status_code=404, detail="No mentor profile for this account")

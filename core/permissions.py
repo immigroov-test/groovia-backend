@@ -19,7 +19,7 @@ logger = logging.getLogger("immigroov.permissions")
 
 
 def require_mentor(user: AuthUser = Depends(get_current_user)) -> dict[str, Any]:
-    """Require the caller to own a mentor profile (approved OR pending_review — a
+    """Require the caller to own a mentor profile (approved OR pending_review - a
     pending mentor may still set up services/availability). Returns the mentor row
     so the endpoint doesn't refetch it."""
     import db as _db

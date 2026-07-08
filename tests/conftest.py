@@ -7,7 +7,7 @@ import pytest
 from unittest.mock import AsyncMock, patch
 from langchain_core.messages import AIMessage
 
-# Required env vars — real .env wins locally; these cover bare environments (CI).
+# Required env vars - real .env wins locally; these cover bare environments (CI).
 os.environ.setdefault("GROQ_API_KEY", "test-key")
 os.environ.setdefault("TAVILY_API_KEY", "test-key")
 os.environ.setdefault("EXA_API_KEY", "test-key")
@@ -74,7 +74,7 @@ def agent_app(mock_db):
 
 @pytest.fixture
 def client(agent_app):
-    """Sync TestClient. Deliberately NOT a context manager — that would run the
+    """Sync TestClient. Deliberately NOT a context manager - that would run the
     lifespan, which opens a real Postgres connection."""
     from fastapi.testclient import TestClient
     from main import api

@@ -256,7 +256,7 @@ _CLARIFYING_PROMPTS = frozenset({
     MSG_ASK_FOR_QUESTION, MSG_ASK_TARGET_COUNTRY, MSG_ASK_TRACK_AND_PREFS,
 })
 
-# Canned messages (gates + acks) skip the reviewer — they aren't LLM answers.
+# Canned messages (gates + acks) skip the reviewer - they aren't LLM answers.
 _NO_REVIEW_MSGS = _CLARIFYING_PROMPTS | {MSG_ACK}
 
 # Bare acknowledgements get a canned reply instead of re-entering the LLM.
@@ -371,7 +371,7 @@ async def call_model(state: AgentState):
             short_circuit = MSG_RESUME_UPLOADED
             new_intent = "awaiting_intent"
         elif new_intent == "qna" and last_lower.strip() == INTENT_QNA_PHRASE:
-            # User clicked the "Ask a Question" chip — no real question yet.
+            # User clicked the "Ask a Question" chip - no real question yet.
             short_circuit = MSG_ASK_FOR_QUESTION
         elif is_new_turn and _is_ack(last_lower) and not _last_ai_is_clarifying(messages):
             short_circuit = MSG_ACK
@@ -385,7 +385,7 @@ async def call_model(state: AgentState):
                 )
             except Exception:
                 logger.exception("mentor availability check failed; falling through to LLM")
-                has_mentors = True  # fail-open — let the LLM + tool path handle it
+                has_mentors = True  # fail-open - let the LLM + tool path handle it
             if not has_mentors:
                 display = _COUNTRY_DISPLAY.get(new_target_country, new_target_country)
                 short_circuit = msg_no_mentors_for_country(display)
@@ -408,7 +408,7 @@ async def call_model(state: AgentState):
             "critique": None,
         }
 
-    # Step 3: gates passed — compress the resume on the first real LLM turn.
+    # Step 3: gates passed - compress the resume on the first real LLM turn.
     if not resume_processed and raw_resume:
         logger.info("compressing resume (intent=%s)", new_intent)
         try:
@@ -447,7 +447,7 @@ async def call_model(state: AgentState):
                     display = _COUNTRY_DISPLAY.get(code, code)
                     lines.append(f"{code} ({display}):")
                     for m in grouped[code]:
-                        lines.append(f"  - {m['name']} — {m['headline']} — {m['booking_url']}")
+                        lines.append(f"  - {m['name']} - {m['headline']} - {m['booking_url']}")
                 mentor_inventory = "\n".join(lines)
         except Exception:
             logger.exception("mentor inventory fetch failed; report will fall back to directory link")
@@ -486,7 +486,7 @@ async def call_model(state: AgentState):
         for m in history:
             text = _text(m.content)
             if isinstance(m, AIMessage) and len(text) > 1200 and not getattr(m, "tool_calls", None):
-                m = AIMessage(content=text[:400] + "\n…[rest of the earlier detailed answer omitted — already shown to the user]")
+                m = AIMessage(content=text[:400] + "\n…[rest of the earlier detailed answer omitted - already shown to the user]")
             slimmed.append(m)
         history = slimmed
 
@@ -558,7 +558,7 @@ async def reviewer_node(state: AgentState):
 
     critique_text = critique.content
     if "PASSED" in critique_text.upper():
-        # The LLM reviewer said PASSED but the structural count failed — replace
+        # The LLM reviewer said PASSED but the structural count failed - replace
         # with a concrete failure so should_revise doesn't read a false pass.
         critique_text = f"- STRUCTURE: report must contain exactly {config.NUM_COUNTRIES} '### ' country sections."
     return {"critique": critique_text, "revision_count": new_count}
@@ -580,7 +580,7 @@ def should_continue(state: AgentState) -> str:
     intent = state.get("user_intent")
     content = _text(last_message.content).strip()
 
-    # Canned messages (gates, acks, no-mentors notice) aren't LLM answers — skip review.
+    # Canned messages (gates, acks, no-mentors notice) aren't LLM answers - skip review.
     if content in _NO_REVIEW_MSGS or content.startswith(NO_MENTORS_PREFIX):
         return "end"
 
@@ -653,7 +653,7 @@ async def init_agent() -> None:
         mode = "pool min=2 max=10 (Linux)"
 
     saver = AsyncPostgresSaver(resource)
-    await saver.setup()  # idempotent — creates checkpoint tables on first run
+    await saver.setup()  # idempotent - creates checkpoint tables on first run
 
     _pg_resource = resource
     _checkpointer = saver

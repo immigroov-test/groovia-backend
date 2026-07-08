@@ -20,7 +20,7 @@ graph_attr = {
 }
 
 with Diagram(
-    "Groovia — System Architecture",
+    "Groovia - System Architecture",
     show=False,
     filename="system_architecture",
     direction="LR",

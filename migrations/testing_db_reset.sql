@@ -14,7 +14,7 @@
 --   - The 14 seed mentors (inserted in testing_db_setup.sql, profile_id IS NULL)
 --   - platform_settings
 
--- 0. SET ADMIN — promote the admin so it gets the 'admin' role and is preserved by the
+-- 0. SET ADMIN - promote the admin so it gets the 'admin' role and is preserved by the
 --    wipe in step 3. The admin must have signed up at least once. Idempotent.
 UPDATE profiles SET role = 'admin' WHERE email = 'yokeshmd99@gmail.com';
 
@@ -41,6 +41,11 @@ WHERE profile_id IS NULL
     'arjun-iyer','sara-okonkwo','daniel-park','aditi-banerjee','james-okafor',
     'vivek-shah','emily-chen','ravi-pillai','sophie-laurent'
   );
+
+-- 4b. Normalize seed mentor contact emails to a plus-addressed inbox, so a fresh signup
+--     with your real email (yokeshd1999@gmail.com) is treated as a NEW user and is not
+--     auto-linked to a seed mentor such as "Maya Singh". Mail still lands in your inbox.
+UPDATE mentors SET email = 'yokeshd1999+seed@gmail.com' WHERE profile_id IS NULL;
 
 -- 5. Clear LangGraph checkpoint tables (created by AsyncPostgresSaver)
 DO $$ BEGIN

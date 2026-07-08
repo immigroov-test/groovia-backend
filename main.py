@@ -8,9 +8,12 @@ from contextlib import asynccontextmanager
 if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
+import httpx
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from postgrest.exceptions import APIError
 from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
 
@@ -68,6 +71,33 @@ api = FastAPI(title="Immigroov AI Career Engine", lifespan=lifespan)
 api.state.limiter = limiter
 api.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+
+# When Supabase (or another upstream) is paused, restarting, or times out, the
+# client raises a raw error. Turn those into a clean 503 so users see a friendly
+# "try again" message instead of a stack trace / Cloudflare HTML page.
+_SERVICE_UNAVAILABLE = {"detail": "Our service is temporarily unavailable. Please try again in a moment."}
+_UPSTREAM_SIGNS = (
+    "json could not be generated", "522", "523", "524", "503", "504",
+    "timed out", "timeout", "connection", "gateway", "unavailable",
+)
+
+
+@api.exception_handler(APIError)
+async def _handle_postgrest_error(request: Request, exc: APIError):
+    blob = f"{getattr(exc, 'message', '')} {getattr(exc, 'code', '')} {getattr(exc, 'details', '')}".lower()
+    if any(sign in blob for sign in _UPSTREAM_SIGNS):
+        logger.warning("Supabase upstream unavailable (code=%s): %s", getattr(exc, "code", "?"), getattr(exc, "message", ""))
+        return JSONResponse(status_code=503, content=_SERVICE_UNAVAILABLE)
+    # A genuine query error (constraint, bad request, etc.): log it, don't leak internals.
+    logger.exception("Database (PostgREST) error")
+    return JSONResponse(status_code=500, content={"detail": "Something went wrong. Please try again."})
+
+
+@api.exception_handler(httpx.TransportError)
+async def _handle_transport_error(request: Request, exc: httpx.TransportError):
+    logger.warning("Upstream transport error: %s", exc)
+    return JSONResponse(status_code=503, content=_SERVICE_UNAVAILABLE)
+
 api.add_middleware(
     CORSMiddleware,
     allow_origins=config.CORS_ORIGINS,
@@ -80,7 +110,7 @@ api.add_middleware(
 
 @api.get("/health")
 def health():
-    """Cheap liveness check — always returns 200 if the process is up."""
+    """Cheap liveness check - always returns 200 if the process is up."""
     return {"status": "ok"}
 
 
@@ -119,7 +149,7 @@ api.include_router(services_router.router)
 
 if config.MOCK_SERVICES:
     api.include_router(dev_router.router)
-    logger.warning("MOCK_SERVICES=true — Resend and webhook signatures are mocked. Never deploy with this flag.")
+    logger.warning("MOCK_SERVICES=true - Resend and webhook signatures are mocked. Never deploy with this flag.")
 
 
 if __name__ == "__main__":

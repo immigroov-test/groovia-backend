@@ -5,7 +5,7 @@ MSG_ASK_FOR_RESUME       = "Please attach your resume or profile to begin."
 MSG_RESUME_UPLOADED      = "Your profile has been successfully uploaded. Please select an option below to proceed."
 MSG_ASK_TRACK_AND_PREFS  = "To generate your personalized report, are you looking for **Work** or **Study** opportunities? And do you have any specific preferences (e.g., climate, salary expectations, company size)?"
 MSG_ASK_TARGET_COUNTRY   = "Which country are you looking to find a mentor in?"
-MSG_ASK_FOR_QUESTION     = "Sure — what would you like to know?"
+MSG_ASK_FOR_QUESTION     = "Sure - what would you like to know?"
 MSG_ACK                  = "Great! Is there anything else you'd like to know? You can also ask for mentors or a fresh career report anytime."
 
 
@@ -15,7 +15,7 @@ NO_MENTORS_PREFIX = "We don't have mentors based in"
 
 def msg_no_mentors_for_country(country_display: str) -> str:
     return (
-        f"{NO_MENTORS_PREFIX} **{country_display}** just yet — our network is "
+        f"{NO_MENTORS_PREFIX} **{country_display}** just yet - our network is "
         f"actively expanding there. In the meantime, would you like to explore mentors in "
         f"a nearby country, or browse the full [Mentor Directory]({MENTOR_DISCOVERY_URL})?"
     )

@@ -1,4 +1,4 @@
-"""Dev-only router — only mounted when MOCK_SERVICES=true.
+"""Dev-only router - only mounted when MOCK_SERVICES=true.
 Provides local visibility into mocked external service calls."""
 import logging
 
