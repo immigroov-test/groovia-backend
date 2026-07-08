@@ -4413,3 +4413,258 @@ BEGIN
 END;
 $$;
 GRANT EXECUTE ON FUNCTION admin_booking_detail(UUID) TO authenticated;
+
+-- ── 14. Webinars (one-to-many sessions, separate from 1:1 bookings) ─────────
+-- Ported from immigroov's 0055_webinars.sql (base), 0059_webinar_admin.sql
+-- (admin_webinars, webinar_registrants), 0060_chat_inbox_webinar_share.sql
+-- (webinar_public + two-stage reminders, replacing 0055's single-stage
+-- version), 0062_webinar_no_double_register.sql (idempotent register_webinar
+-- FINAL). No overlap with bookings/payment/payout machinery — webinars are
+-- entirely free, registration is instant, and there is no FK to `bookings`
+-- anywhere in the source. Confirmed no other webinar-named RPC exists beyond
+-- the 7 originally scoped plus these 2 found during reconciliation.
+--
+-- NOT ported: webinars.reminder_sent — a dead column even in immigroov's own
+-- final state (superseded by reminded_1d/reminded_1h in 0060, never written
+-- to by any function after that). groovia has no legacy rows to stay
+-- compatible with, so it's simply not created, same reasoning as Reviews'
+-- edited_at omission.
+--
+-- Grant posture: immigroov leaves EVERY webinar RPC (including
+-- create_webinar, cancel_webinar, admin_webinars, webinar_registrants)
+-- GRANTed to anon+authenticated with ZERO server-side ownership checks —
+-- p_mentor_id/p_webinar_id are trusted as passed, by the migration's own
+-- design (no RLS anywhere on either table). That gap is NOT reproduced here:
+-- mentor-scoped RPCs (create_webinar, cancel_webinar, mentor_webinars,
+-- webinar_registrants) are GRANTed to authenticated only, with ownership
+-- enforced at the FastAPI layer (resolve the caller's own mentor row via
+-- get_mentor_by_profile_id, same pattern as every other mentor self-service
+-- endpoint in routers/mentor.py) or admin bypass. admin_webinars follows the
+-- existing admin_* convention (authenticated + require_admin). Public/
+-- anonymous-by-design RPCs (list_webinars, webinar_public, register_webinar)
+-- keep immigroov's anon grant — no ownership concept applies to them.
+
+CREATE TABLE IF NOT EXISTS webinars (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  mentor_id    UUID NOT NULL REFERENCES mentors(id) ON DELETE CASCADE,
+  title        TEXT NOT NULL,
+  description  TEXT,
+  start_time   TIMESTAMPTZ NOT NULL,
+  duration     INT NOT NULL DEFAULT 60,   -- minutes
+  capacity     INT,                        -- NULL = unlimited
+  visibility   TEXT NOT NULL DEFAULT 'public' CHECK (visibility IN ('public', 'invite')),
+  room_url     TEXT,
+  status       TEXT NOT NULL DEFAULT 'scheduled' CHECK (status IN ('scheduled', 'cancelled', 'ended')),
+  reminded_1d  BOOLEAN NOT NULL DEFAULT FALSE,
+  reminded_1h  BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_webinars_mentor ON webinars(mentor_id);
+CREATE INDEX IF NOT EXISTS idx_webinars_public_upcoming ON webinars(start_time)
+  WHERE visibility = 'public' AND status = 'scheduled';
+
+CREATE TABLE IF NOT EXISTS webinar_registrations (
+  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  webinar_id     UUID NOT NULL REFERENCES webinars(id) ON DELETE CASCADE,
+  candidate_id   UUID REFERENCES profiles(id) ON DELETE SET NULL,
+  email          TEXT NOT NULL,
+  name           TEXT,
+  registered_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_webinar_reg_unique ON webinar_registrations(webinar_id, LOWER(email));
+
+-- p_mentor_id is NOT validated as the caller's own mentor row here (SQL
+-- layer stays faithful to immigroov's design) — ownership is enforced by the
+-- FastAPI endpoint before this RPC is ever called (see grant posture note).
+CREATE OR REPLACE FUNCTION create_webinar(
+  p_mentor_id UUID, p_title TEXT, p_description TEXT, p_start TIMESTAMPTZ,
+  p_duration INT DEFAULT 60, p_capacity INT DEFAULT NULL, p_visibility TEXT DEFAULT 'public'
+) RETURNS UUID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_id UUID; v_title TEXT := TRIM(COALESCE(p_title, ''));
+BEGIN
+  IF v_title = '' THEN RAISE EXCEPTION 'Title is required'; END IF;
+  IF p_start IS NULL OR p_start <= NOW() THEN RAISE EXCEPTION 'Start time must be in the future'; END IF;
+
+  INSERT INTO webinars (mentor_id, title, description, start_time, duration, capacity, visibility, room_url)
+    VALUES (
+      p_mentor_id, v_title, NULLIF(TRIM(COALESCE(p_description, '')), ''), p_start,
+      COALESCE(p_duration, 60), p_capacity, COALESCE(NULLIF(p_visibility, ''), 'public'),
+      -- Deterministic string construction, no external API call — matches immigroov exactly.
+      'https://meet.jit.si/ImmigroovWebinar-' || REPLACE(gen_random_uuid()::text, '-', '')
+    ) RETURNING id INTO v_id;
+  RETURN v_id;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION create_webinar(UUID, TEXT, TEXT, TIMESTAMPTZ, INT, INT, TEXT) TO authenticated;
+
+-- No existence/ownership check, no notification — matches immigroov exactly
+-- (a no-op on an unknown id, silently, by design).
+CREATE OR REPLACE FUNCTION cancel_webinar(p_webinar_id UUID)
+RETURNS VOID LANGUAGE sql SECURITY DEFINER SET search_path = public AS $$
+  UPDATE webinars SET status = 'cancelled' WHERE id = p_webinar_id;
+$$;
+GRANT EXECUTE ON FUNCTION cancel_webinar(UUID) TO authenticated;
+
+-- FINAL (0062) idempotent version. Capacity is only checked for a genuinely
+-- NEW registrant — an already-registered email can always re-call this
+-- (e.g. to update their name) even once the webinar is full. Confirmation
+-- email is NOT sent from here (no pg_net in groovia) — the FastAPI layer
+-- sends it as a BackgroundTask when the returned 'already' flag is false,
+-- exactly mirroring the Reviews module's 5-star-notification pattern.
+CREATE OR REPLACE FUNCTION register_webinar(p_webinar_id UUID, p_email TEXT, p_name TEXT DEFAULT NULL)
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  w webinars%ROWTYPE;
+  v_email TEXT := LOWER(NULLIF(TRIM(COALESCE(p_email, '')), ''));
+  v_already BOOLEAN;
+  v_count INT;
+  v_candidate_id UUID;
+BEGIN
+  IF v_email IS NULL OR POSITION('@' IN v_email) = 0 THEN
+    RAISE EXCEPTION 'A valid email is required';
+  END IF;
+
+  SELECT * INTO w FROM webinars WHERE id = p_webinar_id;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Webinar not found'; END IF;
+  IF w.status <> 'scheduled' THEN RAISE EXCEPTION 'This webinar is no longer open'; END IF;
+  IF w.start_time <= NOW() THEN RAISE EXCEPTION 'This webinar has already started'; END IF;
+
+  SELECT EXISTS(
+    SELECT 1 FROM webinar_registrations WHERE webinar_id = p_webinar_id AND LOWER(email) = v_email
+  ) INTO v_already;
+
+  IF NOT v_already AND w.capacity IS NOT NULL THEN
+    SELECT COUNT(*) INTO v_count FROM webinar_registrations WHERE webinar_id = p_webinar_id;
+    IF v_count >= w.capacity THEN RAISE EXCEPTION 'This webinar is full'; END IF;
+  END IF;
+
+  SELECT id INTO v_candidate_id FROM profiles WHERE LOWER(email) = v_email;
+
+  INSERT INTO webinar_registrations (webinar_id, candidate_id, email, name)
+    VALUES (p_webinar_id, v_candidate_id, v_email, NULLIF(TRIM(COALESCE(p_name, '')), ''))
+  ON CONFLICT (webinar_id, (LOWER(email))) DO UPDATE
+    SET name = COALESCE(EXCLUDED.name, webinar_registrations.name);
+
+  RETURN jsonb_build_object(
+    'ok', true, 'already', v_already, 'room_url', w.room_url, 'title', w.title, 'start_time', w.start_time
+  );
+END;
+$$;
+GRANT EXECUTE ON FUNCTION register_webinar(UUID, TEXT, TEXT) TO anon, authenticated;
+
+-- Public browse: upcoming, public, still-open webinars only.
+CREATE OR REPLACE FUNCTION list_webinars()
+RETURNS TABLE(
+  id UUID, title TEXT, description TEXT, start_time TIMESTAMPTZ, duration INT,
+  capacity INT, mentor_name TEXT, registrations INT
+) LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT w.id, w.title, w.description, w.start_time, w.duration, w.capacity, m.display_name,
+    (SELECT COUNT(*)::int FROM webinar_registrations r WHERE r.webinar_id = w.id)
+  FROM webinars w JOIN mentors m ON m.id = w.mentor_id
+  WHERE w.visibility = 'public' AND w.status = 'scheduled' AND w.start_time > NOW()
+  ORDER BY w.start_time ASC;
+$$;
+GRANT EXECUTE ON FUNCTION list_webinars() TO anon, authenticated;
+
+-- Share-link page: any visibility (invite-only included), any status —
+-- "having the link is the gate", matching immigroov's own comment verbatim.
+-- The frontend does its own client-side closed check (status/start_time).
+CREATE OR REPLACE FUNCTION webinar_public(p_id UUID)
+RETURNS TABLE(
+  id UUID, title TEXT, description TEXT, start_time TIMESTAMPTZ, duration INT,
+  capacity INT, status TEXT, mentor_name TEXT, registrations INT
+) LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT w.id, w.title, w.description, w.start_time, w.duration, w.capacity, w.status, m.display_name,
+    (SELECT COUNT(*)::int FROM webinar_registrations r WHERE r.webinar_id = w.id)
+  FROM webinars w JOIN mentors m ON m.id = w.mentor_id
+  WHERE w.id = p_id;
+$$;
+GRANT EXECUTE ON FUNCTION webinar_public(UUID) TO anon, authenticated;
+
+-- Mentor's own dashboard: every one of their webinars, any status/visibility
+-- (includes cancelled + invite-only) — p_mentor_id ownership enforced by the
+-- FastAPI caller, see grant posture note above.
+CREATE OR REPLACE FUNCTION mentor_webinars(p_mentor_id UUID)
+RETURNS TABLE(
+  id UUID, title TEXT, description TEXT, start_time TIMESTAMPTZ, duration INT, capacity INT,
+  visibility TEXT, status TEXT, room_url TEXT, registrations INT
+) LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT w.id, w.title, w.description, w.start_time, w.duration, w.capacity, w.visibility, w.status, w.room_url,
+    (SELECT COUNT(*)::int FROM webinar_registrations r WHERE r.webinar_id = w.id)
+  FROM webinars w
+  WHERE w.mentor_id = p_mentor_id
+  ORDER BY w.start_time DESC;
+$$;
+GRANT EXECUTE ON FUNCTION mentor_webinars(UUID) TO authenticated;
+
+-- Serves both the mentor's own dashboard and the admin console — same RPC,
+-- matching immigroov exactly. Ownership (mentor owns this webinar, or
+-- caller is admin) is enforced by the FastAPI layer.
+CREATE OR REPLACE FUNCTION webinar_registrants(p_webinar_id UUID)
+RETURNS TABLE(name TEXT, email TEXT, registered_at TIMESTAMPTZ)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT COALESCE(name, '—'), email, registered_at
+  FROM webinar_registrations WHERE webinar_id = p_webinar_id
+  ORDER BY registered_at ASC;
+$$;
+GRANT EXECUTE ON FUNCTION webinar_registrants(UUID) TO authenticated;
+
+-- Cross-mentor platform view for the admin console — every webinar, any
+-- status/visibility, matching immigroov's admin_webinars exactly.
+CREATE OR REPLACE FUNCTION admin_webinars()
+RETURNS TABLE(
+  id UUID, title TEXT, mentor_name TEXT, start_time TIMESTAMPTZ, duration INT, capacity INT,
+  visibility TEXT, status TEXT, registrations INT, created_at TIMESTAMPTZ
+) LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT w.id, w.title, m.display_name, w.start_time, w.duration, w.capacity, w.visibility, w.status,
+    (SELECT COUNT(*)::int FROM webinar_registrations r WHERE r.webinar_id = w.id), w.created_at
+  FROM webinars w JOIN mentors m ON m.id = w.mentor_id
+  ORDER BY w.start_time DESC;
+$$;
+GRANT EXECUTE ON FUNCTION admin_webinars() TO authenticated;
+
+-- Reminders: immigroov's send_webinar_reminders (0060 two-stage FINAL) both
+-- selects due webinars AND sends the batched email in one plpgsql function,
+-- via pg_net — impossible here (no SQL-side HTTP in groovia). Split into a
+-- read-only "what's due" RPC and a "mark it sent" RPC; the actual email
+-- send happens at the FastAPI layer, which must call due_webinar_reminders,
+-- send via the mailer service, then call mark_webinar_reminded per
+-- (webinar, stage) it successfully processed.
+--
+-- GENUINELY DEFERRED, not silently dropped: immigroov drives this from
+-- pg_cron on a 10-minute timer with no request context — groovia has no
+-- scheduler infrastructure at all yet (confirmed: the pre-existing
+-- session_reminder_24h/session_reminder_1h mailer templates for 1:1
+-- bookings are similarly unwired to anything, same gap, not new to this
+-- module). Until a real scheduler exists, these two RPCs back an
+-- admin-triggerable endpoint only — wiring an actual timer is out of scope
+-- for this migration pass.
+CREATE OR REPLACE FUNCTION due_webinar_reminders()
+RETURNS TABLE(
+  webinar_id UUID, stage TEXT, title TEXT, start_time TIMESTAMPTZ, duration INT, room_url TEXT,
+  registrant_email TEXT, registrant_name TEXT
+) LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT w.id, d.stage, w.title, w.start_time, w.duration, w.room_url, r.email, r.name
+  FROM webinars w
+  CROSS JOIN LATERAL (
+    SELECT CASE
+      WHEN NOT w.reminded_1d AND w.start_time BETWEEN NOW() + INTERVAL '23 hours' AND NOW() + INTERVAL '25 hours' THEN '1d'
+      WHEN NOT w.reminded_1h AND w.start_time BETWEEN NOW() AND NOW() + INTERVAL '70 minutes' THEN '1h'
+      ELSE NULL
+    END AS stage
+  ) d
+  JOIN webinar_registrations r ON r.webinar_id = w.id
+  WHERE w.status = 'scheduled' AND d.stage IS NOT NULL;
+$$;
+GRANT EXECUTE ON FUNCTION due_webinar_reminders() TO authenticated;
+
+CREATE OR REPLACE FUNCTION mark_webinar_reminded(p_webinar_id UUID, p_stage TEXT)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF p_stage = '1d' THEN UPDATE webinars SET reminded_1d = TRUE WHERE id = p_webinar_id;
+  ELSIF p_stage = '1h' THEN UPDATE webinars SET reminded_1h = TRUE WHERE id = p_webinar_id;
+  ELSE RAISE EXCEPTION 'Unknown reminder stage: %', p_stage;
+  END IF;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION mark_webinar_reminded(UUID, TEXT) TO authenticated;
