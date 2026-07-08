@@ -1604,9 +1604,23 @@ END; $$;
 GRANT EXECUTE ON FUNCTION convert_prices(TEXT, JSONB) TO anon, authenticated;
 
 -- GC expired quotes (mirrors immigroov's daily 'pricing-quotes-gc' pg_cron job).
--- Not scheduled here — groovia-backend has no pg_cron jobs registered yet;
--- run this manually or wire up a scheduler when the cron infra exists.
--- DELETE FROM pricing_quotes WHERE expires_at < NOW() - INTERVAL '1 day';
+-- Pure housekeeping DELETE, no business logic, no external I/O — stays in
+-- pg_cron per INFRASTRUCTURE_ARCHITECTURE_PLAN.md (a DB-native job has no
+-- reason to wake the application). Guarded the same way as every other
+-- pg_cron block in this file so the migration still succeeds where pg_cron
+-- isn't enabled.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN
+    IF EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'pricing-quotes-gc') THEN
+      PERFORM cron.unschedule('pricing-quotes-gc');
+    END IF;
+    PERFORM cron.schedule('pricing-quotes-gc', '30 3 * * *',
+      $gc$ DELETE FROM pricing_quotes WHERE expires_at < NOW() - INTERVAL '1 day' $gc$);
+  ELSE
+    RAISE NOTICE 'pg_cron not enabled — skipping pricing-quotes-gc schedule. Enable it and re-run this block.';
+  END IF;
+END $$;
 
 -- ============================================================================
 -- Seed mentor data (testing only)
@@ -2832,6 +2846,18 @@ BEGIN
       PERFORM cron.unschedule('auto-complete');
     END IF;
     PERFORM cron.schedule('auto-complete', '*/15 * * * *', 'SELECT mark_past_bookings_completed()');
+
+    -- expire_stale_holds: pure SQL, zero external I/O, 1-minute cadence — the
+    -- tightest latency requirement of any scheduled job in this codebase.
+    -- Belongs in pg_cron, not the application scheduler, per
+    -- INFRASTRUCTURE_ARCHITECTURE_PLAN.md §1 (reclassified there from the
+    -- admin-endpoint stand-in shipped in an earlier pass — that endpoint,
+    -- POST /admin/payments/expire-holds, still exists as a manual "expire now"
+    -- ops tool, but this cron entry is the primary trigger going forward).
+    IF EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'expire-payment-holds') THEN
+      PERFORM cron.unschedule('expire-payment-holds');
+    END IF;
+    PERFORM cron.schedule('expire-payment-holds', '* * * * *', 'SELECT expire_stale_holds()');
   ELSE
     RAISE NOTICE 'pg_cron not enabled — skipping booking cron schedules. Enable it and re-run the cron block.';
   END IF;
