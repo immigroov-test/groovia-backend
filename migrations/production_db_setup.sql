@@ -3621,3 +3621,155 @@ BEGIN
     RAISE NOTICE 'pg_cron not enabled — skipping referral cron schedules.';
   END IF;
 END $$;
+
+-- ── 10. Manual review queue + admin reporting ───────────────────────────────
+-- Ported from immigroov's 0078 (review queue, resolve, freeze/unfreeze, void)
+-- + 0089/0090/0091 (admin_affiliates_overview — built with the LAST, fixed
+-- version directly: 0090 fixed a subquery column-shadowing bug, 0091 fixed a
+-- varchar/text type mismatch; neither bug is reproducible here since UUID/
+-- TEXT columns don't have the varchar(255) issue 0091 was working around,
+-- but the final query SHAPE — explicit column qualification in every
+-- subquery — is preserved) + 0097 (admin_referral_bookings_overview).
+
+CREATE OR REPLACE FUNCTION admin_mentor_steering_report()
+RETURNS TABLE(affiliate_id UUID, top_mentor_id UUID, concentration_pct NUMERIC)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT cl.affiliate_id, cl.mentor_id,
+         round(100.0 * COUNT(*) / SUM(COUNT(*)) OVER (PARTITION BY cl.affiliate_id), 1)
+  FROM commission_ledger cl
+  WHERE cl.session_completed_at >= date_trunc('month', NOW())
+  GROUP BY cl.affiliate_id, cl.mentor_id
+  ORDER BY cl.affiliate_id, 3 DESC;
+$$;
+GRANT EXECUTE ON FUNCTION admin_mentor_steering_report() TO authenticated;
+
+CREATE OR REPLACE FUNCTION admin_referral_review_queue()
+RETURNS TABLE (
+  flag_id UUID, affiliate_id UUID, booking_id UUID, vector_type TEXT,
+  created_at TIMESTAMPTZ, escalated_to_cofounder_at TIMESTAMPTZ,
+  commission_amount_inr NUMERIC, split_snapshot JSONB
+) LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT ff.id, ff.affiliate_id, ff.booking_id, ff.vector_type, ff.created_at, ff.escalated_to_cofounder_at,
+         cl.commission_amount_inr, cl.split_snapshot
+  FROM fraud_flags ff
+  LEFT JOIN commission_ledger cl ON cl.booking_id = ff.booking_id
+  WHERE ff.status = 'escalated'
+  ORDER BY ff.created_at ASC;
+$$;
+GRANT EXECUTE ON FUNCTION admin_referral_review_queue() TO authenticated;
+
+CREATE OR REPLACE FUNCTION admin_resolve_fraud_flag(p_flag_id UUID, p_decision TEXT, p_note TEXT DEFAULT NULL)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE f fraud_flags;
+BEGIN
+  IF p_decision NOT IN ('approve', 'approve_with_note', 'reject_and_hold') THEN
+    RAISE EXCEPTION 'Decision must be approve, approve_with_note, or reject_and_hold';
+  END IF;
+  SELECT * INTO f FROM fraud_flags WHERE id = p_flag_id FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Flag not found'; END IF;
+
+  UPDATE fraud_flags SET status = 'resolved', decision = p_decision, note = p_note, resolved_at = NOW() WHERE id = p_flag_id;
+
+  IF p_decision IN ('approve', 'approve_with_note') THEN
+    UPDATE commission_ledger SET status = 'approved' WHERE booking_id = f.booking_id AND status = 'pending_review';
+  END IF;
+  -- reject_and_hold: the ledger entry simply stays pending_review forever —
+  -- there is no separate "rejected" state, so it never becomes eligible for
+  -- a payout batch. No clawback is ever needed since nothing was paid.
+END;
+$$;
+GRANT EXECUTE ON FUNCTION admin_resolve_fraud_flag(UUID, TEXT, TEXT) TO authenticated;
+
+CREATE OR REPLACE FUNCTION admin_freeze_affiliate(p_affiliate_id UUID, p_note TEXT)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF p_note IS NULL OR TRIM(p_note) = '' THEN RAISE EXCEPTION 'A note is required to freeze an affiliate'; END IF;
+  UPDATE affiliates SET status = 'frozen' WHERE id = p_affiliate_id;
+  INSERT INTO referral_admin_actions (action, target_type, target_id, note) VALUES ('freeze', 'affiliate', p_affiliate_id, p_note);
+END;
+$$;
+GRANT EXECUTE ON FUNCTION admin_freeze_affiliate(UUID, TEXT) TO authenticated;
+
+CREATE OR REPLACE FUNCTION admin_unfreeze_affiliate(p_affiliate_id UUID, p_note TEXT)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF p_note IS NULL OR TRIM(p_note) = '' THEN RAISE EXCEPTION 'A note is required to unfreeze an affiliate'; END IF;
+  UPDATE affiliates SET status = 'active' WHERE id = p_affiliate_id;
+  INSERT INTO referral_admin_actions (action, target_type, target_id, note) VALUES ('unfreeze', 'affiliate', p_affiliate_id, p_note);
+END;
+$$;
+GRANT EXECUTE ON FUNCTION admin_unfreeze_affiliate(UUID, TEXT) TO authenticated;
+
+CREATE OR REPLACE FUNCTION admin_void_commission_ledger_entry(p_ledger_id UUID, p_note TEXT)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF p_note IS NULL OR TRIM(p_note) = '' THEN RAISE EXCEPTION 'A note is required to void a ledger entry'; END IF;
+  UPDATE commission_ledger SET status = 'pending_review', payout_batch_id = NULL WHERE id = p_ledger_id;
+  INSERT INTO referral_admin_actions (action, target_type, target_id, note) VALUES ('void_ledger_entry', 'commission_ledger', p_ledger_id, p_note);
+END;
+$$;
+GRANT EXECUTE ON FUNCTION admin_void_commission_ledger_entry(UUID, TEXT) TO authenticated;
+
+-- Adapted for a nullable affiliates.profile_id: an affiliate onboarded but
+-- not yet linked to an account (see the profile_id-nullable commit) still
+-- needs to show up here, using their fallback email/no display name.
+CREATE OR REPLACE FUNCTION admin_affiliates_overview()
+RETURNS TABLE (
+  affiliate_id UUID, email TEXT, first_name TEXT, type TEXT, status TEXT, tier TEXT,
+  this_month_referrals BIGINT, lifetime_paid_inr NUMERIC, active_flag_count BIGINT, total_flag_count BIGINT,
+  link_slug TEXT, code_string TEXT
+) LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  RETURN QUERY
+    SELECT a.id, COALESCE(p.email, a.email), COALESCE(p.display_name, p.full_name), a.type, a.status, current_affiliate_tier(a.id),
+      (SELECT COUNT(*) FROM commission_ledger cl WHERE cl.affiliate_id = a.id AND cl.status IN ('approved','paid')
+         AND date_trunc('month', cl.session_completed_at) = date_trunc('month', NOW())),
+      (SELECT COALESCE(SUM(cl2.commission_amount_inr), 0) FROM commission_ledger cl2 WHERE cl2.affiliate_id = a.id AND cl2.status = 'paid'),
+      (SELECT COUNT(*) FROM fraud_flags ff WHERE ff.affiliate_id = a.id AND ff.status = 'escalated'),
+      (SELECT COUNT(*) FROM fraud_flags ff2 WHERE ff2.affiliate_id = a.id),
+      al.slug, rc.code_string
+    FROM affiliates a
+    LEFT JOIN profiles p ON p.id = a.profile_id
+    LEFT JOIN affiliate_links al ON al.affiliate_id = a.id
+    LEFT JOIN referral_codes rc ON rc.affiliate_id = a.id
+    ORDER BY a.created_at DESC;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION admin_affiliates_overview() TO authenticated;
+
+-- Every referred booking (upcoming and settled) with the full money
+-- breakdown: discount applied, commission owed to the affiliate, net amount
+-- to the mentor for that same session.
+CREATE OR REPLACE FUNCTION admin_referral_bookings_overview()
+RETURNS TABLE (
+  booking_id UUID, status TEXT, slot_time TIMESTAMPTZ, customer_email TEXT,
+  affiliate_id UUID, affiliate_email TEXT, referral_code TEXT, discount_pct NUMERIC,
+  customer_paid NUMERIC, customer_currency TEXT,
+  commission_amount_inr NUMERIC, commission_status TEXT,
+  mentor_net_amount NUMERIC, mentor_currency TEXT
+) LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT
+    b.id, b.status::text, b.slot_time, b.candidate_email,
+    aff.id, COALESCE(p.email, aff.email),
+    b.referral_code, b.referral_discount_applied_pct,
+    cp.amount, cp.currency,
+    cl.commission_amount_inr, cl.status,
+    mp.net_amount_mentor_currency, mp.mentor_currency
+  FROM bookings b
+  LEFT JOIN commission_ledger cl ON cl.booking_id = b.id
+  LEFT JOIN referral_codes rc ON rc.code_string = b.referral_code
+  LEFT JOIN LATERAL (
+    SELECT affiliate_id FROM referral_click_events WHERE session_token = b.referral_session_token LIMIT 1
+  ) rce ON TRUE
+  LEFT JOIN affiliates aff ON aff.id = COALESCE(cl.affiliate_id, rc.affiliate_id, rce.affiliate_id)
+  LEFT JOIN profiles p ON p.id = aff.profile_id
+  LEFT JOIN LATERAL (
+    SELECT amount, currency FROM customer_payments WHERE booking_id = b.id ORDER BY created_at DESC LIMIT 1
+  ) cp ON TRUE
+  LEFT JOIN LATERAL (
+    SELECT net_amount_mentor_currency, mentor_currency FROM mentor_payouts WHERE booking_id = b.id ORDER BY created_at DESC LIMIT 1
+  ) mp ON TRUE
+  WHERE b.referral_code IS NOT NULL OR b.referral_session_token IS NOT NULL
+  ORDER BY b.slot_time DESC NULLS LAST;
+$$;
+GRANT EXECUTE ON FUNCTION admin_referral_bookings_overview() TO authenticated;
