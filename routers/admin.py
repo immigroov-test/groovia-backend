@@ -475,6 +475,36 @@ def verify_sweep(user: AuthUser = Depends(require_admin)):
         raise HTTPException(status_code=502, detail=f"Verify sweep failed: {e}")
 
 
+@router.post("/payments/process-refunds")
+def process_refunds(user: AuthUser = Depends(require_admin)):
+    """Admin-triggered stand-in for immigroov's process-refunds cron worker.
+    Finds captured/partially-refunded payments that still owe a refund and
+    issues Razorpay refunds. See db.process_refunds' docstring for the
+    concurrency fix (ON CONFLICT DO NOTHING on the payment_refunds insert) —
+    DISPATCHER_SAFETY_CHECKLIST.md's remaining item on the Razorpay job set.
+    Primary trigger will be the dispatcher once it exists."""
+    try:
+        return db.process_refunds()
+    except Exception as e:
+        logger.exception("process_refunds failed")
+        raise HTTPException(status_code=502, detail=f"Refund sweep failed: {e}")
+
+
+@router.post("/payments/reconcile")
+def reconcile_payments(user: AuthUser = Depends(require_admin)):
+    """Admin-triggered stand-in for immigroov's nightly reconcile-payments
+    cron. Read-only cross-check of local payment state against Razorpay —
+    logs mismatches to payment_reconciliation_log for ops review, never
+    mutates payment state, so safe to run repeatedly or concurrently with
+    no special handling. Primary trigger will be the dispatcher once it
+    exists."""
+    try:
+        return db.reconcile_payments()
+    except Exception as e:
+        logger.exception("reconcile_payments failed")
+        raise HTTPException(status_code=502, detail=f"Reconciliation failed: {e}")
+
+
 @router.post("/bookings/send-reminders")
 def send_customer_reminders(user: AuthUser = Depends(require_admin)):
     """Admin-triggered stand-in for immigroov's pg_cron `reminders-24h` +

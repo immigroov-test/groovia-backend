@@ -8,7 +8,7 @@ import hashlib
 import hmac
 import json
 import uuid
-from unittest.mock import call, patch
+from unittest.mock import MagicMock, call, patch
 
 import db
 import db.payments as payments
@@ -533,6 +533,188 @@ def test_admin_verify_sweep_happy_path(client):
             resp = client.post("/admin/payments/verify-sweep")
         assert resp.status_code == 200
         assert resp.json()["swept"] == 3
+        mocked.assert_called_once()
+    finally:
+        client.app.dependency_overrides.clear()
+
+
+# ── db.process_refunds ───────────────────────────────────────────────────────
+# Ports immigroov's process-refunds cron worker. DISPATCHER_SAFETY_CHECKLIST.md
+# item 2: the source's plain INSERT throws on a unique-violation for a losing
+# concurrent run — fixed here via upsert(ignore_duplicates=True). No live
+# Postgres in this environment (same limitation as every module); these tests
+# mock the Supabase client and cover the Python orchestration.
+
+def _fake_supabase_tables(tables: dict):
+    mock = MagicMock()
+    mock.table.side_effect = lambda name: tables[name]
+    return mock
+
+
+def test_process_refunds_issues_refund_for_owed_payment():
+    customer_payments = MagicMock()
+    customer_payments.select.return_value.not_.is_.return_value.in_.return_value.limit.return_value.execute.return_value.data = [
+        {"id": "pay_row_1", "booking_id": "b1", "provider_payment_id": "pay_1", "currency": "INR"},
+    ]
+    payment_refunds = MagicMock()
+    payment_refunds.select.return_value.eq.return_value.execute.return_value.count = 0
+
+    with patch.object(payments, "_supabase", _fake_supabase_tables({
+        "customer_payments": customer_payments, "payment_refunds": payment_refunds,
+    })), \
+         patch.object(payments, "refund_owed_minor", return_value=5000), \
+         patch.object(payments, "issue_razorpay_refund", return_value={"id": "rfnd_1", "status": "processed"}) as mocked_refund:
+        result = payments.process_refunds()
+
+    assert result == {"ok": True, "issued": 1, "failed": 0}
+    mocked_refund.assert_called_once_with(payment_id="pay_1", amount_minor=5000, booking_id="b1")
+    payment_refunds.upsert.assert_called_once()
+    upsert_call = payment_refunds.upsert.call_args
+    assert upsert_call.kwargs["on_conflict"] == "provider_refund_id"
+    assert upsert_call.kwargs["ignore_duplicates"] is True
+
+
+def test_process_refunds_skips_payments_that_owe_nothing():
+    customer_payments = MagicMock()
+    customer_payments.select.return_value.not_.is_.return_value.in_.return_value.limit.return_value.execute.return_value.data = [
+        {"id": "pay_row_1", "booking_id": "b1", "provider_payment_id": "pay_1", "currency": "INR"},
+    ]
+    payment_refunds = MagicMock()
+
+    with patch.object(payments, "_supabase", _fake_supabase_tables({
+        "customer_payments": customer_payments, "payment_refunds": payment_refunds,
+    })), \
+         patch.object(payments, "refund_owed_minor", return_value=0), \
+         patch.object(payments, "issue_razorpay_refund") as mocked_refund:
+        result = payments.process_refunds()
+
+    assert result == {"ok": True, "issued": 0, "failed": 0}
+    mocked_refund.assert_not_called()
+    payment_refunds.upsert.assert_not_called()
+
+
+def test_process_refunds_records_failure_and_continues():
+    """A Razorpay-side failure on one payment must not stop the rest of the
+    batch from being processed — same per-row isolation contract as every
+    other sweep-shaped job in this codebase."""
+    customer_payments = MagicMock()
+    customer_payments.select.return_value.not_.is_.return_value.in_.return_value.limit.return_value.execute.return_value.data = [
+        {"id": "pay_row_1", "booking_id": "b1", "provider_payment_id": "pay_1", "currency": "INR"},
+        {"id": "pay_row_2", "booking_id": "b2", "provider_payment_id": "pay_2", "currency": "INR"},
+    ]
+    payment_refunds = MagicMock()
+    payment_refunds.select.return_value.eq.return_value.execute.return_value.count = 0
+
+    def flaky_refund(*, payment_id, amount_minor, booking_id):
+        if payment_id == "pay_1":
+            raise RuntimeError("razorpay 502")
+        return {"id": "rfnd_2", "status": "processed"}
+
+    with patch.object(payments, "_supabase", _fake_supabase_tables({
+        "customer_payments": customer_payments, "payment_refunds": payment_refunds,
+    })), \
+         patch.object(payments, "refund_owed_minor", return_value=1000), \
+         patch.object(payments, "issue_razorpay_refund", side_effect=flaky_refund):
+        result = payments.process_refunds()
+
+    assert result == {"ok": True, "issued": 1, "failed": 1}
+    payment_refunds.insert.assert_called_once()   # the failure was recorded
+    assert payment_refunds.insert.call_args.args[0]["status"] == "failed"
+
+
+# ── db.reconcile_payments ────────────────────────────────────────────────────
+# Ports immigroov's nightly reconcile-payments cron. Read-only — no
+# concurrency risk once built (item 6 of DISPATCHER_SAFETY_CHECKLIST.md's
+# punch list), just needed the schema + function built from scratch.
+
+def test_reconcile_payments_no_mismatch_for_matching_payment():
+    customer_payments = MagicMock()
+    customer_payments.select.return_value.not_.is_.return_value.gte.return_value.limit.return_value.execute.return_value.data = [
+        {"id": "p1", "booking_id": "b1", "amount": 50.00, "currency": "INR", "state": "captured", "provider_payment_id": "pay_1"},
+    ]
+    reconciliation_log = MagicMock()
+
+    with patch.object(payments, "_supabase", _fake_supabase_tables({
+        "customer_payments": customer_payments, "payment_reconciliation_log": reconciliation_log,
+    })), \
+         patch.object(payments, "fetch_razorpay_payment", return_value={"amount": 5000, "currency": "INR", "status": "captured"}):
+        result = payments.reconcile_payments()
+
+    assert result == {"ok": True, "checked": 1, "mismatches": 0}
+    reconciliation_log.insert.assert_not_called()
+
+
+def test_reconcile_payments_logs_amount_mismatch():
+    customer_payments = MagicMock()
+    customer_payments.select.return_value.not_.is_.return_value.gte.return_value.limit.return_value.execute.return_value.data = [
+        {"id": "p1", "booking_id": "b1", "amount": 50.00, "currency": "INR", "state": "captured", "provider_payment_id": "pay_1"},
+    ]
+    reconciliation_log = MagicMock()
+
+    with patch.object(payments, "_supabase", _fake_supabase_tables({
+        "customer_payments": customer_payments, "payment_reconciliation_log": reconciliation_log,
+    })), \
+         patch.object(payments, "fetch_razorpay_payment", return_value={"amount": 9999, "currency": "INR", "status": "captured"}):
+        result = payments.reconcile_payments()
+
+    assert result == {"ok": True, "checked": 1, "mismatches": 1}
+    reconciliation_log.insert.assert_called_once()
+    logged = reconciliation_log.insert.call_args.args[0]
+    assert logged["kind"] == "mismatch"
+    assert "amount" in logged["detail"]
+
+
+def test_reconcile_payments_logs_fetch_failure_and_continues():
+    customer_payments = MagicMock()
+    customer_payments.select.return_value.not_.is_.return_value.gte.return_value.limit.return_value.execute.return_value.data = [
+        {"id": "p1", "booking_id": "b1", "amount": 50.00, "currency": "INR", "state": "captured", "provider_payment_id": "pay_1"},
+        {"id": "p2", "booking_id": "b2", "amount": 20.00, "currency": "INR", "state": "captured", "provider_payment_id": "pay_2"},
+    ]
+    reconciliation_log = MagicMock()
+
+    def flaky_fetch(payment_id):
+        if payment_id == "pay_1":
+            raise RuntimeError("razorpay timeout")
+        return {"amount": 2000, "currency": "INR", "status": "captured"}
+
+    with patch.object(payments, "_supabase", _fake_supabase_tables({
+        "customer_payments": customer_payments, "payment_reconciliation_log": reconciliation_log,
+    })), \
+         patch.object(payments, "fetch_razorpay_payment", side_effect=flaky_fetch):
+        result = payments.reconcile_payments()
+
+    assert result == {"ok": True, "checked": 2, "mismatches": 1}
+    logged = reconciliation_log.insert.call_args.args[0]
+    assert logged["kind"] == "fetch_failed"
+
+
+# ── POST /admin/payments/process-refunds, /admin/payments/reconcile ─────────
+
+def test_admin_process_refunds_happy_path(client):
+    from core.auth import AuthUser, get_current_user
+    admin_user = AuthUser(id=str(uuid.uuid4()), email="admin@example.com", role="authenticated")
+    client.app.dependency_overrides[get_current_user] = lambda: admin_user
+    try:
+        with patch.object(db, "get_profile_role", return_value="admin"), \
+             patch.object(db, "process_refunds", return_value={"ok": True, "issued": 1, "failed": 0}) as mocked:
+            resp = client.post("/admin/payments/process-refunds")
+        assert resp.status_code == 200
+        assert resp.json()["issued"] == 1
+        mocked.assert_called_once()
+    finally:
+        client.app.dependency_overrides.clear()
+
+
+def test_admin_reconcile_payments_happy_path(client):
+    from core.auth import AuthUser, get_current_user
+    admin_user = AuthUser(id=str(uuid.uuid4()), email="admin@example.com", role="authenticated")
+    client.app.dependency_overrides[get_current_user] = lambda: admin_user
+    try:
+        with patch.object(db, "get_profile_role", return_value="admin"), \
+             patch.object(db, "reconcile_payments", return_value={"ok": True, "checked": 5, "mismatches": 0}) as mocked:
+            resp = client.post("/admin/payments/reconcile")
+        assert resp.status_code == 200
+        assert resp.json()["checked"] == 5
         mocked.assert_called_once()
     finally:
         client.app.dependency_overrides.clear()

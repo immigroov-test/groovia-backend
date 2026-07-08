@@ -326,6 +326,124 @@ def verify_order(order_id: str) -> dict[str, Any]:
     return {"order_id": order_id, "confirmed": result in ("confirmed", "already_confirmed"), "status": result}
 
 
+def process_refunds(limit: int = 200) -> dict[str, Any]:
+    """Ports immigroov's process-refunds Edge Function: finds captured/
+    partially-refunded payments that still owe a refund (per refund_owed_minor)
+    and issues Razorpay refunds against the original payment. Supports
+    multiple partial refunds per payment (ledger_version increments per call).
+
+    Concurrency: DISPATCHER_SAFETY_CHECKLIST.md item 2 flagged the source's
+    plain INSERT as unsafe under overlap — two racing runs computing the same
+    `version` would send Razorpay the same idempotency key (safe, Razorpay
+    dedupes) but then both try to insert the same provider_refund_id, and an
+    unguarded INSERT throws a unique-violation for the loser. Fixed here with
+    upsert(..., on_conflict='provider_refund_id', ignore_duplicates=True) so
+    a losing concurrent run degrades to a clean no-op. The dispatcher-wide
+    lease lock (services/dispatcher_lock.py) is the primary defence against
+    two ticks racing at all; this is the backstop for when this function is
+    also reachable via the manual admin endpoint outside that lock."""
+    rows = (
+        _supabase.table("customer_payments")
+        .select("id, booking_id, provider_payment_id, currency")
+        .not_.is_("provider_payment_id", "null")
+        .in_("state", ["captured", "partially_refunded"])
+        .limit(limit)
+        .execute()
+    )
+
+    issued = 0
+    failed = 0
+    for p in rows.data or []:
+        owed_minor = refund_owed_minor(p["booking_id"])
+        if owed_minor <= 0:
+            continue
+
+        count_res = (
+            _supabase.table("payment_refunds")
+            .select("id", count="exact")
+            .eq("booking_id", p["booking_id"])
+            .execute()
+        )
+        version = count_res.count or 0
+
+        try:
+            refund = issue_razorpay_refund(
+                payment_id=p["provider_payment_id"], amount_minor=owed_minor, booking_id=p["booking_id"],
+            )
+            status = "processed" if refund.get("status") == "processed" else "created"
+            (
+                _supabase.table("payment_refunds")
+                .upsert(
+                    {
+                        "payment_id": p["id"], "booking_id": p["booking_id"], "amount_minor": owed_minor,
+                        "currency": p["currency"], "status": status, "provider_refund_id": refund.get("id"),
+                        "ledger_version": version,
+                    },
+                    on_conflict="provider_refund_id", ignore_duplicates=True,
+                )
+                .execute()
+            )
+            issued += 1
+        except Exception as e:
+            logger.exception("process_refunds: refund failed booking=%s", p["booking_id"])
+            _supabase.table("payment_refunds").insert({
+                "payment_id": p["id"], "booking_id": p["booking_id"], "amount_minor": owed_minor,
+                "currency": p["currency"], "status": "failed", "ledger_version": version,
+                "provider_error_description": str(e),
+            }).execute()
+            failed += 1
+
+    return {"ok": True, "issued": issued, "failed": failed}
+
+
+def reconcile_payments(window_hours: int = 36, limit: int = 500) -> dict[str, Any]:
+    """Ports immigroov's reconcile-payments Edge Function (nightly cron):
+    cross-checks local customer_payments against Razorpay's record of the
+    payment and logs any mismatch (amount/currency/status/fetch failure) to
+    payment_reconciliation_log for ops review. Read-only against
+    customer_payments/bookings — never mutates payment state, so safe to run
+    concurrently or retry with no special handling."""
+    since = (datetime.now(timezone.utc) - timedelta(hours=window_hours)).isoformat()
+    rows = (
+        _supabase.table("customer_payments")
+        .select("id, booking_id, amount, currency, state, provider_payment_id")
+        .not_.is_("provider_payment_id", "null")
+        .gte("created_at", since)
+        .limit(limit)
+        .execute()
+    )
+
+    mismatches = 0
+    for p in rows.data or []:
+        try:
+            remote = fetch_razorpay_payment(p["provider_payment_id"])
+        except Exception as e:
+            mismatches += 1
+            _supabase.table("payment_reconciliation_log").insert({
+                "kind": "fetch_failed", "provider_payment_id": p["provider_payment_id"],
+                "booking_id": p["booking_id"], "detail": {"error": str(e)},
+            }).execute()
+            continue
+
+        local_minor = to_minor(float(p["amount"]), p["currency"])
+        problems: dict[str, Any] = {}
+        if remote.get("amount") != local_minor:
+            problems["amount"] = {"local": local_minor, "provider": remote.get("amount")}
+        if str(remote.get("currency", "")).upper() != str(p["currency"]).upper():
+            problems["currency"] = {"local": p["currency"], "provider": remote.get("currency")}
+        if p["state"] == "captured" and remote.get("status") not in ("captured", "refunded"):
+            problems["status"] = {"local": p["state"], "provider": remote.get("status")}
+
+        if problems:
+            mismatches += 1
+            _supabase.table("payment_reconciliation_log").insert({
+                "kind": "mismatch", "provider_payment_id": p["provider_payment_id"],
+                "booking_id": p["booking_id"], "detail": problems,
+            }).execute()
+
+    return {"ok": True, "checked": len(rows.data or []), "mismatches": mismatches}
+
+
 def sweep_verify_payments(window_minutes: int = 60, limit: int = 100) -> dict[str, Any]:
     """Cron backstop for missed/delayed webhooks — verifies every recent still-
     'created' payment that has an order id. Mirrors immigroov's razorpay-verify

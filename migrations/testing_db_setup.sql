@@ -2010,6 +2010,19 @@ CREATE TABLE IF NOT EXISTS payment_events (
   received_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Ports immigroov's reconcile-payments Edge Function's audit trail. Read-only
+-- consumer (db.reconcile_payments) — no RPC needed, plain table access like
+-- payment_events/payment_refunds already use from Python.
+CREATE TABLE IF NOT EXISTS payment_reconciliation_log (
+  id                    BIGSERIAL PRIMARY KEY,
+  kind                  TEXT NOT NULL,   -- 'mismatch' | 'fetch_failed'
+  provider_payment_id   TEXT,
+  booking_id            UUID REFERENCES bookings(id) ON DELETE CASCADE,
+  detail                JSONB,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_payment_reconciliation_log_booking ON payment_reconciliation_log(booking_id);
+
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS payment_hold_expires_at TIMESTAMPTZ;  -- 10-min reservation hold
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS customer_currency TEXT;
 
