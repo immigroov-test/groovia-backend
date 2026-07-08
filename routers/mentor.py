@@ -66,6 +66,18 @@ def get_my_mentor(user: AuthUser = Depends(get_current_user)):
 
 # ── Initial signup ─────────────────────────────────────────────────────────────
 
+class WeeklySlot(BaseModel):
+    weekday: str        # "Monday" .. "Sunday"
+    start_time: str     # "HH:MM"
+    end_time: str       # "HH:MM"
+
+
+class ServiceDraft(BaseModel):
+    title: str
+    duration: int       # 15 | 30 | 45 | 60
+    is_active: bool = True
+
+
 class MentorSignupBody(BaseModel):
     display_name: str
     headline: Optional[str] = None
@@ -82,15 +94,8 @@ class MentorSignupBody(BaseModel):
     years_lived_experience: Optional[int] = None
     professional_domains: list[str] = []
     agreed_to_mentor_terms: bool = False
-    session_duration_minutes: int = 60
-    availability_slots: list[AvailabilitySlot] = []
-
-    @field_validator("session_duration_minutes")
-    @classmethod
-    def validate_duration(cls, v: int) -> int:
-        if v not in (30, 60, 90):
-            raise ValueError("session_duration_minutes must be 30, 60, or 90")
-        return v
+    weekly_availability: list[WeeklySlot] = []
+    services: list[ServiceDraft] = []
 
     @field_validator("years_lived_experience")
     @classmethod
@@ -139,21 +144,22 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
         expertise_country_codes=body.expertise_country_codes,
         years_lived_experience=body.years_lived_experience,
         professional_domains=body.professional_domains,
-        session_duration_minutes=body.session_duration_minutes,
     )
-    # Availability is collected on step 2 of the signup wizard and stored alongside
-    # the profile so the admin sees both when reviewing.
-    if body.availability_slots:
+    mentor_id = result["id"]
+    # Weekly availability -> weekly_availability (the table the booking engine reads).
+    for slot in body.weekly_availability:
         try:
-            db.set_mentor_availability(
-                result["id"],
-                slots=[s.model_dump() for s in body.availability_slots],
-                session_duration_minutes=body.session_duration_minutes,
-                availability_type="manual",
-            )
+            db.add_weekly_availability(mentor_id=mentor_id, weekday=slot.weekday,
+                                       start_time=slot.start_time, end_time=slot.end_time)
         except Exception:
-            logger.exception("Availability save failed during signup for mentor %s", result["id"])
-    _, mentor_email = db.get_mentor_email(result["id"])
+            logger.exception("Weekly availability insert failed during signup for mentor %s", mentor_id)
+    # Session types the mentee can book.
+    for svc in body.services:
+        try:
+            db.create_service(mentor_id=mentor_id, title=svc.title, duration=svc.duration, is_active=svc.is_active)
+        except Exception:
+            logger.exception("Service create failed during signup for mentor %s", mentor_id)
+    _, mentor_email = db.get_mentor_email(mentor_id)
     if mentor_email:
         background_tasks.add_task(
             mailer.send_transactional,
