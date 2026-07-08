@@ -409,17 +409,21 @@ def admin_webinar_registrants(webinar_id: str, user: AuthUser = Depends(require_
 @router.post("/webinars/send-reminders")
 def send_webinar_reminders(user: AuthUser = Depends(require_admin)):
     """Admin-triggered stand-in for immigroov's pg_cron `webinar-reminders`
-    job (every 10 min, no request context — impossible to reproduce as a
-    true cron job without SQL-side HTTP or a scheduler groovia doesn't have
-    yet). Finds due (1-day/1-hour) reminders, sends one email per registrant,
-    and marks each (webinar, stage) as sent so it never re-fires. Wiring
-    this to an actual timer (cron/cloud scheduler hitting this endpoint) is
-    explicitly out of scope for this migration pass — see the SQL comment on
-    due_webinar_reminders."""
-    due = db.due_webinar_reminders()
+    job (every 10 min, no request context) — primary trigger will be the
+    dispatcher once it exists (INFRASTRUCTURE_ARCHITECTURE_PLAN.md).
+
+    claim_due_webinar_reminders() ATOMICALLY claims each due (webinar, stage)
+    pair before this function sends anything — the rows it returns are
+    already flipped to "reminded" in the DB, so a second call (overlapping
+    invocation, or this endpoint hit twice) gets nothing back for a pair
+    already claimed and sends nothing for it. This replaced a read-then-mark
+    version that could double-send under overlap — see
+    DISPATCHER_SAFETY_CHECKLIST.md's send_webinar_reminders finding."""
+    due = db.claim_due_webinar_reminders()
     sent = 0
-    marked: set[tuple[str, str]] = set()
+    webinars_reminded: set[tuple[str, str]] = set()
     for row in due:
+        webinars_reminded.add((row["webinar_id"], row["stage"]))
         try:
             mailer.send_transactional(row["registrant_email"], "webinar_reminder", {
                 "recipient_name": row.get("registrant_name") or "",
@@ -430,13 +434,13 @@ def send_webinar_reminders(user: AuthUser = Depends(require_admin)):
             })
             sent += 1
         except Exception:
+            # The claim already happened — a send failure here does NOT get
+            # retried by the next tick (the flag is already flipped). Logged
+            # for ops follow-up; accepting a lost reminder is the tradeoff for
+            # not re-sending to everyone else who already got theirs.
             logger.warning("webinar reminder email failed webinar=%s stage=%s", row.get("webinar_id"), row.get("stage"))
             continue
-        key = (row["webinar_id"], row["stage"])
-        if key not in marked:
-            db.mark_webinar_reminded(row["webinar_id"], row["stage"])
-            marked.add(key)
-    return {"emails_sent": sent, "webinars_marked": len(marked)}
+    return {"emails_sent": sent, "webinars_marked": len(webinars_reminded)}
 
 
 @router.post("/payments/expire-holds")

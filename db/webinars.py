@@ -71,10 +71,13 @@ def admin_webinars() -> list[dict[str, Any]]:
     return res.data or []
 
 
-def due_webinar_reminders() -> list[dict[str, Any]]:
-    res = _supabase.rpc("due_webinar_reminders", {}).execute()
+def claim_due_webinar_reminders() -> list[dict[str, Any]]:
+    """Atomically claims every currently-due (webinar, stage) reminder pair —
+    the claim (flipping reminded_1d/reminded_1h) happens inside this one RPC
+    call, before any email is sent. Only rows this call actually claimed are
+    returned; a concurrent call racing for the same row gets nothing back for
+    it. See the SQL function's own comment for why this replaced a separate
+    read-then-mark pair (DISPATCHER_SAFETY_CHECKLIST.md's send_webinar_reminders
+    finding — the old shape could double-send under overlap)."""
+    res = _supabase.rpc("claim_due_webinar_reminders", {}).execute()
     return res.data or []
-
-
-def mark_webinar_reminded(webinar_id: str, stage: str) -> None:
-    _supabase.rpc("mark_webinar_reminded", {"p_webinar_id": webinar_id, "p_stage": stage}).execute()

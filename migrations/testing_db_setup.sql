@@ -4674,46 +4674,52 @@ GRANT EXECUTE ON FUNCTION admin_webinars() TO authenticated;
 
 -- Reminders: immigroov's send_webinar_reminders (0060 two-stage FINAL) both
 -- selects due webinars AND sends the batched email in one plpgsql function,
--- via pg_net — impossible here (no SQL-side HTTP in groovia). Split into a
--- read-only "what's due" RPC and a "mark it sent" RPC; the actual email
--- send happens at the FastAPI layer, which must call due_webinar_reminders,
--- send via the mailer service, then call mark_webinar_reminded per
--- (webinar, stage) it successfully processed.
+-- via pg_net — impossible here (no SQL-side HTTP in groovia). The actual
+-- email send happens at the FastAPI layer.
 --
--- GENUINELY DEFERRED, not silently dropped: immigroov drives this from
--- pg_cron on a 10-minute timer with no request context — groovia has no
--- scheduler infrastructure at all yet (confirmed: the pre-existing
--- session_reminder_24h/session_reminder_1h mailer templates for 1:1
--- bookings are similarly unwired to anything, same gap, not new to this
--- module). Until a real scheduler exists, these two RPCs back an
--- admin-triggerable endpoint only — wiring an actual timer is out of scope
--- for this migration pass.
-CREATE OR REPLACE FUNCTION due_webinar_reminders()
+-- GENUINELY DEFERRED (the scheduler part), not silently dropped: immigroov
+-- drives this from pg_cron on a 10-minute timer with no request context —
+-- groovia has no dispatcher yet (see INFRASTRUCTURE_ARCHITECTURE_PLAN.md).
+-- Until it exists, this backs an admin-triggerable endpoint only.
+--
+-- claim_due_webinar_reminders() replaces an earlier two-step version of this
+-- (due_webinar_reminders() read + a separate mark_webinar_reminded() write,
+-- called after sending). That shape was NOT concurrency-safe: two overlapping
+-- calls could both read the same "not yet reminded" webinar before either
+-- wrote its flag, so both would send — the DB constraint dedupes the flag,
+-- not the email. See DISPATCHER_SAFETY_CHECKLIST.md's send_webinar_reminders
+-- finding. This version claims each (webinar, stage) FIRST via an UPDATE ...
+-- WHERE NOT already-reminded ... RETURNING — Postgres's own row-level locking
+-- on that UPDATE guarantees at most one caller ever gets a given (webinar,
+-- stage) back — then joins registrants only for what it actually claimed.
+-- A caller that sends nothing for a row it didn't get back is safe.
+CREATE OR REPLACE FUNCTION claim_due_webinar_reminders()
 RETURNS TABLE(
   webinar_id UUID, stage TEXT, title TEXT, start_time TIMESTAMPTZ, duration INT, room_url TEXT,
   registrant_email TEXT, registrant_name TEXT
-) LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
-  SELECT w.id, d.stage, w.title, w.start_time, w.duration, w.room_url, r.email, r.name
-  FROM webinars w
-  CROSS JOIN LATERAL (
-    SELECT CASE
-      WHEN NOT w.reminded_1d AND w.start_time BETWEEN NOW() + INTERVAL '23 hours' AND NOW() + INTERVAL '25 hours' THEN '1d'
-      WHEN NOT w.reminded_1h AND w.start_time BETWEEN NOW() AND NOW() + INTERVAL '70 minutes' THEN '1h'
-      ELSE NULL
-    END AS stage
-  ) d
-  JOIN webinar_registrations r ON r.webinar_id = w.id
-  WHERE w.status = 'scheduled' AND d.stage IS NOT NULL;
-$$;
-GRANT EXECUTE ON FUNCTION due_webinar_reminders() TO authenticated;
-
-CREATE OR REPLACE FUNCTION mark_webinar_reminded(p_webinar_id UUID, p_stage TEXT)
-RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+) LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 BEGIN
-  IF p_stage = '1d' THEN UPDATE webinars SET reminded_1d = TRUE WHERE id = p_webinar_id;
-  ELSIF p_stage = '1h' THEN UPDATE webinars SET reminded_1h = TRUE WHERE id = p_webinar_id;
-  ELSE RAISE EXCEPTION 'Unknown reminder stage: %', p_stage;
-  END IF;
+  RETURN QUERY
+  WITH claimed_1d AS (
+    UPDATE webinars
+    SET reminded_1d = TRUE
+    WHERE status = 'scheduled' AND NOT reminded_1d
+      AND start_time BETWEEN NOW() + INTERVAL '23 hours' AND NOW() + INTERVAL '25 hours'
+    RETURNING id, '1d'::TEXT AS stage, title, start_time, duration, room_url
+  ), claimed_1h AS (
+    UPDATE webinars
+    SET reminded_1h = TRUE
+    WHERE status = 'scheduled' AND NOT reminded_1h
+      AND start_time BETWEEN NOW() AND NOW() + INTERVAL '70 minutes'
+    RETURNING id, '1h'::TEXT AS stage, title, start_time, duration, room_url
+  ), claimed AS (
+    SELECT * FROM claimed_1d
+    UNION ALL
+    SELECT * FROM claimed_1h
+  )
+  SELECT c.id, c.stage, c.title, c.start_time, c.duration, c.room_url, r.email, r.name
+  FROM claimed c
+  JOIN webinar_registrations r ON r.webinar_id = c.id;
 END;
 $$;
-GRANT EXECUTE ON FUNCTION mark_webinar_reminded(UUID, TEXT) TO authenticated;
+GRANT EXECUTE ON FUNCTION claim_due_webinar_reminders() TO authenticated;

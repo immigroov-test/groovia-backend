@@ -250,14 +250,42 @@ def test_send_webinar_reminders_happy_path(client):
     ]
     try:
         with patch.object(db, "get_profile_role", return_value="admin"), \
-             patch.object(db, "due_webinar_reminders", return_value=due), \
-             patch.object(db, "mark_webinar_reminded") as mocked_mark, \
+             patch.object(db, "claim_due_webinar_reminders", return_value=due) as mocked_claim, \
              patch("services.mailer.send_transactional") as mocked_send:
             resp = client.post("/admin/webinars/send-reminders")
         assert resp.status_code == 200
         assert resp.json() == {"emails_sent": 2, "webinars_marked": 1}
         assert mocked_send.call_count == 2
-        mocked_mark.assert_called_once_with("w1", "1d")
+        mocked_claim.assert_called_once()
+    finally:
+        client.app.dependency_overrides.clear()
+
+
+def test_send_webinar_reminders_second_overlapping_call_sends_nothing_new(client):
+    """Regression test for the race the old due_webinar_reminders()/
+    mark_webinar_reminded() split had: a read-only "what's due" query plus a
+    separate "mark it sent" write meant two overlapping calls could both read
+    the same due webinar before either marked it, so both would send —
+    duplicate emails to every registrant. claim_due_webinar_reminders()
+    claims atomically (the SQL UPDATE ... RETURNING flips the flag as part of
+    selecting the rows), so a second call for the same tick sees nothing left
+    to claim. Simulated here as two sequential admin-endpoint calls where the
+    second's claim mock returns empty — exactly what the real RPC would
+    return for a row another caller already claimed."""
+    _as_admin(client)
+    due = [
+        {"webinar_id": "w1", "stage": "1h", "title": "Visa Q&A", "start_time": "2026-08-01T10:00:00Z",
+         "room_url": "https://x", "registrant_email": "a@example.com", "registrant_name": "A"},
+    ]
+    try:
+        with patch.object(db, "get_profile_role", return_value="admin"), \
+             patch.object(db, "claim_due_webinar_reminders", side_effect=[due, []]), \
+             patch("services.mailer.send_transactional") as mocked_send:
+            first = client.post("/admin/webinars/send-reminders")
+            second = client.post("/admin/webinars/send-reminders")
+        assert first.status_code == 200 and first.json()["emails_sent"] == 1
+        assert second.status_code == 200 and second.json()["emails_sent"] == 0
+        mocked_send.assert_called_once()   # not twice — the registrant was only emailed by the first call
     finally:
         client.app.dependency_overrides.clear()
 
