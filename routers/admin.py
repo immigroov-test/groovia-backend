@@ -437,3 +437,19 @@ def send_webinar_reminders(user: AuthUser = Depends(require_admin)):
             db.mark_webinar_reminded(row["webinar_id"], row["stage"])
             marked.add(key)
     return {"emails_sent": sent, "webinars_marked": len(marked)}
+
+
+@router.post("/fx/refresh")
+def refresh_fx_rates(user: AuthUser = Depends(require_admin)):
+    """Admin-triggered stand-in for immigroov's pg_cron `fx-refresh-6h` job.
+    compute_booking_price hard-fails once fx_rates is >24h stale
+    (platform_settings.fx_max_age_minutes), so this must run at least every
+    ~6h in production or pricing starts failing. Wiring a real scheduler
+    (cron/cloud scheduler hitting this endpoint every 6h) is the remaining
+    infra step — this endpoint is the logic, same pattern as
+    /admin/webinars/send-reminders above."""
+    try:
+        return db.refresh_fx_rates()
+    except Exception as e:
+        logger.exception("fx refresh failed")
+        raise HTTPException(status_code=502, detail=f"FX refresh failed: {e}")
