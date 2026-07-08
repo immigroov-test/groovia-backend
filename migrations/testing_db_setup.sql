@@ -3992,3 +3992,123 @@ RETURNS TABLE (
   ORDER BY b.slot_time DESC NULLS LAST;
 $$;
 GRANT EXECUTE ON FUNCTION admin_referral_bookings_overview() TO authenticated;
+
+-- ── 11. Payout batching ──────────────────────────────────────────────────────
+-- Ported from immigroov's 0078. SCOPE NOTE preserved from the source: this
+-- only tracks eligibility and marks entries "paid" (swept into a finalized
+-- batch). It does NOT move any money — the actual bank/PayPal/Razorpay
+-- transfer is a manual step outside this system, same as immigroov's V1.
+
+CREATE OR REPLACE FUNCTION add_working_days(p_start TIMESTAMPTZ, p_days INT)
+RETURNS TIMESTAMPTZ LANGUAGE plpgsql IMMUTABLE AS $$
+DECLARE v_date DATE := p_start::date; v_added INT := 0;
+BEGIN
+  WHILE v_added < p_days LOOP
+    v_date := v_date + 1;
+    IF EXTRACT(isodow FROM v_date) < 6 THEN v_added := v_added + 1; END IF;  -- Mon-Fri only, no holiday calendar (locked V1 convention)
+  END LOOP;
+  RETURN v_date::timestamptz;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION admin_payout_batch_preview(p_batch_date DATE)
+RETURNS TABLE (commission_ledger_id UUID, affiliate_id UUID, amount_inr NUMERIC, booking_id UUID)
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_min_days INT;
+BEGIN
+  v_min_days := COALESCE(referral_setting('referral_payout_min_working_days')::int, 5);
+  RETURN QUERY
+    SELECT cl.id, cl.affiliate_id, cl.commission_amount_inr, cl.booking_id
+    FROM commission_ledger cl
+    WHERE cl.status = 'approved'
+      AND cl.payout_batch_id IS NULL
+      AND add_working_days(cl.session_completed_at, v_min_days) <= p_batch_date::timestamptz;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION admin_payout_batch_preview(DATE) TO authenticated;
+
+CREATE OR REPLACE FUNCTION admin_finalize_payout_batch(p_batch_date DATE)
+RETURNS UUID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_batch_id UUID;
+BEGIN
+  INSERT INTO payout_batches (batch_date, status) VALUES (p_batch_date, 'finalized')
+    ON CONFLICT (batch_date) DO UPDATE SET status = 'finalized'
+    RETURNING id INTO v_batch_id;
+  UPDATE commission_ledger cl
+    SET payout_batch_id = v_batch_id, status = 'paid'
+    FROM admin_payout_batch_preview(p_batch_date) prev
+    WHERE cl.id = prev.commission_ledger_id;
+  RETURN v_batch_id;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION admin_finalize_payout_batch(DATE) TO authenticated;
+
+-- ── 12. Affiliate-facing dashboard ──────────────────────────────────────────
+-- Ported from immigroov's 0078 (base) + 0095 ("upcoming" in-flight referrals).
+-- Deliberately hides fraud-flag reasoning — only ever exposes a plain
+-- boolean "under_review", matching the source's product requirement.
+--
+-- Identity adaptation: immigroov's 0088 switched this to a p_email param
+-- because immigroov has no real auth (current_user_id() is never populated).
+-- groovia DOES have real Supabase Auth — the FastAPI layer resolves the
+-- caller's identity from their JWT before calling this RPC, so it takes
+-- p_profile_id directly rather than reintroducing the email-based workaround
+-- immigroov needed. Same reasoning as the Auth module: don't revert a
+-- security improvement to match the source.
+CREATE OR REPLACE FUNCTION affiliate_dashboard_summary(p_profile_id UUID)
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_affiliate affiliates; v_link affiliate_links; v_code referral_codes; v_result JSONB;
+BEGIN
+  SELECT * INTO v_affiliate FROM affiliates WHERE profile_id = p_profile_id;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Not an affiliate account'; END IF;
+  SELECT * INTO v_link FROM affiliate_links WHERE affiliate_id = v_affiliate.id;
+  SELECT * INTO v_code FROM referral_codes WHERE affiliate_id = v_affiliate.id;
+
+  SELECT jsonb_build_object(
+    'affiliate', jsonb_build_object('id', v_affiliate.id, 'type', v_affiliate.type, 'status', v_affiliate.status),
+    'link', jsonb_build_object('slug', v_link.slug, 'is_house_channel', v_link.is_house_channel),
+    'code', jsonb_build_object('code', v_code.code_string, 'expires_at', v_code.expires_at,
+                                'redemption_count', v_code.redemption_count, 'redemption_cap', v_code.redemption_cap,
+                                'discount_pct', v_code.discount_pct),
+    'tier', current_affiliate_tier(v_affiliate.id),
+    'pending_commission_inr', (SELECT COALESCE(SUM(commission_amount_inr), 0) FROM commission_ledger WHERE affiliate_id = v_affiliate.id AND status IN ('pending_review', 'approved')),
+    'paid_commission_inr', (SELECT COALESCE(SUM(commission_amount_inr), 0) FROM commission_ledger WHERE affiliate_id = v_affiliate.id AND status = 'paid'),
+    'upcoming', (
+      SELECT COALESCE(jsonb_agg(jsonb_build_object(
+        'booking_id', b.id, 'slot_time', b.slot_time, 'status', b.status
+      ) ORDER BY b.slot_time ASC NULLS LAST), '[]'::jsonb)
+      FROM bookings b
+      WHERE b.status IN ('confirmed', 'rescheduled')
+        AND NOT EXISTS (SELECT 1 FROM commission_ledger cl WHERE cl.booking_id = b.id)
+        AND (
+          (v_code.code_string IS NOT NULL AND b.referral_code = v_code.code_string)
+          OR EXISTS (
+            SELECT 1 FROM referral_click_events rce
+            WHERE rce.affiliate_id = v_affiliate.id AND rce.session_token = b.referral_session_token
+          )
+        )
+    ),
+    'referrals', (
+      SELECT COALESCE(jsonb_agg(jsonb_build_object(
+        'booking_id', cl.booking_id, 'status', cl.status, 'amount_inr', cl.commission_amount_inr,
+        'created_at', cl.created_at,
+        'under_review', EXISTS(SELECT 1 FROM fraud_flags f WHERE f.booking_id = cl.booking_id AND f.status = 'escalated')
+      ) ORDER BY cl.created_at DESC), '[]'::jsonb)
+      FROM commission_ledger cl WHERE cl.affiliate_id = v_affiliate.id
+    ),
+    'payouts', (
+      SELECT COALESCE(jsonb_agg(jsonb_build_object(
+        'batch_date', pb.batch_date, 'amount_inr', s.total, 'entry_count', s.n
+      ) ORDER BY pb.batch_date DESC), '[]'::jsonb)
+      FROM payout_batches pb
+      JOIN LATERAL (
+        SELECT SUM(commission_amount_inr) AS total, COUNT(*) AS n
+        FROM commission_ledger WHERE payout_batch_id = pb.id AND affiliate_id = v_affiliate.id
+      ) s ON TRUE
+      WHERE EXISTS (SELECT 1 FROM commission_ledger WHERE payout_batch_id = pb.id AND affiliate_id = v_affiliate.id)
+    )
+  ) INTO v_result;
+  RETURN v_result;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION affiliate_dashboard_summary(UUID) TO authenticated;
