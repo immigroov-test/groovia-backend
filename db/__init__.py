@@ -8,6 +8,7 @@ from .reviews import *
 from .referrals import *
 from .webinars import *
 from .reminders import *
+from .jobs import *
 
 
 def client():

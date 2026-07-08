@@ -4,6 +4,7 @@ from typing import Any, Optional
 from supabase import Client, create_client
 
 import config
+from services import mailer
 
 logger = logging.getLogger("immigroov.db.webinars")
 
@@ -81,3 +82,31 @@ def claim_due_webinar_reminders() -> list[dict[str, Any]]:
     finding — the old shape could double-send under overlap)."""
     res = _supabase.rpc("claim_due_webinar_reminders", {}).execute()
     return res.data or []
+
+
+def send_due_webinar_reminders() -> dict[str, Any]:
+    """Claims + sends in one call — shared by POST /admin/webinars/send-reminders
+    (manual trigger) and the dispatcher (scheduled trigger), so there's exactly
+    one implementation of this loop, not two that could drift."""
+    due = claim_due_webinar_reminders()
+    sent = 0
+    webinars_reminded: set[tuple[str, str]] = set()
+    for row in due:
+        webinars_reminded.add((row["webinar_id"], row["stage"]))
+        try:
+            mailer.send_transactional(row["registrant_email"], "webinar_reminder", {
+                "recipient_name": row.get("registrant_name") or "",
+                "webinar_title": row.get("title") or "",
+                "start_time": str(row.get("start_time") or ""),
+                "room_url": row.get("room_url") or "",
+                "stage": row.get("stage"),
+            })
+            sent += 1
+        except Exception:
+            # The claim already happened — a send failure here does NOT get
+            # retried by the next tick (the flag is already flipped). Logged
+            # for ops follow-up; accepting a lost reminder is the tradeoff for
+            # not re-sending to everyone else who already got theirs.
+            logger.warning("webinar reminder email failed webinar=%s stage=%s", row.get("webinar_id"), row.get("stage"))
+            continue
+    return {"emails_sent": sent, "webinars_marked": len(webinars_reminded)}

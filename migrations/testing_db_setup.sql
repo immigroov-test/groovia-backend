@@ -2915,22 +2915,37 @@ $$;
 -- DISPATCHER_SAFETY_CHECKLIST.md classifies this job as safe-by-construction
 -- rather than "needs a fix before porting" — there is no separate mark step
 -- to forget.
+-- Both functions below start with #variable_conflict use_column — RETURNS
+-- TABLE(booking_id UUID, ...) implicitly declares booking_id as a plpgsql
+-- variable, which collides with the table column of the same name
+-- throughout this function. Table-qualifying (br.booking_id) fixed the
+-- RETURNING clause, but ON CONFLICT (booking_id, kind)'s conflict-target
+-- column list cannot be table-qualified at all (Postgres syntax doesn't
+-- allow it there) — confirmed live: a real dispatcher tick against a real
+-- database still failed with "column reference \"booking_id\" is
+-- ambiguous" pointing at the ON CONFLICT line, even after qualifying
+-- RETURNING. The pragma is the correct general fix for this whole bug
+-- class (same root cause as claim_due_webinar_reminders' start_time
+-- ambiguity above) — it tells plpgsql to always prefer the table column
+-- over an identically-named OUT variable for any bare reference in this
+-- function, everywhere, not just the ones a manual pass happens to qualify.
 CREATE OR REPLACE FUNCTION claim_due_customer_reminders(p_kind TEXT, p_lo_minutes INT, p_hi_minutes INT)
 RETURNS TABLE(
   booking_id UUID, email TEXT, first_name TEXT, slot_utc TIMESTAMPTZ,
   customer_tz TEXT, other_party_name TEXT, meeting_url TEXT
 ) LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+#variable_conflict use_column
 BEGIN
   RETURN QUERY
   WITH claimed AS (
-    INSERT INTO booking_reminders(booking_id, kind)
+    INSERT INTO booking_reminders AS br (booking_id, kind)
     SELECT b.id, p_kind
     FROM bookings b
     WHERE b.status IN ('confirmed','rescheduled')
       AND b.slot_time BETWEEN NOW() + (p_lo_minutes || ' minutes')::interval
                            AND NOW() + (p_hi_minutes || ' minutes')::interval
     ON CONFLICT (booking_id, kind) DO NOTHING
-    RETURNING booking_id
+    RETURNING br.booking_id
   )
   SELECT b.id, COALESCE(b.candidate_email, p.email), COALESCE(p.display_name, p.full_name, b.candidate_name),
          b.slot_time, COALESCE(b.attendee_timezone, p.timezone, 'UTC'), m.display_name, b.meeting_url
@@ -2948,17 +2963,18 @@ RETURNS TABLE(
   booking_id UUID, email TEXT, first_name TEXT, slot_utc TIMESTAMPTZ,
   mentor_tz TEXT, other_party_name TEXT, meeting_url TEXT
 ) LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+#variable_conflict use_column
 BEGIN
   RETURN QUERY
   WITH claimed AS (
-    INSERT INTO booking_reminders(booking_id, kind)
+    INSERT INTO booking_reminders AS br (booking_id, kind)
     SELECT b.id, p_kind
     FROM bookings b
     WHERE b.status IN ('confirmed','rescheduled')
       AND b.slot_time BETWEEN NOW() + (p_lo_minutes || ' minutes')::interval
                            AND NOW() + (p_hi_minutes || ' minutes')::interval
     ON CONFLICT (booking_id, kind) DO NOTHING
-    RETURNING booking_id
+    RETURNING br.booking_id
   )
   SELECT b.id, COALESCE(p.email, m.email), COALESCE(p.display_name, p.full_name, m.display_name),
          b.slot_time, COALESCE(m.app_timezone, 'UTC'), COALESCE(b.candidate_name, b.candidate_email), b.meeting_url
@@ -3030,6 +3046,18 @@ BEGIN
 END;
 $$;
 GRANT EXECUTE ON FUNCTION release_dispatcher_lock(TEXT) TO authenticated;
+
+-- Self-gating state for dispatcher jobs that run less often than every tick
+-- (e.g. refresh_fx_rates every 6h, reconcile_payments daily, on a 5-minute
+-- dispatcher). fx_rates.fetched_at already tracks this for the FX job, but
+-- reconcile_payments only writes a row on an actual mismatch — "no mismatch
+-- found" (the expected common case) leaves no row to check the age of, so a
+-- dedicated last-run tracker is needed. Plain table, no RPC — same pattern
+-- as payment_reconciliation_log (read/write directly via supabase-py).
+CREATE TABLE IF NOT EXISTS job_run_history (
+  job_name    TEXT PRIMARY KEY,
+  last_run_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
 
 -- pg_cron schedules — guarded so the migration still succeeds where pg_cron is
 -- not enabled. Enable it in Supabase (Database → Extensions → pg_cron), then
@@ -4899,19 +4927,29 @@ RETURNS TABLE(
   registrant_email TEXT, registrant_name TEXT
 ) LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 BEGIN
+  -- Every column reference below is table-qualified (w.start_time, w.title,
+  -- ...), not just the ones that happened to actually collide. RETURNS
+  -- TABLE(...) implicitly declares its output columns as plpgsql variables
+  -- with the SAME NAMES as this function's own return columns — which are
+  -- identical to several of the webinars table's own column names
+  -- (start_time, title, duration, room_url). Confirmed live: an unqualified
+  -- `start_time` in the WHERE clause raised "column reference is ambiguous"
+  -- (PostgREST error 42702) the first time this function actually ran,
+  -- caught only because a test's mock leaked through to a real database
+  -- rather than by static review.
   RETURN QUERY
   WITH claimed_1d AS (
-    UPDATE webinars
+    UPDATE webinars w
     SET reminded_1d = TRUE
-    WHERE status = 'scheduled' AND NOT reminded_1d
-      AND start_time BETWEEN NOW() + INTERVAL '23 hours' AND NOW() + INTERVAL '25 hours'
-    RETURNING id, '1d'::TEXT AS stage, title, start_time, duration, room_url
+    WHERE w.status = 'scheduled' AND NOT w.reminded_1d
+      AND w.start_time BETWEEN NOW() + INTERVAL '23 hours' AND NOW() + INTERVAL '25 hours'
+    RETURNING w.id, '1d'::TEXT AS stage, w.title, w.start_time, w.duration, w.room_url
   ), claimed_1h AS (
-    UPDATE webinars
+    UPDATE webinars w
     SET reminded_1h = TRUE
-    WHERE status = 'scheduled' AND NOT reminded_1h
-      AND start_time BETWEEN NOW() AND NOW() + INTERVAL '70 minutes'
-    RETURNING id, '1h'::TEXT AS stage, title, start_time, duration, room_url
+    WHERE w.status = 'scheduled' AND NOT w.reminded_1h
+      AND w.start_time BETWEEN NOW() AND NOW() + INTERVAL '70 minutes'
+    RETURNING w.id, '1h'::TEXT AS stage, w.title, w.start_time, w.duration, w.room_url
   ), claimed AS (
     SELECT * FROM claimed_1d
     UNION ALL

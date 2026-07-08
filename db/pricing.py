@@ -1,6 +1,6 @@
 import logging
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 import httpx
@@ -79,6 +79,16 @@ def _fetch_fx_rates_with_retry(symbols: list[str]) -> list[dict[str, Any]]:
             if attempt < len(_FX_BACKOFF) - 1:
                 time.sleep(_FX_BACKOFF[attempt])
     raise last_err or RuntimeError("Frankfurter: unknown error")
+
+
+def fx_rates_are_stale(max_age: timedelta) -> bool:
+    """Used by the dispatcher to self-gate refresh_fx_rates (real 6h cadence
+    on a 5-min tick) — no rows at all counts as stale (first-ever run)."""
+    res = _supabase.table("fx_rates").select("fetched_at").order("fetched_at", desc=True).limit(1).execute()
+    if not res.data:
+        return True
+    fetched_at = datetime.fromisoformat(res.data[0]["fetched_at"])
+    return datetime.now(timezone.utc) - fetched_at >= max_age
 
 
 def refresh_fx_rates() -> dict[str, Any]:

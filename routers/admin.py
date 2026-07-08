@@ -409,38 +409,9 @@ def admin_webinar_registrants(webinar_id: str, user: AuthUser = Depends(require_
 @router.post("/webinars/send-reminders")
 def send_webinar_reminders(user: AuthUser = Depends(require_admin)):
     """Admin-triggered stand-in for immigroov's pg_cron `webinar-reminders`
-    job (every 10 min, no request context) — primary trigger will be the
-    dispatcher once it exists (INFRASTRUCTURE_ARCHITECTURE_PLAN.md).
-
-    claim_due_webinar_reminders() ATOMICALLY claims each due (webinar, stage)
-    pair before this function sends anything — the rows it returns are
-    already flipped to "reminded" in the DB, so a second call (overlapping
-    invocation, or this endpoint hit twice) gets nothing back for a pair
-    already claimed and sends nothing for it. This replaced a read-then-mark
-    version that could double-send under overlap — see
-    DISPATCHER_SAFETY_CHECKLIST.md's send_webinar_reminders finding."""
-    due = db.claim_due_webinar_reminders()
-    sent = 0
-    webinars_reminded: set[tuple[str, str]] = set()
-    for row in due:
-        webinars_reminded.add((row["webinar_id"], row["stage"]))
-        try:
-            mailer.send_transactional(row["registrant_email"], "webinar_reminder", {
-                "recipient_name": row.get("registrant_name") or "",
-                "webinar_title": row.get("title") or "",
-                "start_time": str(row.get("start_time") or ""),
-                "room_url": row.get("room_url") or "",
-                "stage": row.get("stage"),
-            })
-            sent += 1
-        except Exception:
-            # The claim already happened — a send failure here does NOT get
-            # retried by the next tick (the flag is already flipped). Logged
-            # for ops follow-up; accepting a lost reminder is the tradeoff for
-            # not re-sending to everyone else who already got theirs.
-            logger.warning("webinar reminder email failed webinar=%s stage=%s", row.get("webinar_id"), row.get("stage"))
-            continue
-    return {"emails_sent": sent, "webinars_marked": len(webinars_reminded)}
+    job (every 10 min, no request context). Delegates to db.send_due_webinar_reminders,
+    which the dispatcher also calls — one implementation, two triggers."""
+    return db.send_due_webinar_reminders()
 
 
 @router.post("/payments/expire-holds")

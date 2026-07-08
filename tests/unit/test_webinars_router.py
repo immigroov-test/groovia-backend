@@ -11,6 +11,7 @@ from contextlib import contextmanager
 from unittest.mock import patch
 
 import db
+import db.webinars as webinars_db
 from core.auth import AuthUser, get_current_user
 
 
@@ -250,7 +251,7 @@ def test_send_webinar_reminders_happy_path(client):
     ]
     try:
         with patch.object(db, "get_profile_role", return_value="admin"), \
-             patch.object(db, "claim_due_webinar_reminders", return_value=due) as mocked_claim, \
+             patch.object(webinars_db, "claim_due_webinar_reminders", return_value=due) as mocked_claim, \
              patch("services.mailer.send_transactional") as mocked_send:
             resp = client.post("/admin/webinars/send-reminders")
         assert resp.status_code == 200
@@ -279,7 +280,7 @@ def test_send_webinar_reminders_second_overlapping_call_sends_nothing_new(client
     ]
     try:
         with patch.object(db, "get_profile_role", return_value="admin"), \
-             patch.object(db, "claim_due_webinar_reminders", side_effect=[due, []]), \
+             patch.object(webinars_db, "claim_due_webinar_reminders", side_effect=[due, []]), \
              patch("services.mailer.send_transactional") as mocked_send:
             first = client.post("/admin/webinars/send-reminders")
             second = client.post("/admin/webinars/send-reminders")
