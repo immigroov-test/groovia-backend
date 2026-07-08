@@ -328,3 +328,64 @@ def finalize_payout_batch(body: FinalizePayoutBatchBody, user: AuthUser = Depend
     (eligibility tracking + 'paid' flagging only; the actual transfer is manual)."""
     batch_id = db.admin_finalize_payout_batch(body.batch_date)
     return {"batch_id": batch_id}
+
+
+# ── Financials: mentor payouts, ledger, booking money detail ────────────────
+# Unlike immigroov (which left admin_payouts/admin_ledger/admin_booking_detail
+# GRANTed to anon+authenticated — an acknowledged, never-fixed gap in the
+# source), these are gated by require_admin here, same as every other admin_*
+# endpoint in this file.
+
+@router.get("/payouts")
+def list_payouts(user: AuthUser = Depends(require_admin)):
+    """Every payout-actionable booking (confirmed/rescheduled/completed/no_show),
+    newest first. Client filters (mentor/status/date) client-side, matching
+    immigroov's own admin UI — no server-side filtering in the source either."""
+    return db.admin_payouts()
+
+
+@router.get("/ledger")
+def list_ledger(user: AuthUser = Depends(require_admin)):
+    """Flat, unfiltered read of every booking_ledger row, newest first."""
+    return db.admin_ledger()
+
+
+@router.get("/bookings/{booking_id}/financials")
+def booking_financial_detail(booking_id: str, user: AuthUser = Depends(require_admin)):
+    """Booking/payment/payout facts + money totals + reconstructed timeline —
+    the admin drill-down behind the Payouts/Ledger tabs. Distinct from
+    GET /admin/bookings/{id} (booking oversight: requests/offers, no money
+    summary or timeline) — this is the financials-focused detail view."""
+    detail = db.admin_booking_detail(booking_id)
+    if not detail:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    return detail
+
+
+class MarkPayoutPaidBody(BaseModel):
+    reference: str
+
+
+@router.post("/payouts/{booking_id}/mark-paid")
+def mark_payout_paid(booking_id: str, body: MarkPayoutPaidBody, user: AuthUser = Depends(require_admin)):
+    try:
+        db.mark_payout_paid(booking_id, body.reference)
+        return {"paid": True}
+    except Exception as e:
+        msg = str(e)
+        if "not completed" in msg.lower():
+            raise HTTPException(status_code=409, detail=msg)
+        raise HTTPException(status_code=500, detail="Failed to mark payout paid")
+
+
+class BlockPayoutBody(BaseModel):
+    reason: Optional[str] = None
+
+
+@router.post("/payouts/{booking_id}/block")
+def block_payout(booking_id: str, body: BlockPayoutBody, user: AuthUser = Depends(require_admin)):
+    """No reference UI in immigroov calls this (confirmed absent from
+    AdminManager.tsx) — ported faithfully anyway since it's part of the RPC
+    surface; a future admin UI can wire it up."""
+    db.set_payout_blocked(booking_id, body.reason)
+    return {"blocked": True}

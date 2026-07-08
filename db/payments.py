@@ -241,6 +241,31 @@ def fetch_razorpay_payment(payment_id: str) -> dict[str, Any]:
     return resp.json()
 
 
+# ── Admin financials ──────────────────────────────────────────────────────────
+
+def admin_payouts() -> list[dict[str, Any]]:
+    res = _supabase.rpc("admin_payouts", {}).execute()
+    return res.data or []
+
+
+def admin_ledger() -> list[dict[str, Any]]:
+    res = _supabase.rpc("admin_ledger", {}).execute()
+    return res.data or []
+
+
+def admin_booking_detail(booking_id: str) -> Optional[dict[str, Any]]:
+    res = _supabase.rpc("admin_booking_detail", {"p_booking_id": booking_id}).execute()
+    return res.data
+
+
+def mark_payout_paid(booking_id: str, reference: str) -> None:
+    _supabase.rpc("mark_payout_paid", {"p_booking_id": booking_id, "p_reference": reference}).execute()
+
+
+def set_payout_blocked(booking_id: str, reason: Optional[str] = None) -> None:
+    _supabase.rpc("set_payout_blocked", {"p_booking_id": booking_id, "p_reason": reason}).execute()
+
+
 def verify_webhook_signature(raw_body: bytes, signature: Optional[str]) -> bool:
     """HMAC-SHA256(raw body, RAZORPAY_WEBHOOK_SECRET), timing-safe compare.
     Matches immigroov's razorpay.ts verifyWebhook() exactly."""
