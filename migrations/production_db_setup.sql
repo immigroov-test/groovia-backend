@@ -1967,3 +1967,13 @@ DROP POLICY IF EXISTS "mentor-photos owner delete" ON storage.objects;
 CREATE POLICY "mentor-photos owner delete"
   ON storage.objects FOR DELETE TO authenticated
   USING (bucket_id = 'mentor-photos' AND (storage.foldername(name))[1] = auth.uid()::text);
+
+
+-- ============================================================================
+-- Backend-only tables: enable RLS so anon/authenticated clients cannot read or
+-- write them directly. The backend uses the service-role key (bypasses RLS), so
+-- server access is unaffected. No policies means "deny all clients".
+-- ============================================================================
+ALTER TABLE booking_events    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE booking_reminders ENABLE ROW LEVEL SECURITY;
+ALTER TABLE platform_settings ENABLE ROW LEVEL SECURITY;
