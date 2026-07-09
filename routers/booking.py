@@ -351,7 +351,7 @@ class RejectRescheduleBody(BaseModel):
 
 @router.post("/reschedule/reject")
 def reject_reschedule(body: RejectRescheduleBody, background_tasks: BackgroundTasks, user: AuthUser = Depends(get_current_user)):
-    """Mentee rejects the mentor's proposal — the booking is cancelled."""
+    """Mentee rejects the mentor's proposal - the booking is cancelled."""
     principals = db.get_offer_booking_principals(body.offer_id)
     if not principals:
         raise HTTPException(status_code=404, detail="Offer not found")
@@ -373,7 +373,7 @@ def reject_reschedule(body: RejectRescheduleBody, background_tasks: BackgroundTa
 
 class FlagNoShowBody(BaseModel):
     booking_id: str
-    no_show_party: str  # 'mentor' | 'user' — the party who DIDN'T show
+    no_show_party: str  # 'mentor' | 'user' - the party who DIDN'T show
 
     @field_validator("no_show_party")
     @classmethod
