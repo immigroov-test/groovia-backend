@@ -41,7 +41,7 @@ Block format (use exactly):
 ### [COUNTRY NAME IN CAPS]
 - **Match**: [target role/programme + why it fits this profile]
 - **Visa**: [exact visa name, processing time, key requirement]
-- **Salary / Tuition**: [figure with currency]
+- **Salary** OR **Tuition** (pick one per TRACK - see rules): [figure with currency]
 - **Market**: [demand, growth, work culture]
 - **Pros**: [advantages]
 - **Cons**: [challenges]
@@ -55,8 +55,8 @@ Summary table (immediately after the last block):
 |---|---|---|---|---|---|
 
 Other rules:
-- TRACK=WORK: no university content. TRACK=STUDY: no salary/job content.
-- Each country's Pros / Cons / Market must be distinct.
+- Money line by TRACK: if TRACK=WORK, label it "**Salary**" and give the local salary range - NO tuition, no university content. If TRACK=STUDY, label it "**Tuition**" and give the annual tuition - NO salary/job content. Never show both "Salary" and "Tuition".
+- DISTINCTNESS (strict): Pros, Cons and Market must be specific to each country and must NOT repeat across countries. Do not reuse generic filler such as "diverse culture", "high standard of living", "wide range of outdoor activities", "strong economy" or "growing startup scene" for more than one country. Each Pro / Con / Market must name something concrete and unique to that country - a specific city, industry, employer, tax or visa detail, or cost figure.
 - Address LOCKED_CONTEXT->FEEDBACK if non-empty.
 - Do not call retrieve_matching_mentors - the inventory above is the source of truth.
 - Do not emit any <TRACK:...> tag."""
@@ -105,8 +105,8 @@ Checks:
 4. CITATIONS - concrete claims (salaries, rules, thresholds) end with "Source: https://..."?
 5. MENTORS - at least one real mentor name + a real https booking URL per block (no "booking_url" placeholder)?
 6. TABLE - exactly one comparison table follows the blocks, with one row per country?
-7. TRACK - if TRACK=WORK no university content; if TRACK=STUDY no salary/job content?
-8. DISTINCTNESS - Pros/Cons/Market differ across countries (not copy-pasted)?
+7. TRACK - if TRACK=WORK the money line is labelled "Salary" (no tuition/university content); if TRACK=STUDY it is labelled "Tuition" (no salary/job content)?
+8. DISTINCTNESS - Pros/Cons/Market are country-specific and NOT repeated. FAIL if any generic phrase ("diverse culture", "high standard of living", "wide range of outdoor activities", "strong economy", "growing startup scene") appears for more than one country, or if any Pro/Con/Market is near-identical across countries.
 
 Output:
 - If ANY check fails: one bullet per failure as "- CHECK_NAME: <what's wrong and what to fix>".

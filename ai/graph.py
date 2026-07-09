@@ -42,8 +42,13 @@ _INTENT_PROMPTS = {
 _report_reviewer = REPORT_REVIEWER_PROMPT.replace("{{num_countries}}", str(_n))
 
 # Primary handles user-facing answers + tool calls; review handles audits/compression.
-primary_llm = ChatGroq(model=MAIN_MODEL_NAME, temperature=TEMPERATURE, api_key=GROQ_API_KEY)
-review_llm  = ChatGroq(model=REVIEW_MODEL_NAME, temperature=TEMPERATURE, api_key=GROQ_API_KEY)
+# max_retries=0: the Groq SDK otherwise silently retries a 429 (waiting out the reset),
+# which turns a rate limit into a long, mysterious load instead of surfacing it. With no
+# retries the 429 propagates to routers/chat.py, which returns retry_after -> the frontend
+# shows the countdown/riddle popup. (Non-essential calls below are wrapped so they degrade
+# gracefully rather than aborting on a rate limit.)
+primary_llm = ChatGroq(model=MAIN_MODEL_NAME, temperature=TEMPERATURE, api_key=GROQ_API_KEY, max_retries=0)
+review_llm  = ChatGroq(model=REVIEW_MODEL_NAME, temperature=TEMPERATURE, api_key=GROQ_API_KEY, max_retries=0)
 
 
 # ─── State ─────────────────────────────────────────────────────────────────────
@@ -212,11 +217,11 @@ _COUNTRY_PATTERNS: list[tuple[re.Pattern, str]] = [
 _TRACK_WORK_RE  = re.compile(r"\bwork\b", re.IGNORECASE)
 _TRACK_STUDY_RE = re.compile(r"\bstud(y|ies|ying)\b", re.IGNORECASE)
 
-# Matches repeat requests like "find me another mentor" / "give me a new career report".
-_MENTOR_REQ_RE = re.compile(
-    r"\b(?:find|show|recommend|get|need|want|book|connect|suggest)\b(?:\s+\w+){0,3}?\s+mentors?\b",
-    re.IGNORECASE,
-)
+# This is a mentorship product, so any mention of "mentor(s)" means the user wants one.
+# Be liberal: "give me mentor suggestions for Canada", "mentor for the US", "any mentors?"
+# must all route to the mentor flow instead of falling through to a generic Q&A web search.
+# (The report flow is matched separately by the word "report".)
+_MENTOR_REQ_RE = re.compile(r"\bmentors?\b", re.IGNORECASE)
 _REPORT_REQ_RE = re.compile(
     r"\b(?:generate|create|give|build|make|need|want|regenerate|new|another)\b(?:\s+\w+){0,3}?\s+(?:career\s+)?reports?\b",
     re.IGNORECASE,
@@ -542,10 +547,17 @@ async def reviewer_node(state: AgentState):
     else:
         prompt_content = QA_REVIEWER_PROMPT
 
-    critique = await review_llm.ainvoke([
-        SystemMessage(content=prompt_content),
-        HumanMessage(content=content),
-    ])
+    try:
+        critique = await review_llm.ainvoke([
+            SystemMessage(content=prompt_content),
+            HumanMessage(content=content),
+        ])
+    except Exception as e:
+        # The reviewer is a quality gate, not essential. If it can't run (e.g. a rate limit
+        # after the answer already used the minute's tokens), accept the answer as-is rather
+        # than throwing away a completed response.
+        _log_groq_failure(e)
+        return {"critique": "PASSED", "revision_count": state.get("revision_count", 0) + 1}
 
     passed = "PASSED" in critique.content.upper()
     if intent == "report":
