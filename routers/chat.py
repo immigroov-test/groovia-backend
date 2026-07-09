@@ -1,6 +1,7 @@
 # routers/chat.py
 import asyncio
 import logging
+import re
 import time
 import uuid
 from pathlib import Path
@@ -33,6 +34,63 @@ def _detect_file_type(file_bytes: bytes, filename: str) -> Optional[str]:
         return "pdf"
     if ext == ".docx" and file_bytes[:4] == DOCX_MAGIC:
         return "docx"
+    return None
+
+
+# ── Groq rate-limit detection ───────────────────────────────────────────────────
+# When Groq's per-minute/per-day token or request limit is hit it raises a 429. We
+# surface that to the frontend as a clean 429 with the number of seconds to wait
+# (from the provider's Retry-After header, or parsed from its message), so the UI can
+# show a countdown instead of a generic error. The wait duration is NOT hardcoded -
+# per-minute limits reset in ~seconds, per-day limits can be hours; we use whatever the
+# provider tells us.
+
+def _duration_to_seconds(text: str) -> Optional[int]:
+    """Parse '30' (bare seconds) or '1h2m3.5s' / 'try again in 7m30s' into whole seconds."""
+    text = text.strip()
+    if re.fullmatch(r"\d+", text):
+        return int(text)
+    m = re.search(r"(?:(\d+)h)?(?:(\d+)m)?([\d.]+)s", text)
+    if m and (m.group(1) or m.group(2) or m.group(3)):
+        total = int(m.group(1) or 0) * 3600 + int(m.group(2) or 0) * 60 + float(m.group(3) or 0)
+        return int(total) + 1 if total > 0 else None
+    m2 = re.search(r"in\s+(\d+)\s*minute", text)
+    if m2:
+        return int(m2.group(1)) * 60
+    return None
+
+
+def _looks_like_rate_limit(exc: BaseException) -> bool:
+    if getattr(exc, "status_code", None) == 429:
+        return True
+    resp = getattr(exc, "response", None)
+    if resp is not None and getattr(resp, "status_code", None) == 429:
+        return True
+    if "ratelimit" in exc.__class__.__name__.lower():
+        return True
+    text = str(exc).lower()
+    return "rate limit" in text and "429" in text
+
+
+def _rate_limit_retry_after(exc: BaseException) -> Optional[int]:
+    """If exc (or anything in its cause chain) is a 429 rate-limit error, return seconds
+    to wait (clamped 1..86400), else None."""
+    seen: set[int] = set()
+    cur: Optional[BaseException] = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        if _looks_like_rate_limit(cur):
+            secs: Optional[int] = None
+            headers = getattr(getattr(cur, "response", None), "headers", None)
+            if headers:
+                for key in ("retry-after", "x-ratelimit-reset-tokens", "x-ratelimit-reset-requests"):
+                    val = headers.get(key)
+                    if val and (secs := _duration_to_seconds(str(val))) is not None:
+                        break
+            if secs is None:
+                secs = _duration_to_seconds(str(getattr(cur, "message", "") or cur))
+            return max(1, min(secs or 60, 86400))
+        cur = cur.__cause__ or cur.__context__
     return None
 
 
@@ -90,7 +148,18 @@ async def chat_handler(
         )
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="Agent timed out. Please try again.")
-    except Exception:
+    except Exception as e:
+        retry_after = _rate_limit_retry_after(e)
+        if retry_after is not None:
+            logger.warning("Groq rate limit hit; retry_after=%ss", retry_after)
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "message": "Groovia is handling a lot of requests right now. You can chat again shortly.",
+                    "retry_after_seconds": retry_after,
+                },
+                headers={"Retry-After": str(retry_after)},
+            )
         logger.exception("Agent invocation failed", extra={"thread_id": thread_id})
         raise HTTPException(status_code=500, detail="Internal error. Please try again.")
     latency_ms = int((time.monotonic() - t_start) * 1000)
