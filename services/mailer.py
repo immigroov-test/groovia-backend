@@ -82,13 +82,13 @@ def _base(content: str) -> str:
         '<table width="560" cellpadding="0" cellspacing="0" role="presentation"'
         ' style="background:#ffffff;border-radius:10px;padding:40px 48px;max-width:560px">'
         "<tr><td>"
-        # Immigroov logo (served from the frontend's public/ — absolute URL so email clients can load it).
+        # Immigroov logo (served from the frontend's public/ - absolute URL so email clients can load it).
         f'<p style="margin:0 0 28px"><img src="{config.FRONTEND_URL.rstrip("/")}/Immigroov_Transparent_Logo.png"'
         ' alt="Immigroov" height="28" style="height:28px;width:auto;display:block;border:0"></p>'
         + content
         + '<hr style="border:none;border-top:1px solid #e8e8e8;margin:32px 0">'
         '<p style="margin:0;font-size:12px;color:#999">'
-        "Immigroov — AI-powered career consultancy for international professionals.<br>"
+        "Immigroov - AI-powered career consultancy for international professionals.<br>"
         'Questions? <a href="mailto:support@immigroov.com" style="color:#6b7fff">support@immigroov.com</a>'
         "</p>"
         "</td></tr></table>"
@@ -140,7 +140,7 @@ def _mentor_approved(d: dict) -> tuple[str, str]:
     name = _e(d.get("display_name", ""))
     hub = d.get("mentor_hub_url", config.FRONTEND_URL + "/mentor")
     body = (
-        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">You\'re approved — welcome to Immigroov!</h1>'
+        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">You\'re approved - welcome to Immigroov!</h1>'
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {name},</p>'
         '<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
         "Your application to become a mentor on Immigroov has been approved. Candidates looking for visa "
@@ -151,7 +151,7 @@ def _mentor_approved(d: dict) -> tuple[str, str]:
         "</p>"
         + _btn(hub, "Go to Mentor Hub")
     )
-    return "You're approved — welcome to the Immigroov mentor team", _base(body)
+    return "You're approved - welcome to the Immigroov mentor team", _base(body)
 
 
 def _mentor_rejected(d: dict) -> tuple[str, str]:
@@ -172,6 +172,27 @@ def _mentor_rejected(d: dict) -> tuple[str, str]:
         "</p>"
     )
     return "Your Immigroov mentor application", _base(body)
+
+
+def _mentor_changes_requested(d: dict) -> tuple[str, str]:
+    name = _e(d.get("display_name", ""))
+    reason = (d.get("reason") or "").strip()
+    hub = d.get("mentor_hub_url", config.FRONTEND_URL + "/mentor")
+    reason_html = _info_row("What to change", reason) if reason else ""
+    body = (
+        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">A quick update needed on your application</h1>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {name},</p>'
+        '<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
+        "Thanks for applying to mentor on Immigroov. We'd like to move forward, but our reviewer has asked "
+        "for a few changes before we can approve your profile."
+        "</p>"
+        + reason_html
+        + '<p style="margin:0;font-size:15px;color:#444;line-height:1.6">'
+        "Open your Mentor Hub, update your profile, and re-submit for approval."
+        "</p>"
+        + _btn(hub, "Update my profile")
+    )
+    return "A quick update needed on your Immigroov mentor application", _base(body)
 
 
 def _mentor_suspended(d: dict) -> tuple[str, str]:
@@ -203,7 +224,7 @@ def _booking_confirmed_candidate(d: dict) -> tuple[str, str]:
             ("What", service),
             ("When", d.get("session_time", "")),
             ("Who", f"{mentor} (mentor) and you"),
-            ("Where", "Video call — use the Join meeting button below"),
+            ("Where", "Video call - use the Join meeting button below"),
         ])
         + '<p style="margin:0;font-size:15px;color:#444;line-height:1.6">'
         "You'll receive a reminder 24 hours and 1 hour before the session."
@@ -238,7 +259,7 @@ def _booking_confirmed_mentor(d: dict) -> tuple[str, str]:
             ("What", service),
             ("When", d.get("session_time", "")),
             ("Who", who),
-            ("Where", "Video call — use the Join meeting button below"),
+            ("Where", "Video call - use the Join meeting button below"),
         ])
         + notes_html
         + (_btn(url, "Join meeting") if url else "")
@@ -364,11 +385,11 @@ def _mentor_application_received(d: dict) -> tuple[str, str]:
     name = _e(d.get("display_name", ""))
     avail_url = d.get("availability_url", config.FRONTEND_URL + "/mentor/availability")
     body = (
-        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Application received — we\'ll be in touch soon</h1>'
+        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Application received - we\'ll be in touch soon</h1>'
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {name},</p>'
         '<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
         "Thanks for applying to become a mentor on Immigroov. Our team will review your profile and "
-        "get back to you within <strong>1–2 business days</strong>."
+        "get back to you within <strong>1-2 business days</strong>."
         "</p>"
         '<p style="margin:0;font-size:15px;color:#444;line-height:1.6">'
         "While you wait, you can set your weekly availability so it's ready the moment you're approved."
@@ -430,7 +451,7 @@ def _reschedule_requested(d: dict) -> tuple[str, str]:
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {mentor},</p>'
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
         f"<strong>{_e(attendee)}</strong> requested to reschedule a session within 24 hours of the start. "
-        "Approve or decline it from your Mentor Hub — if you don't respond in time it auto-approves.</p>"
+        "Approve or decline it from your Mentor Hub - if you don't respond in time it auto-approves.</p>"
         + _btn(config.FRONTEND_URL + "/mentor", "Review request")
     )
     return "A reschedule was requested", _base(body)
@@ -444,7 +465,7 @@ def _cancel_requested(d: dict) -> tuple[str, str]:
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {mentor},</p>'
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
         f"<strong>{_e(attendee)}</strong> requested to cancel a session within 24 hours of the start. "
-        "Approve or decline it from your Mentor Hub — if you don't respond in time it auto-approves.</p>"
+        "Approve or decline it from your Mentor Hub - if you don't respond in time it auto-approves.</p>"
         + _btn(config.FRONTEND_URL + "/mentor", "Review request")
     )
     return "A cancellation was requested", _base(body)
@@ -467,15 +488,15 @@ def _booking_admin_notice(d: dict) -> tuple[str, str]:
     event = d.get("event", "updated")
     titles = {"booked": "New booking", "cancelled": "Booking cancelled", "rescheduled": "Booking rescheduled"}
     title = titles.get(event, "Booking update")
-    mentor = d.get("mentor_name") or "—"
-    candidate = d.get("candidate_name") or "—"
+    mentor = d.get("mentor_name") or "-"
+    candidate = d.get("candidate_name") or "-"
     candidate_email = d.get("candidate_email") or ""
     body = (
         f'<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">{_e(title)}</h1>'
-        '<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Admin notification — a booking event occurred.</p>'
+        '<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Admin notification - a booking event occurred.</p>'
         + _info_row("Mentor", mentor)
         + _info_row("Candidate", f"{candidate} ({candidate_email})" if candidate_email else candidate)
-        + _info_row("When", d.get("session_time", "—"))
+        + _info_row("When", d.get("session_time", "-"))
     )
     return f"[Admin] {title}: {candidate} × {mentor}", _base(body)
 
@@ -520,6 +541,7 @@ _TEMPLATES = {
     "mentor_application_received": _mentor_application_received,
     "mentor_approved": _mentor_approved,
     "mentor_rejected": _mentor_rejected,
+    "mentor_changes_requested": _mentor_changes_requested,
     "mentor_suspended": _mentor_suspended,
     "booking_confirmed_candidate": _booking_confirmed_candidate,
     "booking_confirmed_mentor": _booking_confirmed_mentor,
@@ -561,7 +583,7 @@ def send_transactional(
         return
 
     if not config.RESEND_API_KEY:
-        logger.warning("RESEND_API_KEY not set — skipping %s to %s", template, to)
+        logger.warning("RESEND_API_KEY not set - skipping %s to %s", template, to)
         return
 
     # Testing without a verified domain: route everything to one inbox, tagged with the
@@ -592,7 +614,7 @@ def send_transactional(
         if resp.status_code >= 400:
             # Surface Resend's actual reason (unverified domain, sandbox recipient, etc.)
             logger.error(
-                "Resend rejected %s to %s (from=%r): HTTP %s — %s",
+                "Resend rejected %s to %s (from=%r): HTTP %s - %s",
                 template, recipient, config.EMAIL_FROM, resp.status_code, resp.text,
             )
         resp.raise_for_status()
