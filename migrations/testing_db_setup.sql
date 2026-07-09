@@ -3669,9 +3669,11 @@ CREATE TABLE IF NOT EXISTS payout_batches (
 );
 ALTER TABLE payout_batches ENABLE ROW LEVEL SECURITY;
 
-ALTER TABLE commission_ledger
-  ADD CONSTRAINT commission_ledger_payout_batch_fkey
-  FOREIGN KEY (payout_batch_id) REFERENCES payout_batches(id) ON DELETE SET NULL;
+DO $$ BEGIN
+  ALTER TABLE commission_ledger
+    ADD CONSTRAINT commission_ledger_payout_batch_fkey
+    FOREIGN KEY (payout_batch_id) REFERENCES payout_batches(id) ON DELETE SET NULL;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 
 -- ── 4. Fraud review + admin audit trail ─────────────────────────────────────
 
