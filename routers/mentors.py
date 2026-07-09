@@ -22,7 +22,7 @@ def list_mentors(
     q: Optional[str] = Query(None, description="Free-text keyword to match against headline"),
     limit: int = Query(50, ge=1, le=100),
 ):
-    """Public mentor browse — returns approved + active mentors with optional filters."""
+    """Public mentor browse - returns approved + active mentors with optional filters."""
     try:
         rows = db.list_active_mentors(
             country_code=country,
