@@ -19,8 +19,11 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'guest';
 
 DO $$ BEGIN
-  CREATE TYPE mentor_status AS ENUM ('pending_review', 'approved', 'rejected', 'suspended');
+  CREATE TYPE mentor_status AS ENUM ('pending_review', 'approved', 'rejected', 'suspended', 'changes_requested');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+-- 'changes_requested': admin asked the applicant to revise (editable + can resubmit),
+-- distinct from 'rejected' (declined). Idempotent add for DBs that predate it.
+ALTER TYPE mentor_status ADD VALUE IF NOT EXISTS 'changes_requested';
 
 DO $$ BEGIN
   CREATE TYPE booking_status AS ENUM
@@ -178,7 +181,7 @@ CREATE INDEX IF NOT EXISTS idx_webhook_events_unprocessed
   ON webhook_events(received_at) WHERE processed_at IS NULL;
 
 -- ============================================================================
--- services (before bookings — bookings references it)
+-- services (before bookings - bookings references it)
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS services (
   id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -205,7 +208,7 @@ CREATE INDEX IF NOT EXISTS idx_services_active    ON services(mentor_id) WHERE i
 CREATE INDEX IF NOT EXISTS idx_services_pending   ON services(status) WHERE status = 'pending';
 
 -- ============================================================================
--- specific_availability (before bookings — bookings references it)
+-- specific_availability (before bookings - bookings references it)
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS specific_availability (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -271,7 +274,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_bookings_idempotency
   ON bookings(idempotency_key) WHERE idempotency_key IS NOT NULL;
 
 -- ============================================================================
--- mentor_availability (legacy manual fallback system — superseded by weekly_availability)
+-- mentor_availability (legacy manual fallback system - superseded by weekly_availability)
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS mentor_availability (
   id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -505,6 +508,19 @@ UPDATE profiles SET role = 'admin' WHERE lower(email) = 'yokeshmd99@gmail.com' A
 -- Does this email already have a PASSWORD? signInWithOtp creates an auth.users row
 -- immediately (unconfirmed, no password), so "row exists" ≠ "can log in with a password".
 -- Returns one row (has_password) if the email exists, zero rows if not.
+-- Re-runnable guard: an existing DB may already hold older versions of these
+-- functions with different result columns. CREATE OR REPLACE cannot change a
+-- function's return type / OUT columns, so drop them first.
+DROP FUNCTION IF EXISTS email_account_status(text);
+DROP FUNCTION IF EXISTS get_available_slots(uuid, uuid, date, date);
+DROP FUNCTION IF EXISTS booking_times_display(uuid);
+DROP FUNCTION IF EXISTS avail_list_weekly(uuid);
+DROP FUNCTION IF EXISTS avail_list_specific(uuid);
+DROP FUNCTION IF EXISTS avail_get_rules(uuid);
+DROP FUNCTION IF EXISTS service_list(uuid);
+DROP FUNCTION IF EXISTS question_list(uuid);
+DROP FUNCTION IF EXISTS book_session(uuid, uuid, timestamptz, text, text, text, jsonb, uuid, uuid);
+
 CREATE OR REPLACE FUNCTION email_account_status(p_email text)
 RETURNS TABLE (has_password boolean)
 LANGUAGE sql SECURITY DEFINER SET search_path = public, auth AS $$
@@ -749,7 +765,7 @@ BEGIN
   SELECT cancel_notice_hours INTO v_notice FROM mentors WHERE id = b.mentor_id;
   IF b.slot_time IS NOT NULL
      AND NOW() > b.slot_time - MAKE_INTERVAL(hours => COALESCE(v_notice, 24)) THEN
-    RAISE EXCEPTION 'Cancellations must be at least % hours before the session — please reschedule instead.',
+    RAISE EXCEPTION 'Cancellations must be at least % hours before the session - please reschedule instead.',
       COALESCE(v_notice, 24);
   END IF;
 
@@ -818,7 +834,7 @@ BEGIN
   IF p_slot_time <= NOW() THEN RAISE EXCEPTION 'Please pick a future time'; END IF;
   SELECT * INTO b FROM bookings WHERE id = o.booking_id;
   IF NOT is_slot_available(b.mentor_id, b.service_id, p_slot_time) THEN
-    RAISE EXCEPTION 'That time slot is no longer available — please pick another';
+    RAISE EXCEPTION 'That time slot is no longer available - please pick another';
   END IF;
   UPDATE reschedule_offers
     SET status = 'mentee_selected', selected_time = p_slot_time
@@ -1149,7 +1165,7 @@ DECLARE
   v_timezone TEXT := CASE WHEN is_valid_timezone(p_timezone) THEN p_timezone ELSE 'UTC' END;
 BEGIN
   IF NOT is_slot_available(p_mentor_id, p_service_id, p_slot_time) THEN
-    RAISE EXCEPTION 'That time is not available — please choose another slot';
+    RAISE EXCEPTION 'That time is not available - please choose another slot';
   END IF;
 
   IF p_candidate_id IS NULL THEN
@@ -1392,7 +1408,7 @@ INSERT INTO platform_settings (key, value, description) VALUES
 ON CONFLICT (key) DO NOTHING;
 
 -- ============================================================================
--- get_ppp_factor  — countries NOT in ppp_factors get 1.0 (no discount);
+-- get_ppp_factor  - countries NOT in ppp_factors get 1.0 (no discount);
 -- countries IN the table get GREATEST(their factor, ppp_floor) — the floor is
 -- an admin-configurable platform_settings row, not hardcoded.
 -- ============================================================================
@@ -1700,7 +1716,7 @@ INSERT INTO mentors (
   (
     'lars-jansen',
     'Lars Jansen',
-    'Relocation specialist — settling into Amsterdam',
+    'Relocation specialist - settling into Amsterdam',
     'Housing in Amsterdam is brutal. I help newcomers find a place, register at the gemeente, set up DigiD, banking, healthcare.',
     ARRAY['NL']::CHAR(2)[],
     ARRAY['life_settling'],
@@ -1722,7 +1738,7 @@ INSERT INTO mentors (
   (
     'fatima-rahman',
     'Fatima Rahman',
-    'Healthcare professional — Germany work visa route',
+    'Healthcare professional - Germany work visa route',
     'Nurses, doctors, allied health: the Approbation process, B2 German requirement, and how to land your first hospital role.',
     ARRAY['DE']::CHAR(2)[],
     ARRAY['job_career', 'visa_pr'],
@@ -1744,7 +1760,7 @@ INSERT INTO mentors (
   (
     'sara-okonkwo',
     'Sara Okonkwo',
-    'PR in Canada via Express Entry — finance professional',
+    'PR in Canada via Express Entry - finance professional',
     'CRS score optimization, IELTS prep, document checklist for ECA + PR. Toronto-based.',
     ARRAY['CA']::CHAR(2)[],
     ARRAY['visa_pr', 'job_career'],
@@ -1755,7 +1771,7 @@ INSERT INTO mentors (
   (
     'daniel-park',
     'Daniel Park',
-    'Software Engineer — Vancouver tech scene + LMIA',
+    'Software Engineer - Vancouver tech scene + LMIA',
     'Moved from Seoul to Vancouver on LMIA, transitioned to PR. Tech job market reality, salaries, neighborhoods.',
     ARRAY['CA']::CHAR(2)[],
     ARRAY['job_career', 'life_settling'],
@@ -1766,7 +1782,7 @@ INSERT INTO mentors (
   (
     'aditi-banerjee',
     'Aditi Banerjee',
-    'Skilled Worker visa to UK — research scientist',
+    'Skilled Worker visa to UK - research scientist',
     'Sponsoring employers, salary thresholds, dependent visas, switching from Student to Skilled Worker.',
     ARRAY['GB']::CHAR(2)[],
     ARRAY['visa_pr', 'job_career'],
@@ -1777,7 +1793,7 @@ INSERT INTO mentors (
   (
     'james-okafor',
     'James Okafor',
-    'Global Talent visa holder — early-stage founder',
+    'Global Talent visa holder - early-stage founder',
     'Got the UK Global Talent visa as a Nigerian tech founder. Endorsing bodies, evidence pack, founder visa alternatives.',
     ARRAY['GB']::CHAR(2)[],
     ARRAY['visa_pr'],
@@ -1788,7 +1804,7 @@ INSERT INTO mentors (
   (
     'vivek-shah',
     'Vivek Shah',
-    'H1B lottery to Green Card — 12 years in the US',
+    'H1B lottery to Green Card - 12 years in the US',
     'I survived 6 H1B lotteries, an L1 transfer, EB2-NIW filing. Honest take on the wait + employer dependence.',
     ARRAY['US']::CHAR(2)[],
     ARRAY['visa_pr', 'job_career'],
@@ -1799,7 +1815,7 @@ INSERT INTO mentors (
   (
     'emily-chen',
     'Emily Chen',
-    'F1 student → OPT → STEM extension — Bay Area',
+    'F1 student → OPT → STEM extension - Bay Area',
     'University selection for STEM grads aiming at US tech. OPT/CPT, employer red flags, internship hunting timeline.',
     ARRAY['US']::CHAR(2)[],
     ARRAY['study_abroad', 'job_career'],
@@ -1810,7 +1826,7 @@ INSERT INTO mentors (
   (
     'ravi-pillai',
     'Ravi Pillai',
-    'Skilled Independent visa (189) — Melbourne',
+    'Skilled Independent visa (189) - Melbourne',
     'PR via points-based system. Skills assessment, EOI, state nomination. Cost of moving from India to AU.',
     ARRAY['AU']::CHAR(2)[],
     ARRAY['visa_pr'],
@@ -1821,7 +1837,7 @@ INSERT INTO mentors (
   (
     'sophie-laurent',
     'Sophie Laurent',
-    'Career across EU — France, Germany, Belgium',
+    'Career across EU - France, Germany, Belgium',
     'I worked in 3 EU countries in 10 years. EU Blue Card, intra-EU moves, taxation, family relocations.',
     ARRAY['DE', 'FR', 'BE']::CHAR(2)[],
     ARRAY['job_career', 'visa_pr', 'life_settling'],
@@ -1832,14 +1848,51 @@ INSERT INTO mentors (
 ON CONFLICT (slug) DO NOTHING;
 
 -- Give seed mentors a contact email so booking-confirmation emails to mentors work in
--- testing (all point at one inbox you control). Idempotent — only fills blanks.
-UPDATE mentors SET email = 'yokeshd1999@gmail.com' WHERE profile_id IS NULL AND email IS NULL;
+-- testing. Uses Gmail plus-addressing so all mail still lands in your inbox, but the
+-- address never collides with a real signup of yokeshd1999@gmail.com. (The plain
+-- address made a fresh signup get auto-linked to a seed mentor like "Maya Singh".)
+-- Idempotent: only fills blanks.
+UPDATE mentors SET email = 'yokeshd1999+seed@gmail.com' WHERE profile_id IS NULL AND email IS NULL;
+
+-- Backfill demo profile details for seed mentors (photo, phone, location, socials,
+-- public notes) so the admin "View details" panel shows a complete profile instead
+-- of blanks. Testing data only; idempotent (only fills empty fields).
+-- Photo uses a deterministic placeholder-avatar service keyed by slug.
+UPDATE mentors SET
+  photo_url    = COALESCE(photo_url, 'https://i.pravatar.cc/300?u=' || slug),
+  public_notes = COALESCE(NULLIF(public_notes, ''),
+    'Sessions are for guidance and lived experience only, and are not legal or immigration advice.'),
+  country = COALESCE(country,
+    CASE WHEN 'DE' = ANY(expertise_country_codes) THEN 'DE'
+         WHEN 'CA' = ANY(expertise_country_codes) THEN 'CA'
+         WHEN 'GB' = ANY(expertise_country_codes) THEN 'GB'
+         WHEN 'US' = ANY(expertise_country_codes) THEN 'US'
+         WHEN 'AU' = ANY(expertise_country_codes) THEN 'AU'
+         ELSE 'NL' END),
+  city = COALESCE(city,
+    CASE WHEN 'DE' = ANY(expertise_country_codes) THEN 'Berlin'
+         WHEN 'CA' = ANY(expertise_country_codes) THEN 'Toronto'
+         WHEN 'GB' = ANY(expertise_country_codes) THEN 'London'
+         WHEN 'US' = ANY(expertise_country_codes) THEN 'San Francisco'
+         WHEN 'AU' = ANY(expertise_country_codes) THEN 'Melbourne'
+         ELSE 'Amsterdam' END),
+  phone = COALESCE(phone,
+    CASE WHEN 'DE' = ANY(expertise_country_codes) THEN '+49 151 23456789'
+         WHEN 'CA' = ANY(expertise_country_codes) THEN '+1 416 555 0142'
+         WHEN 'GB' = ANY(expertise_country_codes) THEN '+44 7700 900123'
+         WHEN 'US' = ANY(expertise_country_codes) THEN '+1 415 555 0186'
+         WHEN 'AU' = ANY(expertise_country_codes) THEN '+61 412 345 678'
+         ELSE '+31 6 12345678' END),
+  social_links = CASE WHEN social_links = '[]'::jsonb
+    THEN jsonb_build_array(jsonb_build_object('type', 'linkedin', 'url', 'https://www.linkedin.com/in/' || slug))
+    ELSE social_links END
+WHERE profile_id IS NULL;
 
 -- ============================================================================
 -- Seed bookable services + weekly availability for the seed mentors (testing only)
 -- The mentor profile page only renders a "Book" widget when a mentor has at least
 -- one service. Without this, every seed mentor falls back to "setting up their
--- calendar — check back soon" and there is no button to test the booking flow.
+-- calendar - check back soon" and there is no button to test the booking flow.
 -- Each seed mentor gets one free 30-min video service and a *varied* weekly
 -- schedule (different days/hours per mentor) so the booking calendar isn't
 -- identical for everyone. Guarded so re-running the setup is idempotent.
@@ -1854,7 +1907,7 @@ DECLARE
 BEGIN
   FOR m IN SELECT id FROM mentors WHERE profile_id IS NULL ORDER BY slug LOOP
     i := i + 1;
-    -- vary start (08:00–11:00) and end (15:00–18:00) and the working days
+    -- vary start (08:00-11:00) and end (15:00-18:00) and the working days
     v_start := TIME '08:00' + ((i % 4) * INTERVAL '1 hour');
     v_end   := TIME '15:00' + ((i % 4) * INTERVAL '1 hour');
     v_days  := CASE (i % 3)
@@ -1896,6 +1949,12 @@ ALTER TABLE bookings ADD COLUMN IF NOT EXISTS no_show_by TEXT;          -- 'ment
 ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS no_show_strikes INT NOT NULL DEFAULT 0;
 ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS last_no_show_at TIMESTAMPTZ;
 ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS rejection_reason TEXT;   -- admin's note shown to a rejected mentor
+-- Profile-change review for APPROVED mentors: the proposed edit is held here (JSON of the
+-- changed profile fields) while the live mentors row stays visible/bookable. On approval the
+-- backend applies these to the live columns and clears them; on reject it just clears them.
+-- pending_submitted_at orders the admin review queue. NULL = no revision awaiting review.
+ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS pending_changes JSONB;
+ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS pending_submitted_at TIMESTAMPTZ;
 ALTER TABLE reschedule_offers ADD COLUMN IF NOT EXISTS was_late BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE reschedule_offers ADD COLUMN IF NOT EXISTS respond_by TIMESTAMPTZ;
 
@@ -2476,7 +2535,7 @@ $$;
 REVOKE ALL ON FUNCTION expire_stale_holds() FROM PUBLIC, anon, authenticated;
 
 -- ── 5. Cancel flow (REPLACES the old block-on-late cancel_booking) ────────────
--- >=24h: cancelled immediately · 2–24h (user): opens a cancel request for mentor
+-- >=24h: cancelled immediately · 2-24h (user): opens a cancel request for mentor
 -- approval · <2h: blocked. Mentor cancel is always allowed (>=2h) and is free
 -- >=24h, bumps the cancellation counter when late. Auth is enforced in FastAPI.
 CREATE OR REPLACE FUNCTION cancel_booking(p_booking_id UUID, p_cancelled_by TEXT DEFAULT 'user')
@@ -2571,7 +2630,7 @@ END;
 $$;
 GRANT EXECUTE ON FUNCTION respond_booking_request(UUID, BOOLEAN) TO authenticated;
 
--- ── 7. force_autocancel (3rd reschedule attempt) — state only ─────────────────
+-- ── 7. force_autocancel (3rd reschedule attempt) - state only ─────────────────
 CREATE OR REPLACE FUNCTION force_autocancel(p_booking_id UUID, p_initiator TEXT)
 RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE v_status TEXT; v_cost NUMERIC; v_payout NUMERIC;
@@ -2595,7 +2654,7 @@ END;
 $$;
 GRANT EXECUTE ON FUNCTION force_autocancel(UUID, TEXT) TO authenticated;
 
--- ── 8. Reschedule — mentor proposes a date + range ────────────────────────────
+-- ── 8. Reschedule - mentor proposes a date + range ────────────────────────────
 CREATE OR REPLACE FUNCTION mentor_propose_reschedule(
   p_booking_id UUID, p_date DATE, p_start TIMESTAMPTZ, p_end TIMESTAMPTZ
 ) RETURNS UUID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
@@ -2623,7 +2682,7 @@ BEGIN
 END;
 $$;
 
--- ── 9. Mentee accepts a slot in the proposed range — finalises directly ───────
+-- ── 9. Mentee accepts a slot in the proposed range - finalises directly ───────
 CREATE OR REPLACE FUNCTION mentee_accept_reschedule(p_offer_id UUID, p_slot_time TIMESTAMPTZ)
 RETURNS bookings LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE o reschedule_offers; b bookings; v_payout NUMERIC;
@@ -2638,7 +2697,7 @@ BEGIN
   IF p_slot_time <= NOW() THEN RAISE EXCEPTION 'Please pick a future time'; END IF;
   SELECT * INTO b FROM bookings WHERE id = o.booking_id;
   IF NOT is_slot_available(b.mentor_id, b.service_id, p_slot_time) THEN
-    RAISE EXCEPTION 'That time is no longer available — pick another slot inside the range.';
+    RAISE EXCEPTION 'That time is no longer available - pick another slot inside the range.';
   END IF;
   UPDATE reschedule_offers SET status = 'accepted', selected_time = p_slot_time WHERE id = p_offer_id;
   UPDATE bookings SET slot_time = p_slot_time, slot_end = NULL, status = 'rescheduled',
@@ -2654,7 +2713,7 @@ BEGIN
 END;
 $$;
 
--- ── 10. Mentee rejects the mentor's proposal — booking cancelled ──────────────
+-- ── 10. Mentee rejects the mentor's proposal - booking cancelled ──────────────
 CREATE OR REPLACE FUNCTION mentee_reject_reschedule(p_offer_id UUID)
 RETURNS bookings LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE o reschedule_offers; b bookings; v_cost NUMERIC; v_payout NUMERIC;
@@ -2693,15 +2752,15 @@ BEGIN
     RETURN 'autocancelled';
   END IF;
   v_state := booking_deadline_state(b.slot_time);
-  IF v_state = 'buffer' THEN RAISE EXCEPTION 'Within 2 hours of the session — cannot reschedule.'; END IF;
+  IF v_state = 'buffer' THEN RAISE EXCEPTION 'Within 2 hours of the session - cannot reschedule.'; END IF;
   v_approved := EXISTS (SELECT 1 FROM booking_requests
                         WHERE booking_id = p_booking_id AND kind = 'reschedule'
                           AND status IN ('approved','auto_approved'));
   IF v_state <> 'free' AND NOT v_approved THEN
-    RAISE EXCEPTION 'A late reschedule needs mentor approval first — send a request.';
+    RAISE EXCEPTION 'A late reschedule needs mentor approval first - send a request.';
   END IF;
   IF NOT is_slot_available(b.mentor_id, b.service_id, p_slot_time) THEN
-    RAISE EXCEPTION 'That time is not available — pick another slot.';
+    RAISE EXCEPTION 'That time is not available - pick another slot.';
   END IF;
   UPDATE bookings SET slot_time = p_slot_time, slot_end = NULL, status = 'rescheduled',
                       reschedule_count = reschedule_count + 1
@@ -2729,7 +2788,7 @@ BEGIN
     RETURN NULL;
   END IF;
   IF booking_deadline_state(b.slot_time) = 'buffer' THEN
-    RAISE EXCEPTION 'Within 2 hours of the session — cannot reschedule.';
+    RAISE EXCEPTION 'Within 2 hours of the session - cannot reschedule.';
   END IF;
   UPDATE booking_requests SET status = 'withdrawn', resolved_at = NOW()
     WHERE booking_id = p_booking_id AND status = 'pending';
@@ -2748,7 +2807,7 @@ GRANT EXECUTE ON FUNCTION mentee_reject_reschedule(UUID) TO authenticated;
 GRANT EXECUTE ON FUNCTION customer_reschedule(UUID, TIMESTAMPTZ) TO authenticated;
 GRANT EXECUTE ON FUNCTION request_reschedule(UUID) TO authenticated;
 
--- ── 13. No-show: strike ladder (counting only — no payout penalty) ────────────
+-- ── 13. No-show: strike ladder (counting only - no payout penalty) ────────────
 CREATE OR REPLACE FUNCTION apply_mentor_strike(p_mentor_id UUID)
 RETURNS INT LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE v_str INT; v_last TIMESTAMPTZ;
@@ -3059,7 +3118,7 @@ CREATE TABLE IF NOT EXISTS job_run_history (
   last_run_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- pg_cron schedules — guarded so the migration still succeeds where pg_cron is
+-- pg_cron schedules - guarded so the migration still succeeds where pg_cron is
 -- not enabled. Enable it in Supabase (Database → Extensions → pg_cron), then
 -- re-run just this block to activate the jobs.
 DO $$
@@ -3087,7 +3146,7 @@ BEGIN
     END IF;
     PERFORM cron.schedule('expire-payment-holds', '* * * * *', 'SELECT expire_stale_holds()');
   ELSE
-    RAISE NOTICE 'pg_cron not enabled — skipping booking cron schedules. Enable it and re-run the cron block.';
+    RAISE NOTICE 'pg_cron not enabled - skipping booking cron schedules. Enable it and re-run the cron block.';
   END IF;
 END $$;
 
@@ -3096,7 +3155,7 @@ END $$;
 -- Booking read RPCs (folded in from 018_booking_reads.sql)
 -- ###########################################################################
 -- =============================================================================
--- 018 — Booking read RPCs for the lifecycle-v2 management UI
+-- 018 - Booking read RPCs for the lifecycle-v2 management UI
 --
 -- Both RPCs return one row per booking with everything the BookingManager needs
 -- to render deadline-aware actions: status, the live deadline_state, the latest
@@ -4961,3 +5020,49 @@ BEGIN
 END;
 $$;
 GRANT EXECUTE ON FUNCTION claim_due_webinar_reminders() TO authenticated;
+
+
+-- ============================================================================
+-- STORAGE: mentor profile photos
+-- The bucket must exist before the frontend can upload (a missing bucket gives
+-- the "Bucket not found" error). Public read so photos render on public
+-- profiles; writes are scoped by RLS to each user's own folder ({auth.uid}/...).
+-- ============================================================================
+INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+VALUES ('mentor-photos', 'mentor-photos', true, 5242880,
+        ARRAY['image/png','image/jpeg','image/webp'])
+ON CONFLICT (id) DO UPDATE
+  SET public = true,
+      file_size_limit = 5242880,
+      allowed_mime_types = ARRAY['image/png','image/jpeg','image/webp'];
+
+DROP POLICY IF EXISTS "mentor-photos public read" ON storage.objects;
+CREATE POLICY "mentor-photos public read"
+  ON storage.objects FOR SELECT
+  USING (bucket_id = 'mentor-photos');
+
+DROP POLICY IF EXISTS "mentor-photos owner insert" ON storage.objects;
+CREATE POLICY "mentor-photos owner insert"
+  ON storage.objects FOR INSERT TO authenticated
+  WITH CHECK (bucket_id = 'mentor-photos' AND (storage.foldername(name))[1] = auth.uid()::text);
+
+DROP POLICY IF EXISTS "mentor-photos owner update" ON storage.objects;
+CREATE POLICY "mentor-photos owner update"
+  ON storage.objects FOR UPDATE TO authenticated
+  USING (bucket_id = 'mentor-photos' AND (storage.foldername(name))[1] = auth.uid()::text)
+  WITH CHECK (bucket_id = 'mentor-photos' AND (storage.foldername(name))[1] = auth.uid()::text);
+
+DROP POLICY IF EXISTS "mentor-photos owner delete" ON storage.objects;
+CREATE POLICY "mentor-photos owner delete"
+  ON storage.objects FOR DELETE TO authenticated
+  USING (bucket_id = 'mentor-photos' AND (storage.foldername(name))[1] = auth.uid()::text);
+
+
+-- ============================================================================
+-- Backend-only tables: enable RLS so anon/authenticated clients cannot read or
+-- write them directly. The backend uses the service-role key (bypasses RLS), so
+-- server access is unaffected. No policies means "deny all clients".
+-- ============================================================================
+ALTER TABLE booking_events    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE booking_reminders ENABLE ROW LEVEL SECURITY;
+ALTER TABLE platform_settings ENABLE ROW LEVEL SECURITY;
