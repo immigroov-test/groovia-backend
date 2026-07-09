@@ -100,7 +100,7 @@ async def chat_handler(
     if message and not message.startswith("[SYSTEM_"):
         title_seed = message.strip()
 
-    # supabase-py is synchronous — run on the default thread pool so we don't block the event loop.
+    # supabase-py is synchronous - run on the default thread pool so we don't block the event loop.
     await asyncio.to_thread(
         db.upsert_chat_thread,
         thread_id=thread_id,

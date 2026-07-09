@@ -60,7 +60,7 @@ def book_session(
 
 
 def get_booking_by_idempotency_key(key: str) -> Optional[dict[str, Any]]:
-    """Return an existing booking created with this idempotency key, if any — so a
+    """Return an existing booking created with this idempotency key, if any - so a
     retried/duplicated request returns the same booking instead of creating another."""
     if not key:
         return None
@@ -104,7 +104,7 @@ def get_booking_principals(booking_id: str) -> Optional[dict[str, Any]]:
 
 
 def get_booking_reschedule_target(booking_id: str) -> Optional[dict[str, Any]]:
-    """mentor_id + service_id + candidate_id + current slot_time for a booking — used
+    """mentor_id + service_id + candidate_id + current slot_time for a booking - used
     to load the reschedule slot picker for its owner."""
     try:
         res = (
@@ -341,7 +341,7 @@ def list_services(mentor_id: str, active_only: bool = False) -> list[dict]:
 
 
 def approve_pending_services(mentor_id: str) -> int:
-    """Approve all of a mentor's pending services (called when the mentor is approved —
+    """Approve all of a mentor's pending services (called when the mentor is approved -
     the services they set up during review go live with them)."""
     try:
         res = (_supabase.table("services")
@@ -356,7 +356,7 @@ def approve_pending_services(mentor_id: str) -> int:
 
 
 def list_pending_services() -> list[dict]:
-    """All services awaiting admin approval, with mentor name — the admin service queue."""
+    """All services awaiting admin approval, with mentor name - the admin service queue."""
     try:
         res = (_supabase.table("services")
                .select("id, title, description, type, duration, set_price, set_currency, created_at, mentor_id")

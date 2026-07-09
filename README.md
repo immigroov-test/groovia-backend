@@ -1,6 +1,6 @@
-# Groovia — Backend (`groovia-backend`)
+# Groovia - Backend (`groovia-backend`)
 
-Backend and "brain" for **Immigroov** — a two-sided immigration mentorship marketplace
+Backend and "brain" for **Immigroov** - a two-sided immigration mentorship marketplace
 that connects people moving between countries with mentors who have lived the journey.
 At its centre is **Groovia**, an AI agent that profiles each candidate, recommends
 countries, and matches them to mentors they can book a paid session with.
@@ -20,13 +20,13 @@ repo (Next.js on Vercel); this service is its API.
 | Area | Status |
 |---|---|
 | Groovia AI agent (country discovery, Q&A, mentor matching) | ✅ Working |
-| Auth — Supabase email/password + Google OAuth, JWT verification | ✅ Working |
-| Mentor lifecycle — signup → onboarding → **admin approval** | ✅ Working |
+| Auth - Supabase email/password + Google OAuth, JWT verification | ✅ Working |
+| Mentor lifecycle - signup → onboarding → **admin approval** | ✅ Working |
 | In-house booking + lifecycle v2 (cancel / reschedule / no-show) | ✅ Working |
 | Transactional email (Resend) | ✅ Working (needs verified domain for real sends) |
-| Deployment — Render (API) + Supabase (DB/Auth) + Vercel (UI) | ✅ Live on `staging` |
+| Deployment - Render (API) + Supabase (DB/Auth) + Vercel (UI) | ✅ Live on `staging` |
 
-## Future developments (planned per PRD v2.1 — not yet built)
+## Future developments (planned per PRD v2.1 - not yet built)
 
 Payments (Stripe + Razorpay) & credits · commission/attribution engine · reviews &
 ratings · mentor earnings & payouts · candidate dashboard & roadmap · CV optimizer ·
@@ -45,9 +45,9 @@ model (Llama-3.1-8b) and revises up to `MAX_REVISION` times. Tools: `general_sea
 links in AI responses use the Groovia platform URL (`/mentors/{slug}`).
 
 Short-circuit gates fire *before* any LLM call for: missing resume, bare acks, ambiguous
-intent, missing country/track — canned responses with zero API cost.
+intent, missing country/track - canned responses with zero API cost.
 
-## Structure — what each file holds
+## Structure - what each file holds
 
 ```
 groovia-backend/            # ← this folder is the repo root
@@ -74,14 +74,14 @@ groovia-backend/            # ← this folder is the repo root
 │   ├── chat.py             # POST /chat, GET /chat/threads, thread claim
 │   ├── mentor.py           # /mentor/signup, /mentor/me, profile
 │   ├── mentors.py          # GET /mentors, GET /mentors/{slug}
-│   ├── booking.py          # /booking/* — slot booking, cancel, reschedule, no-show
-│   ├── services.py         # /mentor/services/* — session types + intake questions
-│   ├── availability.py     # /mentor/availability-v2/* — weekly schedule, overrides, rules
+│   ├── booking.py          # /booking/* - slot booking, cancel, reschedule, no-show
+│   ├── services.py         # /mentor/services/* - session types + intake questions
+│   ├── availability.py     # /mentor/availability-v2/* - weekly schedule, overrides, rules
 │   ├── admin.py            # /admin/mentors/* (approve, reject, list pending)
 │   └── auth.py             # /auth/* (recaptcha-adjacent stubs)
 ├── migrations/             # SQL setup + reset scripts (see below)
 ├── tests/                  # unit + integration (LLMs mocked, no Postgres needed)
-├── Dockerfile              # python:3.13-slim — what Render builds
+├── Dockerfile              # python:3.13-slim - what Render builds
 ├── render.yaml             # Render blueprint (prod + staging web services)
 └── requirements.txt
 ```
@@ -104,14 +104,14 @@ Run tests with `pip install -r requirements-dev.txt && pytest` (no Postgres need
 | Variable | Required | Notes |
 |---|---|---|
 | `SUPABASE_URL` | Yes | Project URL (`https://xxxx.supabase.co`) |
-| `SUPABASE_SERVICE_ROLE_KEY` | Yes | Bypasses RLS — backend only, never expose to client |
+| `SUPABASE_SERVICE_ROLE_KEY` | Yes | Bypasses RLS - backend only, never expose to client |
 | `SUPABASE_JWT_SECRET` | Yes | Verifies user JWTs locally |
-| `DATABASE_URL` | Yes | Postgres URL for LangGraph — **Session pooler, port 5432** (not 6543) |
+| `DATABASE_URL` | Yes | Postgres URL for LangGraph - **Session pooler, port 5432** (not 6543) |
 | `GROQ_API_KEY` / `TAVILY_API_KEY` / `EXA_API_KEY` | Yes | LLM + search tools |
 | `FRONTEND_URL` | Yes | CORS + LLM-generated mentor links |
 | `CORS_ORIGINS` | Yes (deploy) | Comma-separated allowed origins, no trailing slash |
 | `RESEND_API_KEY` / `EMAIL_FROM` | No | Transactional email; booking works without it |
-| `MOCK_SERVICES` | No | `true` mocks email/webhooks — **never deploy `true`** |
+| `MOCK_SERVICES` | No | `true` mocks email/webhooks - **never deploy `true`** |
 
 Feature flags (`FEATURE_*`, default ON) are listed in `config.py` and mirrored in
 `groovia-frontend/lib/features.ts`.
@@ -120,14 +120,14 @@ Feature flags (`FEATURE_*`, default ON) are listed in `config.py` and mirrored i
 
 Mentors set a weekly schedule (`weekly_availability`) + session types (`services`).
 Candidates browse slots and book via PostgreSQL RPCs. **All RPCs run server-side with
-the service-role key, so `auth.uid()` is NULL — every ownership/authz check is enforced
+the service-role key, so `auth.uid()` is NULL - every ownership/authz check is enforced
 at the FastAPI layer** (`core/permissions.py`). Lifecycle v2 adds deadline-aware cancel,
 mentor↔candidate reschedule negotiation, and no-show handling.
 
 LangGraph uses `AsyncPostgresSaver` on Supabase Postgres via the **Session pooler (5432)**
-— not the transaction pooler (6543), because it relies on prepared statements.
+- not the transaction pooler (6543), because it relies on prepared statements.
 
-## Database migrations — 2 files per environment
+## Database migrations - 2 files per environment
 
 | File | Purpose |
 |---|---|

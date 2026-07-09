@@ -61,7 +61,7 @@ def update_booking_status(external_id: str, status: str) -> bool:
 
 def upsert_booking(fields: dict[str, Any], *, insert_only: bool = False) -> None:
     """Idempotent write keyed on external_id (the Cal booking uid).
-    insert_only=True (BOOKING_CREATED) never overwrites an existing row — guards
+    insert_only=True (BOOKING_CREATED) never overwrites an existing row - guards
     against out-of-order webhooks downgrading a cancelled/completed booking back
     to confirmed. Raises on failure so the caller records it in webhook_events."""
     _supabase.table("bookings").upsert(

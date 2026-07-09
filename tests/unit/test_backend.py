@@ -1,4 +1,4 @@
-# Unit tests for backend.py — deterministic gates, extractors, graph edges.
+# Unit tests for backend.py - deterministic gates, extractors, graph edges.
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -118,7 +118,7 @@ def test_should_continue_canned_messages_skip_reviewer():
 
 def test_should_continue_no_mentors_message_skips_reviewer():
     from backend import should_continue
-    msg = AIMessage(content=f"{NO_MENTORS_PREFIX} **Russia** just yet — expanding.")
+    msg = AIMessage(content=f"{NO_MENTORS_PREFIX} **Russia** just yet - expanding.")
     assert should_continue(_state([msg], intent="mentor")) == "end"
 
 
@@ -126,7 +126,7 @@ def test_should_continue_real_answers_get_reviewed():
     from backend import should_continue
     assert should_continue(_state([AIMessage(content="### CANADA\n...")], intent="report")) == "reviewer"
     assert should_continue(_state([AIMessage(content="The visa requires...")], intent="qna")) == "reviewer"
-    assert should_continue(_state([AIMessage(content="- **Jane** — NL expert")], intent="mentor")) == "reviewer"
+    assert should_continue(_state([AIMessage(content="- **Jane** - NL expert")], intent="mentor")) == "reviewer"
 
 
 # ── should_revise ─────────────────────────────────────────────────────────────
