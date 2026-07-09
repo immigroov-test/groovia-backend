@@ -72,7 +72,7 @@ def precise_search(query: str) -> str:
     """
     Precise neural search for accurate legal, visa, salary, and policy data.
     Use for: exact visa names, salary thresholds, immigration law updates, university syllabi.
-    Argument: query — a specific natural language question about visa, law, salary, or policy.
+    Argument: query - a specific natural language question about visa, law, salary, or policy.
     """
     logger.info("tool=precise_search (Exa) query=%r", query)
     try:

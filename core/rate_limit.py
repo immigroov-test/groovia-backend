@@ -18,7 +18,7 @@ def per_user_or_ip(request: Request) -> str:
                 config.SUPABASE_JWT_SECRET,
                 algorithms=["HS256"],
                 audience="authenticated",
-                # We don't care about expiry for the *limit key* — even an expired token
+                # We don't care about expiry for the *limit key* - even an expired token
                 # still identifies the same user.
                 options={"verify_exp": False},
             )

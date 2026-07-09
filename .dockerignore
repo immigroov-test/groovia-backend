@@ -22,7 +22,7 @@ pyvenv.cfg
 .vscode/
 .idea/
 
-# Tests and dev tooling — not needed in the runtime image
+# Tests and dev tooling - not needed in the runtime image
 tests/
 pytest.ini
 ruff.toml

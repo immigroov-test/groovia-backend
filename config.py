@@ -18,7 +18,7 @@ SUPABASE_DB_URL           = os.getenv("SUPABASE_DB_URL") or os.getenv("DATABASE_
 CORS_ORIGINS = [o.strip() for o in os.getenv("CORS_ORIGINS", "http://localhost:3000").split(",") if o.strip()]
 PORT = int(os.getenv("PORT", 8000))  # Fly.io auto-injects PORT
 HOST = "0.0.0.0"
-# Where the frontend lives — used to build links inside LLM responses (e.g. "browse all mentors").
+# Where the frontend lives - used to build links inside LLM responses (e.g. "browse all mentors").
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
 
 # Models
@@ -43,7 +43,7 @@ EXA_NUM_RESULTS          = 3
 EXA_HIGHLIGHT_MAX_CHARS  = 1000
 
 # Resend transactional email.
-# NOTE: EMAIL_FROM must be a Resend-verified sender — either "onboarding@resend.dev"
+# NOTE: EMAIL_FROM must be a Resend-verified sender - either "onboarding@resend.dev"
 # (Resend's shared sandbox, which only delivers to the Resend account owner) or an
 # address at a domain you've verified in Resend (e.g. noreply@immigroov.com).
 # A personal gmail/outlook address will be REJECTED by Resend (every send fails).
@@ -56,10 +56,10 @@ ADMIN_EMAIL    = os.getenv("ADMIN_EMAIL", "")
 # mentee/admin. Set it to the Resend account owner's email so sandbox delivers. Empty = live.
 EMAIL_TEST_REDIRECT = os.getenv("EMAIL_TEST_REDIRECT", "").strip()
 
-# Razorpay (customer payments). Optional at startup — MOCK_SERVICES=true lets
+# Razorpay (customer payments). Optional at startup - MOCK_SERVICES=true lets
 # booking/payment flows work locally without real credentials (mirrors how
 # RESEND_API_KEY is optional). RAZORPAY_WEBHOOK_SECRET is a SEPARATE secret
-# from RAZORPAY_KEY_SECRET — it signs webhook deliveries, not API requests.
+# from RAZORPAY_KEY_SECRET - it signs webhook deliveries, not API requests.
 RAZORPAY_KEY_ID         = os.getenv("RAZORPAY_KEY_ID", "")
 RAZORPAY_KEY_SECRET     = os.getenv("RAZORPAY_KEY_SECRET", "")
 RAZORPAY_WEBHOOK_SECRET = os.getenv("RAZORPAY_WEBHOOK_SECRET", "")
@@ -97,17 +97,17 @@ _missing = [k for k, v in {
 if _missing:
     sys.exit(f"[FATAL] Missing required environment variables: {', '.join(_missing)}")
 
-# Resend is optional at startup — booking still creates events without it.
+# Resend is optional at startup - booking still creates events without it.
 if not RESEND_API_KEY:
     import warnings
-    warnings.warn("[WARN] RESEND_API_KEY not set — transactional emails will be skipped", stacklevel=1)
+    warnings.warn("[WARN] RESEND_API_KEY not set - transactional emails will be skipped", stacklevel=1)
 
-# Razorpay is optional at startup — set MOCK_SERVICES=true to use the mock
+# Razorpay is optional at startup - set MOCK_SERVICES=true to use the mock
 # confirm endpoint instead of a real gateway (see routers/payments.py).
 if not (RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET and RAZORPAY_WEBHOOK_SECRET):
     import warnings
     warnings.warn(
-        "[WARN] RAZORPAY_KEY_ID/RAZORPAY_KEY_SECRET/RAZORPAY_WEBHOOK_SECRET not fully set — "
+        "[WARN] RAZORPAY_KEY_ID/RAZORPAY_KEY_SECRET/RAZORPAY_WEBHOOK_SECRET not fully set - "
         "real payments will fail; use MOCK_SERVICES=true for local dev",
         stacklevel=1,
     )

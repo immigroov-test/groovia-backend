@@ -1,4 +1,4 @@
-# Render Blueprint. Commit this file and connect the repo to Render — Render
+# Render Blueprint. Commit this file and connect the repo to Render - Render
 # detects it, provisions the service, and only asks you to fill the `sync: false`
 # secret values from its dashboard.
 # Docs: https://render.com/docs/blueprint-spec
@@ -9,7 +9,7 @@ services:
     name: groovia-api
     runtime: docker
     plan: starter            # free tier; cold-starts after 15 min idle. Upgrade to "standard" once live.
-    region: frankfurt        # EU — keeps data near Supabase EU West and stays GDPR-friendly.
+    region: frankfurt        # EU - keeps data near Supabase EU West and stays GDPR-friendly.
     branch: main             # pinned so prod only rebuilds on main.
     dockerfilePath: ./Dockerfile
     healthCheckPath: /health
@@ -23,7 +23,7 @@ services:
       - key: CORS_ORIGINS
         sync: false          # set to your Vercel domain(s), comma-separated
       - key: FRONTEND_URL
-        sync: false          # https://your-vercel-domain.com — used for the mentor-directory link in LLM responses
+        sync: false          # https://your-vercel-domain.com - used for the mentor-directory link in LLM responses
 
       # Models
       - key: MAIN_MODEL_NAME
@@ -31,7 +31,7 @@ services:
       - key: REVIEW_MODEL_NAME
         value: llama-3.1-8b-instant
 
-      # Feature flags (default ON — override per environment)
+      # Feature flags (default ON - override per environment)
       - key: FEATURE_CHAT_HISTORY
         value: "true"
       - key: FEATURE_GUEST_MODE
@@ -47,7 +47,7 @@ services:
       - key: FEATURE_GOOGLE_OAUTH
         value: "true"
 
-      # Secrets — all marked `sync: false` so Render won't overwrite them on each deploy.
+      # Secrets - all marked `sync: false` so Render won't overwrite them on each deploy.
       # Set their values in the Render dashboard once.
       - key: GROQ_API_KEY
         sync: false
@@ -62,19 +62,19 @@ services:
       - key: SUPABASE_JWT_SECRET
         sync: false
       - key: DATABASE_URL
-        sync: false           # Supabase SESSION pooler URI, port 5432 (NOT 6543 — LangGraph uses prepared statements)
+        sync: false           # Supabase SESSION pooler URI, port 5432 (NOT 6543 - LangGraph uses prepared statements)
       - key: RESEND_API_KEY
         sync: false           # transactional email; optional
       - key: ADMIN_EMAIL
         sync: false           # ops inbox copied on booking/reschedule/cancel (e.g. yokeshmd99@gmail.com)
 
   # ── Scheduler (production) ───────────────────────────────────────────────────
-  # Fires jobs/run_due.py — see INFRASTRUCTURE_ARCHITECTURE_PLAN.md §3 for why
+  # Fires jobs/run_due.py - see INFRASTRUCTURE_ARCHITECTURE_PLAN.md §3 for why
   # this is ONE Render Cron Job (not one per task) and DISPATCHER_SAFETY_CHECKLIST.md
   # for why every job it registers is safe to run on a shared 5-minute tick.
   # Needs the full same env as groovia-api (config.py's fail-fast boot check
   # requires it even though the dispatcher itself only touches Supabase/Resend/
-  # Razorpay) — duplicated below rather than shared via an env group, matching
+  # Razorpay) - duplicated below rather than shared via an env group, matching
   # this file's existing prod/staging convention.
   - type: cron
     name: groovia-scheduler
@@ -84,7 +84,7 @@ services:
     branch: main
     dockerfilePath: ./Dockerfile
     dockerCommand: python -m jobs.run_due
-    schedule: "*/5 * * * *"    # every 5 min — see architecture plan §3a for the timing justification
+    schedule: "*/5 * * * *"    # every 5 min - see architecture plan §3a for the timing justification
     envVars:
       - key: GROQ_API_KEY
         sync: false
@@ -111,7 +111,7 @@ services:
       - key: RAZORPAY_WEBHOOK_SECRET
         sync: false
       - key: FRONTEND_URL
-        sync: false           # used in reminder/reference email links (CORS_ORIGINS not needed — no HTTP server here)
+        sync: false           # used in reminder/reference email links (CORS_ORIGINS not needed - no HTTP server here)
 
   # ── Staging (tracks `staging` branch) ────────────────────────────────────────
   # Point ALL Supabase secrets below at the SEPARATE staging Supabase project,
@@ -155,7 +155,7 @@ services:
       - key: FEATURE_GOOGLE_OAUTH
         value: "true"
 
-      # Secrets — STAGING Supabase project + shared LLM/search keys.
+      # Secrets - STAGING Supabase project + shared LLM/search keys.
       - key: GROQ_API_KEY
         sync: false
       - key: TAVILY_API_KEY
@@ -169,9 +169,9 @@ services:
       - key: SUPABASE_JWT_SECRET
         sync: false           # staging Supabase JWT secret (Settings → API → JWT Settings)
       - key: DATABASE_URL
-        sync: false           # staging Supabase SESSION pooler URI, port 5432 (NOT 6543 — LangGraph uses prepared statements)
+        sync: false           # staging Supabase SESSION pooler URI, port 5432 (NOT 6543 - LangGraph uses prepared statements)
       - key: RESEND_API_KEY
-        sync: false           # optional — leave unset to skip real emails
+        sync: false           # optional - leave unset to skip real emails
       - key: ADMIN_EMAIL
         sync: false           # ops inbox copied on booking/reschedule/cancel (e.g. yokeshmd99@gmail.com)
       - key: MOCK_SERVICES
