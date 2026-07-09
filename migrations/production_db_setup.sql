@@ -19,8 +19,11 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'guest';
 
 DO $$ BEGIN
-  CREATE TYPE mentor_status AS ENUM ('pending_review', 'approved', 'rejected', 'suspended');
+  CREATE TYPE mentor_status AS ENUM ('pending_review', 'approved', 'rejected', 'suspended', 'changes_requested');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+-- 'changes_requested': admin asked the applicant to revise (editable + can resubmit),
+-- distinct from 'rejected' (declined). Idempotent add for DBs that predate it.
+ALTER TYPE mentor_status ADD VALUE IF NOT EXISTS 'changes_requested';
 
 DO $$ BEGIN
   CREATE TYPE booking_status AS ENUM

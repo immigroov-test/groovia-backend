@@ -39,6 +39,56 @@ def list_suspended_mentors(user: AuthUser = Depends(require_admin)):
     return db.list_mentors_by_status("suspended")
 
 
+@router.get("/mentors/revisions")
+def list_mentor_revisions(user: AuthUser = Depends(require_admin)):
+    """Approved mentors with staged profile edits awaiting review. Must be declared
+    before /mentors/{mentor_id} so the literal path isn't swallowed by the param route."""
+    return db.list_pending_revisions()
+
+
+@router.post("/mentors/{mentor_id}/revision/approve")
+def approve_revision(mentor_id: str, background_tasks: BackgroundTasks, user: AuthUser = Depends(require_admin)):
+    """Apply an approved mentor's staged profile changes to their live profile."""
+    try:
+        display_name, mentor_email = db.get_mentor_email(mentor_id)
+        result = db.apply_pending_changes(mentor_id)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Mentor not found")
+    if mentor_email:
+        background_tasks.add_task(
+            mailer.send_transactional,
+            mentor_email,
+            "mentor_approved",
+            {"display_name": display_name or "", "mentor_hub_url": config.FRONTEND_URL + "/mentor"},
+        )
+    return result
+
+
+@router.post("/mentors/{mentor_id}/revision/request-changes")
+def request_revision_changes(mentor_id: str, background_tasks: BackgroundTasks, body: RejectBody = RejectBody(),
+                             user: AuthUser = Depends(require_admin)):
+    """Reject an approved mentor's staged changes: discard them (the live profile keeps
+    serving) and record a reviewer note the mentor sees on their dashboard."""
+    reason = (body.reason or "").strip() or None
+    try:
+        display_name, mentor_email = db.get_mentor_email(mentor_id)
+        result = db.discard_pending_changes(mentor_id, reason=reason)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Mentor not found")
+    if mentor_email:
+        background_tasks.add_task(
+            mailer.send_transactional,
+            mentor_email,
+            "mentor_changes_requested",
+            {
+                "display_name": display_name or "",
+                "reason": reason or "",
+                "mentor_hub_url": config.FRONTEND_URL + "/mentor/profile",
+            },
+        )
+    return result
+
+
 @router.get("/mentors/{mentor_id}")
 def get_mentor_detail(mentor_id: str, user: AuthUser = Depends(require_admin)):
     """Full mentor profile for admin review: all fields, profile email, availability slots.
@@ -82,6 +132,31 @@ def reject_mentor(mentor_id: str, background_tasks: BackgroundTasks, body: Rejec
             mentor_email,
             "mentor_rejected",
             {"display_name": display_name or "", "reason": reason or ""},
+        )
+    return result
+
+
+@router.post("/mentors/{mentor_id}/request-changes")
+def request_changes(mentor_id: str, background_tasks: BackgroundTasks, body: RejectBody = RejectBody(),
+                    user: AuthUser = Depends(require_admin)):
+    """Ask a pending applicant to revise their profile. Sets status to changes_requested
+    (editable + resubmittable) and stores the reviewer note shown in their dashboard."""
+    reason = (body.reason or "").strip() or None
+    try:
+        display_name, mentor_email = db.get_mentor_email(mentor_id)
+        result = db.set_mentor_status(mentor_id, "changes_requested", reason=reason)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Mentor not found")
+    if mentor_email:
+        background_tasks.add_task(
+            mailer.send_transactional,
+            mentor_email,
+            "mentor_changes_requested",
+            {
+                "display_name": display_name or "",
+                "reason": reason or "",
+                "mentor_hub_url": config.FRONTEND_URL + "/mentor",
+            },
         )
     return result
 

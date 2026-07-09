@@ -222,19 +222,25 @@ class ProfileUpdateBody(BaseModel):
     languages: Optional[list[str]] = None
     social_links: Optional[list[SocialLink]] = None
     public_notes: Optional[str] = None
-    session_duration_minutes: Optional[int] = None
+    expertise_country_codes: Optional[list[str]] = None
+    expertise_categories: Optional[list[str]] = None
+    years_lived_experience: Optional[int] = None
+    professional_domains: Optional[list[str]] = None
 
-    @field_validator("session_duration_minutes")
+    @field_validator("years_lived_experience")
     @classmethod
-    def validate_duration(cls, v: Optional[int]) -> Optional[int]:
-        if v is not None and v not in (30, 60, 90):
-            raise ValueError("session_duration_minutes must be 30, 60, or 90")
+    def validate_years(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and (v < 0 or v > 60):
+            raise ValueError("years_lived_experience must be between 0 and 60")
         return v
 
 
 @router.post("/profile")
 def update_profile(body: ProfileUpdateBody, user: AuthUser = Depends(get_current_user)):
-    """Update non-critical mentor profile fields (no re-approval required)."""
+    """Edit the mentor profile (Phase 2, status-aware). An APPROVED mentor's edits are
+    staged for re-approval (pending_changes) while the live profile keeps serving; a
+    mentor in changes_requested/rejected edits in place and resubmits for review; a
+    pending_review or suspended profile is locked. See db.save_mentor_profile_edit."""
     mentor = db.get_mentor_by_profile_id(user.id)
     if not mentor:
         raise HTTPException(status_code=404, detail="No mentor profile for this account")
@@ -261,44 +267,20 @@ def update_profile(body: ProfileUpdateBody, user: AuthUser = Depends(get_current
         fields["social_links"] = [s.model_dump() for s in body.social_links]
     if body.public_notes is not None:
         fields["public_notes"] = body.public_notes.strip() or None
-    if body.session_duration_minutes is not None:
-        fields["session_duration_minutes"] = body.session_duration_minutes
-    try:
-        return db.update_mentor_profile(mentor["id"], fields)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-
-
-class CriticalUpdateBody(BaseModel):
-    expertise_country_codes: Optional[list[str]] = None
-    years_lived_experience: Optional[int] = None
-    professional_domains: Optional[list[str]] = None
-
-    @field_validator("years_lived_experience")
-    @classmethod
-    def validate_years(cls, v: Optional[int]) -> Optional[int]:
-        if v is not None and (v < 0 or v > 60):
-            raise ValueError("years_lived_experience must be between 0 and 60")
-        return v
-
-
-@router.post("/profile/critical")
-def update_critical_fields(body: CriticalUpdateBody, user: AuthUser = Depends(get_current_user)):
-    """Update expertise fields - resets mentor status to pending_review for re-approval."""
-    mentor = db.get_mentor_by_profile_id(user.id)
-    if not mentor:
-        raise HTTPException(status_code=404, detail="No mentor profile for this account")
-    fields: dict[str, Any] = {}
     if body.expertise_country_codes is not None:
         if not body.expertise_country_codes:
             raise HTTPException(status_code=400, detail="Select at least one country of expertise")
         fields["expertise_country_codes"] = body.expertise_country_codes
+    if body.expertise_categories is not None:
+        fields["expertise_categories"] = body.expertise_categories
     if body.years_lived_experience is not None:
         fields["years_lived_experience"] = body.years_lived_experience
     if body.professional_domains is not None:
         fields["professional_domains"] = body.professional_domains
     try:
-        return db.update_mentor_critical_fields(mentor["id"], fields)
+        return db.save_mentor_profile_edit(mentor["id"], fields)
+    except PermissionError as e:
+        raise HTTPException(status_code=403, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

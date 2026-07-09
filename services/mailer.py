@@ -174,6 +174,27 @@ def _mentor_rejected(d: dict) -> tuple[str, str]:
     return "Your Immigroov mentor application", _base(body)
 
 
+def _mentor_changes_requested(d: dict) -> tuple[str, str]:
+    name = _e(d.get("display_name", ""))
+    reason = (d.get("reason") or "").strip()
+    hub = d.get("mentor_hub_url", config.FRONTEND_URL + "/mentor")
+    reason_html = _info_row("What to change", reason) if reason else ""
+    body = (
+        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">A quick update needed on your application</h1>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {name},</p>'
+        '<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
+        "Thanks for applying to mentor on Immigroov. We'd like to move forward, but our reviewer has asked "
+        "for a few changes before we can approve your profile."
+        "</p>"
+        + reason_html
+        + '<p style="margin:0;font-size:15px;color:#444;line-height:1.6">'
+        "Open your Mentor Hub, update your profile, and re-submit for approval."
+        "</p>"
+        + _btn(hub, "Update my profile")
+    )
+    return "A quick update needed on your Immigroov mentor application", _base(body)
+
+
 def _mentor_suspended(d: dict) -> tuple[str, str]:
     name = _e(d.get("display_name", ""))
     body = (
@@ -453,6 +474,7 @@ _TEMPLATES = {
     "mentor_application_received": _mentor_application_received,
     "mentor_approved": _mentor_approved,
     "mentor_rejected": _mentor_rejected,
+    "mentor_changes_requested": _mentor_changes_requested,
     "mentor_suspended": _mentor_suspended,
     "booking_confirmed_candidate": _booking_confirmed_candidate,
     "booking_confirmed_mentor": _booking_confirmed_mentor,

@@ -104,8 +104,10 @@ def get_mentor_by_profile_id(profile_id: str) -> Optional[dict[str, Any]]:
     res = (
         _supabase.table("mentors")
         .select("id, slug, display_name, status, session_duration_minutes, rejection_reason, "
-                "headline, bio, photo_url, country, city, languages, expertise_country_codes, "
-                "professional_domains, years_lived_experience, public_notes")
+                "headline, bio, photo_url, phone, country, city, timezone, languages, social_links, "
+                "expertise_country_codes, expertise_categories, professional_domains, "
+                "years_lived_experience, public_notes, submission_count, "
+                "pending_changes, pending_submitted_at")
         .eq("profile_id", profile_id)
         .limit(1)
         .execute()
@@ -254,6 +256,110 @@ _CRITICAL_MENTOR_FIELDS = {
     "expertise_country_codes", "years_lived_experience", "professional_domains",
 }
 
+# Every profile field a mentor may edit from the dashboard (Phase 2 unified model).
+# Availability, services and booking rules are handled by separate endpoints and never
+# need re-approval; they are intentionally not here.
+_EDITABLE_PROFILE_FIELDS = {
+    "display_name", "headline", "bio", "photo_url",
+    "phone", "city", "country", "social_links", "public_notes", "languages", "timezone",
+    "expertise_country_codes", "expertise_categories", "years_lived_experience", "professional_domains",
+}
+
+
+def save_mentor_profile_edit(mentor_id: str, fields: dict[str, Any]) -> dict[str, Any]:
+    """Status-aware profile edit (Phase 2).
+
+    - approved: the profile is live, so proposed values are staged in `pending_changes`
+      (the live row is untouched) and `pending_submitted_at` is stamped. An admin reviews
+      and applies them via apply_pending_changes().
+    - changes_requested / rejected: the profile is not live yet, so edits are written
+      straight to the live row and the application is resubmitted (status ->
+      pending_review, submission_count +1, reviewer note cleared).
+    - pending_review / suspended: locked. Raises PermissionError.
+    """
+    safe = {k: v for k, v in fields.items() if k in _EDITABLE_PROFILE_FIELDS}
+    if not safe:
+        raise ValueError("No valid profile fields to update")
+    cur = (
+        _supabase.table("mentors")
+        .select("status, submission_count")
+        .eq("id", mentor_id)
+        .limit(1)
+        .execute()
+    )
+    if not cur.data:
+        raise ValueError(f"Mentor {mentor_id!r} not found")
+    status = cur.data[0].get("status")
+    now = datetime.now(timezone.utc).isoformat()
+
+    if status in ("pending_review", "suspended"):
+        raise PermissionError(f"Profile cannot be edited while status is {status}")
+
+    if status == "approved":
+        payload: dict[str, Any] = {
+            "pending_changes": safe,
+            "pending_submitted_at": now,
+            "updated_at": now,
+        }
+    else:  # changes_requested / rejected -> edit live row and resubmit
+        count = (cur.data[0].get("submission_count") or 1) + 1
+        payload = {
+            **safe,
+            "status": "pending_review",
+            "submission_count": count,
+            "rejection_reason": None,
+            "pending_changes": None,
+            "pending_submitted_at": None,
+            "updated_at": now,
+        }
+
+    res = _supabase.table("mentors").update(payload).eq("id", mentor_id).execute()
+    if not res.data:
+        raise ValueError(f"Mentor {mentor_id!r} not found")
+    return res.data[0]
+
+
+def apply_pending_changes(mentor_id: str) -> dict[str, Any]:
+    """Admin approves an approved-mentor's staged profile revision: copy pending_changes
+    onto the live row and clear the staging fields. Status stays approved (still live)."""
+    cur = (
+        _supabase.table("mentors")
+        .select("pending_changes")
+        .eq("id", mentor_id)
+        .limit(1)
+        .execute()
+    )
+    if not cur.data:
+        raise ValueError(f"Mentor {mentor_id!r} not found")
+    changes = cur.data[0].get("pending_changes") or {}
+    safe = {k: v for k, v in changes.items() if k in _EDITABLE_PROFILE_FIELDS}
+    payload: dict[str, Any] = {
+        **safe,
+        "pending_changes": None,
+        "pending_submitted_at": None,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    res = _supabase.table("mentors").update(payload).eq("id", mentor_id).execute()
+    if not res.data:
+        raise ValueError(f"Mentor {mentor_id!r} not found")
+    return res.data[0]
+
+
+def discard_pending_changes(mentor_id: str, reason: Optional[str] = None) -> dict[str, Any]:
+    """Admin requests changes on / rejects a staged revision: drop pending_changes (live
+    row keeps serving) and optionally record a reviewer note for the mentor to see."""
+    payload: dict[str, Any] = {
+        "pending_changes": None,
+        "pending_submitted_at": None,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    if reason is not None:
+        payload["rejection_reason"] = reason.strip() or None
+    res = _supabase.table("mentors").update(payload).eq("id", mentor_id).execute()
+    if not res.data:
+        raise ValueError(f"Mentor {mentor_id!r} not found")
+    return res.data[0]
+
 
 def update_mentor_profile(mentor_id: str, fields: dict[str, Any]) -> dict[str, Any]:
     """Update non-critical mentor fields. No re-approval triggered."""
@@ -332,7 +438,7 @@ def list_mentors_by_status(status: str, limit: int = 100) -> list[dict[str, Any]
     """Return mentor rows with the given status, enriched with profile email/full_name."""
     rows = (
         _supabase.table("mentors")
-        .select("id, slug, display_name, headline, timezone, status, submission_count, created_at, profile_id")
+        .select("id, slug, display_name, headline, photo_url, timezone, status, submission_count, created_at, profile_id, pending_submitted_at")
         .eq("status", status)
         .order("created_at")
         .limit(limit)
@@ -356,15 +462,49 @@ def list_mentors_by_status(status: str, limit: int = 100) -> list[dict[str, Any]
     return rows
 
 
+def list_pending_revisions(limit: int = 100) -> list[dict[str, Any]]:
+    """Approved mentors who have staged profile changes (pending_changes) awaiting review.
+    The live profile keeps serving until an admin applies the revision."""
+    rows = (
+        _supabase.table("mentors")
+        .select("id, slug, display_name, headline, photo_url, status, submission_count, "
+                "created_at, profile_id, pending_changes, pending_submitted_at")
+        .eq("status", "approved")
+        .not_.is_("pending_changes", "null")
+        .order("pending_submitted_at")
+        .limit(limit)
+        .execute()
+        .data or []
+    )
+    profile_ids = [r["profile_id"] for r in rows if r.get("profile_id")]
+    if profile_ids:
+        profiles = (
+            _supabase.table("profiles")
+            .select("id, email, full_name")
+            .in_("id", profile_ids)
+            .execute()
+            .data or []
+        )
+        profile_map = {p["id"]: p for p in profiles}
+        for row in rows:
+            p = profile_map.get(row.get("profile_id") or "")
+            row["email"] = p["email"] if p else None
+            row["full_name"] = p["full_name"] if p else None
+    return rows
+
+
 def set_mentor_status(mentor_id: str, status: str, reason: Optional[str] = None) -> dict[str, Any]:
     """Update a mentor's status and return the updated row. is_active is synced here.
-    On reject, stores `reason` (shown to the mentor); clears it on any other status."""
+    On reject/changes_requested, stores `reason` (the reviewer note shown to the mentor);
+    clears it on any other status."""
     payload: dict[str, Any] = {
         "status": status,
         "is_active": (status == "approved"),
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
-    payload["rejection_reason"] = (reason or "").strip() or None if status == "rejected" else None
+    payload["rejection_reason"] = (
+        (reason or "").strip() or None if status in ("rejected", "changes_requested") else None
+    )
     res = (
         _supabase.table("mentors")
         .update(payload)
@@ -539,7 +679,21 @@ def get_mentor_full_details(mentor_id: str) -> Optional[dict[str, Any]]:
         if p.data:
             mentor["email"] = p.data[0].get("email")
             mentor["full_name"] = p.data[0].get("full_name")
-    mentor["availability_slots"] = get_mentor_availability(mentor_id)
+    # Real availability the mentor configured (cal.com-style weekly hours + session
+    # types + booking rules + date overrides). The legacy mentor_availability table
+    # is deprecated and empty for new mentors.
+    from . import direct_booking as _booking
+    try:
+        mentor["weekly_availability"] = _booking.list_weekly_availability(mentor_id)
+        mentor["services"] = _booking.list_services(mentor_id)
+        mentor["availability_rules"] = _booking.get_availability_rules(mentor_id)
+        mentor["date_overrides"] = _booking.list_specific_availability(mentor_id)
+    except Exception:
+        logger.exception("Failed to load availability for mentor %s", mentor_id)
+        mentor.setdefault("weekly_availability", [])
+        mentor.setdefault("services", [])
+        mentor.setdefault("availability_rules", {})
+        mentor.setdefault("date_overrides", [])
     return mentor
 
 

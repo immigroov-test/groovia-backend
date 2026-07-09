@@ -19,8 +19,11 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 ALTER TYPE user_role ADD VALUE IF NOT EXISTS 'guest';
 
 DO $$ BEGIN
-  CREATE TYPE mentor_status AS ENUM ('pending_review', 'approved', 'rejected', 'suspended');
+  CREATE TYPE mentor_status AS ENUM ('pending_review', 'approved', 'rejected', 'suspended', 'changes_requested');
 EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+-- 'changes_requested': admin asked the applicant to revise (editable + can resubmit),
+-- distinct from 'rejected' (declined). Idempotent add for DBs that predate it.
+ALTER TYPE mentor_status ADD VALUE IF NOT EXISTS 'changes_requested';
 
 DO $$ BEGIN
   CREATE TYPE booking_status AS ENUM
@@ -1533,6 +1536,40 @@ ON CONFLICT (slug) DO NOTHING;
 -- address made a fresh signup get auto-linked to a seed mentor like "Maya Singh".)
 -- Idempotent: only fills blanks.
 UPDATE mentors SET email = 'yokeshd1999+seed@gmail.com' WHERE profile_id IS NULL AND email IS NULL;
+
+-- Backfill demo profile details for seed mentors (photo, phone, location, socials,
+-- public notes) so the admin "View details" panel shows a complete profile instead
+-- of blanks. Testing data only; idempotent (only fills empty fields).
+-- Photo uses a deterministic placeholder-avatar service keyed by slug.
+UPDATE mentors SET
+  photo_url    = COALESCE(photo_url, 'https://i.pravatar.cc/300?u=' || slug),
+  public_notes = COALESCE(NULLIF(public_notes, ''),
+    'Sessions are for guidance and lived experience only, and are not legal or immigration advice.'),
+  country = COALESCE(country,
+    CASE WHEN 'DE' = ANY(expertise_country_codes) THEN 'DE'
+         WHEN 'CA' = ANY(expertise_country_codes) THEN 'CA'
+         WHEN 'GB' = ANY(expertise_country_codes) THEN 'GB'
+         WHEN 'US' = ANY(expertise_country_codes) THEN 'US'
+         WHEN 'AU' = ANY(expertise_country_codes) THEN 'AU'
+         ELSE 'NL' END),
+  city = COALESCE(city,
+    CASE WHEN 'DE' = ANY(expertise_country_codes) THEN 'Berlin'
+         WHEN 'CA' = ANY(expertise_country_codes) THEN 'Toronto'
+         WHEN 'GB' = ANY(expertise_country_codes) THEN 'London'
+         WHEN 'US' = ANY(expertise_country_codes) THEN 'San Francisco'
+         WHEN 'AU' = ANY(expertise_country_codes) THEN 'Melbourne'
+         ELSE 'Amsterdam' END),
+  phone = COALESCE(phone,
+    CASE WHEN 'DE' = ANY(expertise_country_codes) THEN '+49 151 23456789'
+         WHEN 'CA' = ANY(expertise_country_codes) THEN '+1 416 555 0142'
+         WHEN 'GB' = ANY(expertise_country_codes) THEN '+44 7700 900123'
+         WHEN 'US' = ANY(expertise_country_codes) THEN '+1 415 555 0186'
+         WHEN 'AU' = ANY(expertise_country_codes) THEN '+61 412 345 678'
+         ELSE '+31 6 12345678' END),
+  social_links = CASE WHEN social_links = '[]'::jsonb
+    THEN jsonb_build_array(jsonb_build_object('type', 'linkedin', 'url', 'https://www.linkedin.com/in/' || slug))
+    ELSE social_links END
+WHERE profile_id IS NULL;
 
 -- ============================================================================
 -- Seed bookable services + weekly availability for the seed mentors (testing only)
