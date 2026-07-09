@@ -55,10 +55,9 @@ def parse_docx_to_text(file_bytes: bytes) -> str:
 
 @tool
 def general_search(query: str) -> str:
-    """
-    Broad web search for country overviews, culture, cost of living, general market trends, pros and cons.
-    Use for: 'Tech scene in Germany', 'Cost of living in Amsterdam', 'Issues faced by expats in USA'.
-    Do NOT use for visa rules, salary thresholds, or government policies.
+    """Broad web search for context: culture, cost of living, lifestyle, market trends, pros/cons.
+    Examples: 'tech scene in Germany', 'cost of living in Amsterdam', 'expat life in the USA'.
+    Not for visa rules, salary figures, or official policy - use precise_search for those.
     """
     logger.info("tool=general_search (Tavily) query=%r", query)
     try:
@@ -69,10 +68,9 @@ def general_search(query: str) -> str:
 
 @tool
 def precise_search(query: str) -> str:
-    """
-    Precise neural search for accurate legal, visa, salary, and policy data.
-    Use for: exact visa names, salary thresholds, immigration law updates, university syllabi.
-    Argument: query - a specific natural language question about visa, law, salary, or policy.
+    """Precise search for facts, with source URLs: exact visa names, salary/tuition figures,
+    immigration rules, official government policy, university programmes.
+    Argument: query - a specific question about a visa, rule, salary, or policy.
     """
     logger.info("tool=precise_search (Exa) query=%r", query)
     try:
@@ -88,11 +86,9 @@ def precise_search(query: str) -> str:
 
 @tool
 def retrieve_matching_mentors(target_country: str, profile_keyword: str = "") -> str:
-    """Retrieves mentors from the database for a specific country.
-
-    target_country MUST be the standard 2-letter ISO 3166-1 alpha-2 code (e.g. 'US' for America/USA,
-    'GB' for UK, 'AU' for Australia, 'NL' for Netherlands).
-    Optionally accepts a broad profile_keyword (e.g. 'Software', 'AI', 'Finance') to filter by headline.
+    """Get mentors for a country from the database.
+    target_country: ISO 3166-1 alpha-2 code (US, GB, AU, NL, DE, CA...).
+    profile_keyword (optional): filter by headline domain, e.g. 'Software', 'AI', 'Finance'.
     """
     logger.info("tool=retrieve_matching_mentors country=%r keyword=%r", target_country, profile_keyword)
     try:
