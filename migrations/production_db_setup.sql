@@ -1739,13 +1739,12 @@ ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS last_no_show_at TIMESTAMPTZ;
 ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS rejection_reason TEXT;   -- admin's note shown to a rejected mentor
 
 -- ── Attendance engine (join-link no-show tracking) ──────────────────────────
--- Ported from immigroov's 0079_attendance_tracking.sql. Schema + RPCs land
--- now; attendance_engine_enabled (below) stays 'false' and the grace-period
--- evaluator stays unscheduled until the frontend /join/[token] page and
--- reminder emails exist — see COMPLETION_PLAN.md B6 for why (immigroov's own
--- 0079 comment: turning this on before real join links exist would dump
--- every session into "neither joined" manual review, since nobody has a
--- link to click yet). Column names use groovia's own "candidate" convention
+-- Ported from immigroov's 0079_attendance_tracking.sql. Inserted here as
+-- 'false' (schema landing first); flipped to 'true' further down, once the
+-- join-link RPCs/frontend/reminder-emails are all in place, mirroring
+-- immigroov's own two-step rollout (0080 inserts false, 0087 flips true) —
+-- see the activation block near the pg_cron schedules below, and
+-- COMPLETION_PLAN.md B6. Column names use groovia's own "candidate" convention
 -- (matching candidate_id/candidate_email/candidate_name) rather than
 -- immigroov's "customer" — the role literals passed to flag_no_show() below
 -- still use groovia's existing 'mentor'/'user' pair, unchanged.
@@ -3031,10 +3030,16 @@ $$;
 -- ambiguity above) — it tells plpgsql to always prefer the table column
 -- over an identically-named OUT variable for any bare reference in this
 -- function, everywhere, not just the ones a manual pass happens to qualify.
+-- join_token added (DROP first: adding an output column changes the return
+-- type, which CREATE OR REPLACE can't do) so reminder emails can link to
+-- /join/[token] (records attendance) instead of the generic meeting_url
+-- (doesn't). meeting_url stays in the output too, as a fallback for 'dm'
+-- services or if the frontend join page is ever pulled.
+DROP FUNCTION IF EXISTS claim_due_customer_reminders(TEXT, INT, INT);
 CREATE OR REPLACE FUNCTION claim_due_customer_reminders(p_kind TEXT, p_lo_minutes INT, p_hi_minutes INT)
 RETURNS TABLE(
   booking_id UUID, email TEXT, first_name TEXT, slot_utc TIMESTAMPTZ,
-  customer_tz TEXT, other_party_name TEXT, meeting_url TEXT
+  customer_tz TEXT, other_party_name TEXT, meeting_url TEXT, join_token UUID
 ) LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 #variable_conflict use_column
 BEGIN
@@ -3050,7 +3055,7 @@ BEGIN
     RETURNING br.booking_id
   )
   SELECT b.id, COALESCE(b.candidate_email, p.email), COALESCE(p.display_name, p.full_name, b.candidate_name),
-         b.slot_time, COALESCE(b.attendee_timezone, p.timezone, 'UTC'), m.display_name, b.meeting_url
+         b.slot_time, COALESCE(b.attendee_timezone, p.timezone, 'UTC'), m.display_name, b.meeting_url, b.candidate_join_token
   FROM claimed c
   JOIN bookings b ON b.id = c.booking_id
   LEFT JOIN profiles p ON p.id = b.candidate_id
@@ -3060,10 +3065,11 @@ END;
 $$;
 GRANT EXECUTE ON FUNCTION claim_due_customer_reminders(TEXT, INT, INT) TO authenticated;
 
+DROP FUNCTION IF EXISTS claim_due_mentor_reminders(TEXT, INT, INT);
 CREATE OR REPLACE FUNCTION claim_due_mentor_reminders(p_kind TEXT, p_lo_minutes INT, p_hi_minutes INT)
 RETURNS TABLE(
   booking_id UUID, email TEXT, first_name TEXT, slot_utc TIMESTAMPTZ,
-  mentor_tz TEXT, other_party_name TEXT, meeting_url TEXT
+  mentor_tz TEXT, other_party_name TEXT, meeting_url TEXT, join_token UUID
 ) LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 #variable_conflict use_column
 BEGIN
@@ -3079,7 +3085,7 @@ BEGIN
     RETURNING br.booking_id
   )
   SELECT b.id, COALESCE(p.email, m.email), COALESCE(p.display_name, p.full_name, m.display_name),
-         b.slot_time, COALESCE(m.app_timezone, 'UTC'), COALESCE(b.candidate_name, b.candidate_email), b.meeting_url
+         b.slot_time, COALESCE(m.app_timezone, 'UTC'), COALESCE(b.candidate_name, b.candidate_email), b.meeting_url, b.mentor_join_token
   FROM claimed c
   JOIN bookings b ON b.id = c.booking_id
   JOIN mentors m ON m.id = b.mentor_id
@@ -3194,25 +3200,27 @@ BEGIN
 END $$;
 
 -- ---------------------------------------------------------------------------
--- attendance-grace-period: NOT scheduled yet - deliberately, matching
--- immigroov's own 0079_attendance_tracking.sql discipline.
---
--- evaluate_attendance_after_grace_period() only works once real people are
--- actually clicking real join links, which needs the /join/[token] frontend
--- page and reminder emails updated to send those links - neither exists yet.
--- If this job runs today, mentor_joined/candidate_joined will be false for
--- every booking (nobody has a link to click), so EVERY session would get
--- dumped into "neither joined" manual review - flooding admins with false
--- alarms instead of fixing anything. attendance_engine_enabled must also
--- flip to 'true' at the same time (see mark_past_bookings_completed above) -
--- turning on only one half does nothing.
---
--- Turn both on together only after the join-link UI + reminder emails are
--- live (mirrors immigroov's 0087_enable_attendance_engine.sql):
---   UPDATE platform_settings SET value = 'true' WHERE key = 'attendance_engine_enabled';
---   SELECT cron.schedule('attendance-grace-period', '*/5 * * * *',
---     'SELECT evaluate_attendance_after_grace_period()');
+-- attendance-grace-period: activation, mirroring immigroov's
+-- 0087_enable_attendance_engine.sql. The join-link UI (/join/[token]) and
+-- reminder emails (claim_due_customer_reminders/claim_due_mentor_reminders
+-- now return join_token, used by db/reminders.py to build the link) are both
+-- live, so it's safe to switch session completion over to verified
+-- attendance and start evaluating grace periods. Both steps together, per
+-- the plan in 0079/0080 - turning on only one half does nothing.
 -- ---------------------------------------------------------------------------
+UPDATE platform_settings SET value = 'true' WHERE key = 'attendance_engine_enabled';
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN
+    IF EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'attendance-grace-period') THEN
+      PERFORM cron.unschedule('attendance-grace-period');
+    END IF;
+    PERFORM cron.schedule('attendance-grace-period', '*/5 * * * *', 'SELECT evaluate_attendance_after_grace_period()');
+  ELSE
+    RAISE NOTICE 'pg_cron not enabled - skipping attendance-grace-period schedule. Enable it and re-run this block.';
+  END IF;
+END $$;
 
 
 -- ###########################################################################

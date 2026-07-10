@@ -31,6 +31,29 @@ def _row(**overrides):
     return row
 
 
+# ── db.reminders._reminder_link (attendance-tracking join link) ─────────────
+# Reminder emails now link to /join/[token] (records mentor_joined/
+# candidate_joined - the whole point of the attendance engine) instead of
+# the plain meeting_url, falling back to meeting_url when no join_token is
+# present (e.g. 'dm' services).
+
+def test_reminder_link_prefers_join_token():
+    token = str(uuid.uuid4())
+    row = _row(join_token=token)
+    with patch.object(reminders.config, "FRONTEND_URL", "https://app.example.com"):
+        assert reminders._reminder_link(row) == f"https://app.example.com/join/{token}"
+
+
+def test_reminder_link_falls_back_to_meeting_url_without_join_token():
+    row = _row(join_token=None)
+    assert reminders._reminder_link(row) == "https://x"
+
+
+def test_reminder_link_empty_when_neither_present():
+    row = _row(join_token=None, meeting_url=None)
+    assert reminders._reminder_link(row) == ""
+
+
 # ── db.reminders._send_claimed_reminders (shared send loop) ─────────────────
 
 def test_send_claimed_reminders_sends_one_email_per_row():
@@ -39,6 +62,15 @@ def test_send_claimed_reminders_sends_one_email_per_row():
         result = reminders._send_claimed_reminders(rows, "session_reminder_1h")
     assert result == {"claimed": 2, "emails_sent": 2}
     assert mocked_send.call_count == 2
+
+
+def test_send_claimed_reminders_uses_join_link_in_email_data():
+    token = str(uuid.uuid4())
+    rows = [_row(join_token=token)]
+    with patch("services.mailer.send_transactional") as mocked_send:
+        reminders._send_claimed_reminders(rows, "session_reminder_1h")
+    _, _, data = mocked_send.call_args.args
+    assert data["meeting_url"].endswith(f"/join/{token}")
 
 
 def test_send_claimed_reminders_isolates_per_row_failures():

@@ -31,6 +31,19 @@ def _claim_mentor_reminders(kind: str, lo_minutes: int, hi_minutes: int) -> list
     return res.data or []
 
 
+def _reminder_link(row: dict[str, Any]) -> str:
+    """Prefer the attendance-tracking /join/[token] link (records
+    mentor_joined/candidate_joined - see routers/booking.py's join
+    endpoints) over the plain meeting_url. Falls back to meeting_url for
+    'dm' services, which have no join_token (set_meeting_url's trigger only
+    assigns join tokens are unconditional per-party, but there's nothing to
+    join for a message-only service) or if join_token is ever absent."""
+    token = row.get("join_token")
+    if token:
+        return f"{config.FRONTEND_URL.rstrip('/')}/join/{token}"
+    return row.get("meeting_url") or ""
+
+
 def _send_claimed_reminders(rows: list[dict[str, Any]], template: str) -> dict[str, Any]:
     """Sends one email per already-claimed row. A send failure here does NOT
     get retried by the next tick — the claim already happened (see the SQL
@@ -43,7 +56,7 @@ def _send_claimed_reminders(rows: list[dict[str, Any]], template: str) -> dict[s
                 "recipient_name": row.get("first_name") or "",
                 "other_party_name": row.get("other_party_name") or "",
                 "session_time": str(row.get("slot_utc") or ""),
-                "meeting_url": row.get("meeting_url") or "",
+                "meeting_url": _reminder_link(row),
             })
             sent += 1
         except Exception:
