@@ -1983,6 +1983,46 @@ ALTER TABLE bookings ADD COLUMN IF NOT EXISTS no_show_by TEXT;          -- 'ment
 ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS no_show_strikes INT NOT NULL DEFAULT 0;
 ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS last_no_show_at TIMESTAMPTZ;
 ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS rejection_reason TEXT;   -- admin's note shown to a rejected mentor
+
+-- ── Attendance engine (join-link no-show tracking) ──────────────────────────
+-- Ported from immigroov's 0079_attendance_tracking.sql. Schema + RPCs land
+-- now; attendance_engine_enabled (below) stays 'false' and the grace-period
+-- evaluator stays unscheduled until the frontend /join/[token] page and
+-- reminder emails exist — see COMPLETION_PLAN.md B6 for why (immigroov's own
+-- 0079 comment: turning this on before real join links exist would dump
+-- every session into "neither joined" manual review, since nobody has a
+-- link to click yet). Column names use groovia's own "candidate" convention
+-- (matching candidate_id/candidate_email/candidate_name) rather than
+-- immigroov's "customer" — the role literals passed to flag_no_show() below
+-- still use groovia's existing 'mentor'/'user' pair, unchanged.
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS mentor_join_token     UUID NOT NULL DEFAULT gen_random_uuid();
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS candidate_join_token  UUID NOT NULL DEFAULT gen_random_uuid();
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS mentor_click_at       TIMESTAMPTZ;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS mentor_joined         BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS mentor_joined_at      TIMESTAMPTZ;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS candidate_click_at    TIMESTAMPTZ;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS candidate_joined      BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS candidate_joined_at   TIMESTAMPTZ;
+
+-- A booking under manual review because NEITHER party joined. Per immigroov's
+-- founder's decision, this case is never auto-decided — it always goes to a
+-- human, unlike the one-joined case which reuses the existing no-show
+-- machinery (flag_no_show) automatically.
+CREATE TABLE IF NOT EXISTS attendance_manual_reviews (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  booking_id  UUID NOT NULL REFERENCES bookings(id) ON DELETE CASCADE,
+  reason      TEXT NOT NULL CHECK (reason IN ('neither_joined')),
+  status      TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'resolved')),
+  outcome     TEXT CHECK (outcome IN ('mentor_fault', 'candidate_fault', 'no_fault')),
+  note        TEXT,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  resolved_at TIMESTAMPTZ
+);
+ALTER TABLE attendance_manual_reviews ENABLE ROW LEVEL SECURITY;  -- no policies: admin RPCs only
+
+INSERT INTO platform_settings (key, value, description) VALUES
+  ('attendance_engine_enabled', 'false', 'When true, session completion (mark_past_bookings_completed) requires verified join-attendance instead of just elapsed time. Keep false until the join-link UI and reminder emails are live.')
+ON CONFLICT (key) DO NOTHING;
 -- Profile-change review for APPROVED mentors: the proposed edit is held here (JSON of the
 -- changed profile fields) while the live mentors row stays visible/bookable. On approval the
 -- backend applies these to the live columns and clears them; on reject it just clears them.
@@ -2734,8 +2774,14 @@ BEGIN
     RAISE EXCEPTION 'That time is no longer available - pick another slot inside the range.';
   END IF;
   UPDATE reschedule_offers SET status = 'accepted', selected_time = p_slot_time WHERE id = p_offer_id;
+  -- Attendance columns reset for the new slot (immigroov 0079: "'joined' must
+  -- reflect the CURRENT scheduled time, not a slot that got moved"). No-op
+  -- while attendance_engine_enabled is false, but keeps the columns correct
+  -- once it's turned on.
   UPDATE bookings SET slot_time = p_slot_time, slot_end = NULL, status = 'rescheduled',
-                      reschedule_count = reschedule_count + 1
+                      reschedule_count = reschedule_count + 1,
+                      mentor_click_at = NULL, mentor_joined = FALSE, mentor_joined_at = NULL,
+                      candidate_click_at = NULL, candidate_joined = FALSE, candidate_joined_at = NULL
     WHERE id = o.booking_id RETURNING * INTO b;
   DELETE FROM booking_reminders WHERE booking_id = o.booking_id;
   IF o.was_late THEN
@@ -2796,8 +2842,12 @@ BEGIN
   IF NOT is_slot_available(b.mentor_id, b.service_id, p_slot_time) THEN
     RAISE EXCEPTION 'That time is not available - pick another slot.';
   END IF;
+  -- Attendance columns reset for the new slot - see the matching comment in
+  -- mentee_accept_reschedule above.
   UPDATE bookings SET slot_time = p_slot_time, slot_end = NULL, status = 'rescheduled',
-                      reschedule_count = reschedule_count + 1
+                      reschedule_count = reschedule_count + 1,
+                      mentor_click_at = NULL, mentor_joined = FALSE, mentor_joined_at = NULL,
+                      candidate_click_at = NULL, candidate_joined = FALSE, candidate_joined_at = NULL
     WHERE id = p_booking_id;
   DELETE FROM booking_reminders WHERE booking_id = p_booking_id;
   UPDATE booking_requests SET status = 'completed', resolved_at = NOW()
@@ -2883,6 +2933,202 @@ BEGIN
   RETURN b;
 END;
 $$;
+
+-- ── Attendance engine: join-link validation + recording ─────────────────────
+-- Each link is single-participant, single-booking (the token check enforces
+-- this), only valid from 2 minutes before the scheduled start to 10 minutes
+-- after — matching immigroov's grace-period window exactly.
+CREATE OR REPLACE FUNCTION record_session_join(p_booking_id UUID, p_role TEXT, p_token UUID)
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE b bookings;
+BEGIN
+  IF p_role NOT IN ('mentor', 'candidate') THEN RAISE EXCEPTION 'role must be mentor or candidate'; END IF;
+  SELECT * INTO b FROM bookings WHERE id = p_booking_id FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Booking not found'; END IF;
+  IF b.status NOT IN ('confirmed', 'rescheduled') THEN
+    RAISE EXCEPTION 'This session is not currently joinable';
+  END IF;
+  IF (p_role = 'mentor' AND b.mentor_join_token <> p_token) OR (p_role = 'candidate' AND b.candidate_join_token <> p_token) THEN
+    RAISE EXCEPTION 'Invalid join link';
+  END IF;
+  IF b.slot_time IS NULL OR NOW() < b.slot_time - INTERVAL '2 minutes' THEN
+    RAISE EXCEPTION 'Too early to join - check back closer to the start time';
+  END IF;
+  IF NOW() > b.slot_time + INTERVAL '10 minutes' THEN
+    RAISE EXCEPTION 'The join window for this session has closed';
+  END IF;
+
+  IF p_role = 'mentor' THEN
+    UPDATE bookings SET
+      mentor_click_at = COALESCE(mentor_click_at, NOW()),
+      mentor_joined = TRUE,
+      mentor_joined_at = COALESCE(mentor_joined_at, NOW())
+    WHERE id = p_booking_id;
+  ELSE
+    UPDATE bookings SET
+      candidate_click_at = COALESCE(candidate_click_at, NOW()),
+      candidate_joined = TRUE,
+      candidate_joined_at = COALESCE(candidate_joined_at, NOW())
+    WHERE id = p_booking_id;
+  END IF;
+
+  RETURN jsonb_build_object('booking_id', p_booking_id, 'role', p_role, 'ok', true, 'meeting_url', b.meeting_url);
+END;
+$$;
+
+-- Read-only status check for the join page's "waiting room" experience.
+-- Never records anything - opening the link early must not count as
+-- attendance. Only record_session_join() above records a join.
+CREATE OR REPLACE FUNCTION check_join_window(p_booking_id UUID, p_role TEXT, p_token UUID)
+RETURNS JSONB LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+DECLARE b bookings; v_state TEXT;
+BEGIN
+  IF p_role NOT IN ('mentor', 'candidate') THEN RAISE EXCEPTION 'role must be mentor or candidate'; END IF;
+  SELECT * INTO b FROM bookings WHERE id = p_booking_id;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Booking not found'; END IF;
+  IF (p_role = 'mentor' AND b.mentor_join_token <> p_token) OR (p_role = 'candidate' AND b.candidate_join_token <> p_token) THEN
+    RAISE EXCEPTION 'Invalid join link';
+  END IF;
+
+  IF b.status = 'cancelled' THEN v_state := 'cancelled';
+  ELSIF b.status IN ('no_show', 'completed') OR b.slot_time IS NULL THEN v_state := 'closed';
+  ELSIF NOW() < b.slot_time - INTERVAL '2 minutes' THEN v_state := 'waiting';
+  ELSIF NOW() <= b.slot_time + INTERVAL '10 minutes' THEN v_state := 'open';
+  ELSE v_state := 'closed';
+  END IF;
+
+  RETURN jsonb_build_object(
+    'state', v_state,
+    'slot_time', b.slot_time,
+    'window_opens_at', b.slot_time - INTERVAL '2 minutes',
+    'window_closes_at', b.slot_time + INTERVAL '10 minutes',
+    'already_joined', CASE WHEN p_role = 'mentor' THEN b.mentor_joined ELSE b.candidate_joined END,
+    'meeting_url', b.meeting_url
+  );
+END;
+$$;
+
+-- Token-only wrappers for the /join/:token route (a single opaque token, not
+-- booking_id+role+token separately) - role and booking resolve from the
+-- token alone since each join token is already unique per participant per
+-- booking. Granted to anon: the token itself is the credential, matching
+-- immigroov's own no-login-required join flow.
+CREATE OR REPLACE FUNCTION resolve_join_token(p_token UUID)
+RETURNS TABLE (booking_id UUID, role TEXT)
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  RETURN QUERY SELECT id, 'mentor'::TEXT FROM bookings WHERE mentor_join_token = p_token;
+  IF FOUND THEN RETURN; END IF;
+  RETURN QUERY SELECT id, 'candidate'::TEXT FROM bookings WHERE candidate_join_token = p_token;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION check_join_window_by_token(p_token UUID)
+RETURNS JSONB LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+DECLARE v RECORD;
+BEGIN
+  SELECT * INTO v FROM resolve_join_token(p_token);
+  IF NOT FOUND THEN RAISE EXCEPTION 'Invalid join link'; END IF;
+  RETURN check_join_window(v.booking_id, v.role, p_token);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION record_session_join_by_token(p_token UUID)
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v RECORD;
+BEGIN
+  SELECT * INTO v FROM resolve_join_token(p_token);
+  IF NOT FOUND THEN RAISE EXCEPTION 'Invalid join link'; END IF;
+  RETURN record_session_join(v.booking_id, v.role, p_token);
+END;
+$$;
+GRANT EXECUTE ON FUNCTION check_join_window_by_token(UUID) TO anon, authenticated;
+GRANT EXECUTE ON FUNCTION record_session_join_by_token(UUID) TO anon, authenticated;
+
+-- The attendance decision, meant to run 10 minutes after the scheduled start
+-- (see the unscheduled cron block near mark_past_bookings_completed below):
+--   both joined    -> leave it alone; mark_past_bookings_completed handles
+--                      completion once slot_end passes, same as always.
+--   one joined     -> automatically reuse the EXISTING no-show flow
+--                      (flag_no_show) - the missing party is clearly at fault.
+--   neither joined -> never auto-decided (immigroov founder's choice): move
+--                      the booking to 'no_show' with no party assigned yet
+--                      (no_show_by stays NULL, which is deliberate - it's
+--                      what routes it away from the existing single-party
+--                      resolution RPCs and into admin_resolve_attendance_
+--                      review below instead) and create a manual review.
+CREATE OR REPLACE FUNCTION evaluate_attendance_after_grace_period()
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE r RECORD;
+BEGIN
+  FOR r IN
+    SELECT b.id, b.mentor_joined, b.candidate_joined
+    FROM bookings b
+    WHERE b.status IN ('confirmed', 'rescheduled')
+      AND b.slot_time IS NOT NULL
+      AND NOW() >= b.slot_time + INTERVAL '10 minutes'
+  LOOP
+    IF r.mentor_joined AND r.candidate_joined THEN
+      CONTINUE;  -- both attended - let the normal completion timer handle it
+    ELSIF r.mentor_joined AND NOT r.candidate_joined THEN
+      PERFORM flag_no_show(r.id, 'user');
+    ELSIF r.candidate_joined AND NOT r.mentor_joined THEN
+      PERFORM flag_no_show(r.id, 'mentor');
+    ELSE
+      UPDATE bookings SET status = 'no_show', no_show_by = NULL WHERE id = r.id;
+      INSERT INTO attendance_manual_reviews (booking_id, reason) VALUES (r.id, 'neither_joined');
+      PERFORM notify_booking_event(r.id, 'attendance_review_created');
+    END IF;
+  END LOOP;
+END;
+$$;
+
+-- Admin resolution for the "neither joined" case. mentor_fault/candidate_fault
+-- hand off to the existing resolve_mentor_no_show/resolve_customer_no_show
+-- flow unchanged (by finally setting no_show_by, which those functions
+-- require). no_fault is new: a no-blame cancellation, full refund if paid -
+-- and since the booking never becomes 'completed', no referral commission is
+-- created either.
+CREATE OR REPLACE FUNCTION admin_resolve_attendance_review(p_review_id UUID, p_outcome TEXT, p_note TEXT)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE rev attendance_manual_reviews; v_cost NUMERIC;
+BEGIN
+  IF p_outcome NOT IN ('mentor_fault', 'candidate_fault', 'no_fault') THEN
+    RAISE EXCEPTION 'Outcome must be mentor_fault, candidate_fault, or no_fault';
+  END IF;
+  IF p_note IS NULL OR TRIM(p_note) = '' THEN
+    RAISE EXCEPTION 'A note is required to resolve an attendance review';
+  END IF;
+
+  SELECT * INTO rev FROM attendance_manual_reviews WHERE id = p_review_id FOR UPDATE;
+  IF NOT FOUND OR rev.status <> 'pending' THEN
+    RAISE EXCEPTION 'Review not found or already resolved';
+  END IF;
+
+  IF p_outcome = 'mentor_fault' THEN
+    UPDATE bookings SET no_show_by = 'mentor' WHERE id = rev.booking_id;
+  ELSIF p_outcome = 'candidate_fault' THEN
+    UPDATE bookings SET no_show_by = 'user' WHERE id = rev.booking_id;
+  ELSE
+    SELECT amount INTO v_cost FROM customer_payments WHERE booking_id = rev.booking_id ORDER BY created_at DESC LIMIT 1;
+    UPDATE bookings SET status = 'cancelled' WHERE id = rev.booking_id;
+    IF v_cost IS NOT NULL THEN
+      PERFORM add_ledger(rev.booking_id, 'customer', 'refund', v_cost, 100, 'Neither party attended - no-fault cancellation, full refund');
+    END IF;
+  END IF;
+
+  UPDATE attendance_manual_reviews SET status = 'resolved', outcome = p_outcome, note = p_note, resolved_at = NOW()
+    WHERE id = p_review_id;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION admin_resolve_attendance_review(UUID, TEXT, TEXT) TO authenticated;
+
+CREATE OR REPLACE FUNCTION admin_attendance_review_queue()
+RETURNS TABLE (review_id UUID, booking_id UUID, reason TEXT, created_at TIMESTAMPTZ)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT id, booking_id, reason, created_at FROM attendance_manual_reviews WHERE status = 'pending' ORDER BY created_at ASC;
+$$;
+GRANT EXECUTE ON FUNCTION admin_attendance_review_queue() TO authenticated;
 
 -- Mentor no-showed → the user picks one of three outcomes.
 CREATE OR REPLACE FUNCTION resolve_mentor_no_show(p_booking_id UUID, p_choice TEXT)
@@ -2970,16 +3216,26 @@ ON CONFLICT (key) DO NOTHING;
 -- claim_due_review_requests() (Reviews section below) is polled by the
 -- FastAPI-side dispatcher (jobs/run_due.py), same architecture as the
 -- session-reminder jobs.
+-- Attendance-gated per attendance_engine_enabled (default 'false' - see the
+-- Attendance engine section above): once flipped true, a booking only
+-- auto-completes after both mentor_joined and candidate_joined are true,
+-- closing the gap where a session could reach 'completed' (and become
+-- referral-commission-eligible) without anyone actually attending. This also
+-- closes the short-session race noted in immigroov's 0079: a session shorter
+-- than the 10-minute grace period could otherwise complete before
+-- evaluate_attendance_after_grace_period had a chance to run.
 CREATE OR REPLACE FUNCTION mark_past_bookings_completed()
 RETURNS INT LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
-DECLARE n INT := 0; v_token_days INT; r RECORD;
+DECLARE n INT := 0; v_token_days INT; v_attendance_enabled BOOLEAN; r RECORD;
 BEGIN
   v_token_days := COALESCE((SELECT value::int FROM platform_settings WHERE key = 'review_token_expiry_days'), 90);
+  v_attendance_enabled := COALESCE((SELECT value::boolean FROM platform_settings WHERE key = 'attendance_engine_enabled'), FALSE);
 
   FOR r IN
     UPDATE bookings SET status = 'completed'
      WHERE status IN ('confirmed','rescheduled')
        AND slot_end IS NOT NULL AND slot_end < NOW()
+       AND (NOT v_attendance_enabled OR (mentor_joined AND candidate_joined))
      RETURNING *
   LOOP
     n := n + 1;
@@ -3183,6 +3439,27 @@ BEGIN
     RAISE NOTICE 'pg_cron not enabled - skipping booking cron schedules. Enable it and re-run the cron block.';
   END IF;
 END $$;
+
+-- ---------------------------------------------------------------------------
+-- attendance-grace-period: NOT scheduled yet - deliberately, matching
+-- immigroov's own 0079_attendance_tracking.sql discipline.
+--
+-- evaluate_attendance_after_grace_period() only works once real people are
+-- actually clicking real join links, which needs the /join/[token] frontend
+-- page and reminder emails updated to send those links - neither exists yet.
+-- If this job runs today, mentor_joined/candidate_joined will be false for
+-- every booking (nobody has a link to click), so EVERY session would get
+-- dumped into "neither joined" manual review - flooding admins with false
+-- alarms instead of fixing anything. attendance_engine_enabled must also
+-- flip to 'true' at the same time (see mark_past_bookings_completed above) -
+-- turning on only one half does nothing.
+--
+-- Turn both on together only after the join-link UI + reminder emails are
+-- live (mirrors immigroov's 0087_enable_attendance_engine.sql):
+--   UPDATE platform_settings SET value = 'true' WHERE key = 'attendance_engine_enabled';
+--   SELECT cron.schedule('attendance-grace-period', '*/5 * * * *',
+--     'SELECT evaluate_attendance_after_grace_period()');
+-- ---------------------------------------------------------------------------
 
 
 -- ###########################################################################

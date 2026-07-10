@@ -279,6 +279,37 @@ def reject_review(review_id: str, user: AuthUser = Depends(require_admin)):
         raise HTTPException(status_code=500, detail="Failed to reject review")
 
 
+# ── Attendance engine: "neither joined" manual review queue ──────────────────
+# Shipped inert alongside the rest of the attendance engine (see
+# routers/booking.py's join endpoints) - the queue is always empty until
+# evaluate_attendance_after_grace_period is actually scheduled, but the admin
+# endpoints exist now so the frontend review-queue UI has something to build
+# against.
+
+class ResolveAttendanceReviewBody(BaseModel):
+    outcome: str  # 'mentor_fault' | 'candidate_fault' | 'no_fault'
+    note: str
+
+
+@router.get("/attendance/pending")
+def pending_attendance_reviews(user: AuthUser = Depends(require_admin)):
+    return db.admin_attendance_review_queue()
+
+
+@router.post("/attendance/{review_id}/resolve")
+def resolve_attendance_review(review_id: str, body: ResolveAttendanceReviewBody, user: AuthUser = Depends(require_admin)):
+    try:
+        db.admin_resolve_attendance_review(review_id, body.outcome, body.note)
+        return {"resolved": True}
+    except Exception as e:
+        msg = str(e)
+        if "not found" in msg.lower() or "already resolved" in msg.lower():
+            raise HTTPException(status_code=409, detail=msg)
+        if "note is required" in msg.lower() or "outcome must be" in msg.lower():
+            raise HTTPException(status_code=400, detail=msg)
+        raise HTTPException(status_code=500, detail="Failed to resolve attendance review")
+
+
 # ── Referral/affiliate program ────────────────────────────────────────────────
 
 class OnboardAffiliateBody(BaseModel):

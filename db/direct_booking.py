@@ -563,3 +563,40 @@ def list_candidate_bookings(candidate_id: str) -> list[dict]:
     """All of a mentee's bookings with full lifecycle state for the manager UI."""
     res = _supabase.rpc("my_bookings", {"p_candidate_id": candidate_id}).execute()
     return res.data or []
+
+
+# ── Attendance engine (join-link no-show tracking) ──────────────────────────
+# Ported from immigroov's 0079_attendance_tracking.sql. Shipped inert -
+# attendance_engine_enabled (platform_settings) is 'false' and no cron calls
+# evaluate_attendance_after_grace_period yet - see the migration files'
+# comments and COMPLETION_PLAN.md B6. These wrappers exist so the FastAPI
+# layer (routers/booking.py's public join endpoints, routers/admin.py's
+# review queue) has something to call once the frontend join-link page ships.
+
+def check_join_window_by_token(token: str) -> dict[str, Any]:
+    """Read-only "waiting room" status check for a join link. Raises on an
+    unknown/invalid token."""
+    res = _supabase.rpc("check_join_window_by_token", {"p_token": token}).execute()
+    return res.data or {}
+
+
+def record_session_join_by_token(token: str) -> dict[str, Any]:
+    """Records that the token's owner actually joined. Raises on an invalid
+    token, or if the join window isn't currently open."""
+    res = _supabase.rpc("record_session_join_by_token", {"p_token": token}).execute()
+    return res.data or {}
+
+
+def admin_attendance_review_queue() -> list[dict[str, Any]]:
+    """Bookings where neither party joined - always a human decision, never
+    auto-resolved (see evaluate_attendance_after_grace_period's SQL docstring)."""
+    res = _supabase.rpc("admin_attendance_review_queue", {}).execute()
+    return res.data or []
+
+
+def admin_resolve_attendance_review(review_id: str, outcome: str, note: str) -> None:
+    """outcome: 'mentor_fault' | 'candidate_fault' | 'no_fault'. Raises if the
+    review isn't pending, or if note is blank (a note is required)."""
+    _supabase.rpc("admin_resolve_attendance_review", {
+        "p_review_id": review_id, "p_outcome": outcome, "p_note": note,
+    }).execute()

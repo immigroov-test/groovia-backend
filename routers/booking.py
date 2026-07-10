@@ -17,6 +17,35 @@ logger = logging.getLogger("immigroov.routers.booking")
 router = APIRouter(prefix="/booking", tags=["booking"])
 
 
+# ── Attendance engine: join-link endpoints (public - the token IS the auth,
+# matching immigroov's own no-login-required join flow) ─────────────────────
+# Shipped inert: attendance_engine_enabled is 'false' and nothing schedules
+# evaluate_attendance_after_grace_period yet (see the migration files'
+# comments and COMPLETION_PLAN.md B6) - these endpoints exist for the
+# frontend /join/[token] page, not yet built, to call once it ships.
+
+@router.get("/join/{token}/check")
+def check_join_window(token: str):
+    """Read-only "waiting room" status check. Never records anything -
+    opening the link early must not count as attendance."""
+    try:
+        return db.check_join_window_by_token(token)
+    except Exception as e:
+        raise HTTPException(status_code=404, detail=str(e) or "Invalid join link")
+
+
+@router.post("/join/{token}")
+def record_session_join(token: str):
+    """Records that the token's owner joined; returns meeting_url to redirect to."""
+    try:
+        return db.record_session_join_by_token(token)
+    except Exception as e:
+        msg = str(e)
+        if any(k in msg.lower() for k in ("too early", "closed", "not currently joinable")):
+            raise HTTPException(status_code=409, detail=msg)
+        raise HTTPException(status_code=404, detail=msg or "Invalid join link")
+
+
 # ── Slot availability ──────────────────────────────────────────────────────────
 
 @router.get("/slots/{mentor_id}/{service_id}")
