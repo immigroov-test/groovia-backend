@@ -14,9 +14,10 @@
 --   - The 14 seed mentors (inserted in testing_db_setup.sql, profile_id IS NULL)
 --   - platform_settings
 
--- 0. SET ADMIN - promote the admin so it gets the 'admin' role and is preserved by the
---    wipe in step 3. The admin must have signed up at least once. Idempotent.
-UPDATE profiles SET role = 'admin' WHERE email = 'yokeshmd99@gmail.com';
+-- 0. SET ADMIN - promote the admins so they get the 'admin' role and are preserved by the
+--    wipe in step 3. Each admin must have signed up at least once. Idempotent.
+UPDATE profiles SET role = 'admin'
+  WHERE lower(email) IN ('yokeshmd99@gmail.com', 'immigroovtst@gmail.com');
 
 -- 1. Clear booking-related data (CASCADE handles booking_question_answers, booking_reminders)
 DELETE FROM reschedule_offers;
@@ -30,7 +31,7 @@ DELETE FROM services              WHERE mentor_id IN (SELECT id FROM mentors WHE
 
 -- 3. Wipe test user accounts EXCEPT the admin (CASCADE: profiles → mentor.profile_id SET NULL,
 --    chat_threads, consent_log). Keeping the admin avoids re-creating it after every reset.
-DELETE FROM auth.users WHERE email <> 'yokeshmd99@gmail.com';
+DELETE FROM auth.users WHERE lower(email) NOT IN ('yokeshmd99@gmail.com', 'immigroovtst@gmail.com');
 
 -- 4. Remove mentor rows whose accounts were just wiped (profile_id was SET NULL by cascade).
 --    Seed mentors also have profile_id IS NULL, so exclude them by slug.

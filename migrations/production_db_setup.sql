@@ -488,7 +488,7 @@ BEGIN
       NEW.raw_user_meta_data->>'avatar_url',
       NEW.raw_user_meta_data->>'picture'
     ),
-    (CASE WHEN lower(NEW.email) = 'yokeshmd99@gmail.com' THEN 'admin'
+    (CASE WHEN lower(NEW.email) IN ('yokeshmd99@gmail.com', 'immigroovtst@gmail.com') THEN 'admin'
           ELSE COALESCE(NEW.raw_user_meta_data->>'role', 'candidate') END)::user_role
   )
   ON CONFLICT (id) DO NOTHING;
@@ -501,8 +501,9 @@ CREATE TRIGGER trg_on_auth_user_created
   AFTER INSERT ON auth.users
   FOR EACH ROW EXECUTE FUNCTION handle_new_user();
 
--- Ops admin: promote the admin account if its profile already exists (idempotent).
-UPDATE profiles SET role = 'admin' WHERE lower(email) = 'yokeshmd99@gmail.com' AND role <> 'admin';
+-- Ops admins: promote the admin accounts if their profiles already exist (idempotent).
+UPDATE profiles SET role = 'admin'
+  WHERE lower(email) IN ('yokeshmd99@gmail.com', 'immigroovtst@gmail.com') AND role <> 'admin';
 
 -- Does this email already have a PASSWORD? signInWithOtp creates an auth.users row
 -- immediately (unconfirmed, no password), so "row exists" ≠ "can log in with a password".
