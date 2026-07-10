@@ -469,8 +469,23 @@ def _booking_admin_notice(d: dict) -> tuple[str, str]:
     return f"[Admin] {title}: {candidate} × {mentor}", _base(body)
 
 
+def _contact_form(d: dict) -> tuple[str, str]:
+    """Contact-page submission, delivered to the support inbox."""
+    name = _e(f"{d.get('first_name', '')} {d.get('last_name', '')}".strip() or "-")
+    email = _e(d.get("email", ""))
+    topic = _e(d.get("topic") or "General")
+    msg = _e(d.get("message", "")).replace("\n", "<br>")
+    body = (
+        '<h1 style="margin:0 0 12px;font-size:20px;font-weight:700;color:#0a0a0a">New contact message</h1>'
+        + _details_card([("From", name), ("Email", email), ("Topic", topic)])
+        + f'<p style="margin:16px 0 0;font-size:15px;color:#444;line-height:1.6">{msg}</p>'
+    )
+    return f"Contact form: {topic}", _base(body)
+
+
 _TEMPLATES = {
     "booking_admin_notice": _booking_admin_notice,
+    "contact_form": _contact_form,
     "mentor_application_received": _mentor_application_received,
     "mentor_approved": _mentor_approved,
     "mentor_rejected": _mentor_rejected,
