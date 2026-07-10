@@ -269,13 +269,15 @@ def get_meeting_info(booking_id: str, user: AuthUser = Depends(get_current_user)
     """Backs the /meeting/[bookingId] page: meeting_url (the Jitsi room -
     set_meeting_url's trigger assigns one at booking creation for 'video'
     services, none for 'dm'), status, slot time, and both parties' names.
-    Either party to the booking can view it."""
+    Either party to the booking can view it. `viewer_role` lets the frontend
+    label "with <the other person>" correctly without needing to compare
+    raw IDs client-side (candidate_id/mentor_id aren't otherwise exposed)."""
     principals = db.get_booking_principals(booking_id)
-    authorize_booking_party(principals, user, allow="both")
+    party = authorize_booking_party(principals, user, allow="both")
     info = db.get_booking_meeting_info(booking_id)
     if not info:
         raise HTTPException(status_code=404, detail="Booking not found")
-    return info
+    return {**info, "viewer_role": party["role"]}
 
 
 # ── My bookings (mentee) ───────────────────────────────────────────────────────

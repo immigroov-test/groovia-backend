@@ -133,5 +133,26 @@ def test_get_meeting_info_returns_info_for_the_candidate(client):
             resp = client.get(f"/booking/{info['id']}/meeting")
         assert resp.status_code == 200
         assert resp.json()["meeting_url"] == info["meeting_url"]
+        assert resp.json()["viewer_role"] == "candidate"
+    finally:
+        client.app.dependency_overrides.clear()
+
+
+def test_get_meeting_info_reports_mentor_viewer_role(client):
+    """Regression coverage for the role-labeling bug this endpoint exists to
+    avoid: the frontend can't tell candidate from mentor by comparing IDs
+    itself (candidate_id/mentor_id aren't in the response), so the endpoint
+    must resolve and report viewer_role explicitly."""
+    user = _as_user(client)
+    info = _meeting_info()
+    mentor_row = {"id": str(uuid.uuid4())}
+    try:
+        with patch.object(db, "get_booking_principals",
+                           return_value={"candidate_id": str(uuid.uuid4()), "mentor_id": mentor_row["id"]}), \
+             patch.object(db, "get_mentor_by_profile_id", return_value=mentor_row), \
+             patch.object(db, "get_booking_meeting_info", return_value=info):
+            resp = client.get(f"/booking/{info['id']}/meeting")
+        assert resp.status_code == 200
+        assert resp.json()["viewer_role"] == "mentor"
     finally:
         client.app.dependency_overrides.clear()
