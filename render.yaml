@@ -69,6 +69,12 @@ services:
         sync: false           # must be a Resend-verified sender, e.g. "Immigroov <noreply@yourdomain.com>" - defaults to the Resend sandbox address (onboarding@resend.dev) if unset, which only delivers to the Resend account owner
       - key: ADMIN_EMAIL
         sync: false           # ops inbox copied on booking/reschedule/cancel (e.g. yokeshmd99@gmail.com)
+      - key: RAZORPAY_KEY_ID
+        sync: false           # live API service handles create-order/webhook directly - needs these, not just the scheduler
+      - key: RAZORPAY_KEY_SECRET
+        sync: false
+      - key: RAZORPAY_WEBHOOK_SECRET
+        sync: false           # signs webhook deliveries; separate from RAZORPAY_KEY_SECRET
 
   # ── Scheduler (production) ───────────────────────────────────────────────────
   # Fires jobs/run_due.py - see INFRASTRUCTURE_ARCHITECTURE_PLAN.md §3 for why
@@ -180,6 +186,12 @@ services:
         sync: false           # must be a Resend-verified sender - defaults to the Resend sandbox address (onboarding@resend.dev) if unset, which only delivers to the Resend account owner
       - key: ADMIN_EMAIL
         sync: false           # ops inbox copied on booking/reschedule/cancel (e.g. yokeshmd99@gmail.com)
+      - key: RAZORPAY_KEY_ID
+        sync: false           # live API service handles create-order/webhook directly - needs these, not just the scheduler
+      - key: RAZORPAY_KEY_SECRET
+        sync: false
+      - key: RAZORPAY_WEBHOOK_SECRET
+        sync: false           # signs webhook deliveries; separate from RAZORPAY_KEY_SECRET
       - key: MOCK_SERVICES
         value: "false"        # set "true" to mock Resend/webhooks on staging instead
 
