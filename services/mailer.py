@@ -320,7 +320,10 @@ def _session_reminder_soon(d: dict) -> tuple[str, str]:
 def _review_request(d: dict) -> tuple[str, str]:
     candidate = _e(d.get("candidate_name", ""))
     mentor = d.get("mentor_name", "your mentor")
-    review_url = d.get("platform_url", config.FRONTEND_URL) + "/mentors"
+    # Links straight to the token-specific /review/[token] page (claim_due_review_requests
+    # supplies `token`) - the old generic "/mentors" fallback predates the sender being wired.
+    token = d.get("token", "")
+    review_url = d.get("review_url") or f"{config.FRONTEND_URL.rstrip('/')}/review/{token}"
     body = (
         f'<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">How was your session with {_e(mentor)}?</h1>'
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {candidate},</p>'
@@ -332,6 +335,24 @@ def _review_request(d: dict) -> tuple[str, str]:
         + _btn(review_url, "Leave a Review")
     )
     return f"How was your session with {mentor}?", _base(body)
+
+
+def _commission_approved(d: dict) -> tuple[str, str]:
+    name = _e(d.get("affiliate_name") or "there")
+    amount = d.get("commission_amount_inr")
+    amount_str = f"INR {amount:,.2f}" if isinstance(amount, (int, float)) else _e(amount or "")
+    dashboard_url = d.get("dashboard_url", config.FRONTEND_URL.rstrip("/") + "/affiliate")
+    body = (
+        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Your referral commission was approved</h1>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {name},</p>'
+        '<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
+        f"A referred session has been completed and your commission of <strong>{amount_str}</strong> has been "
+        "approved. It will be included in the next payout batch."
+        "</p>"
+        '<p style="margin:0;font-size:15px;color:#444;line-height:1.6">You can track all your referral earnings from your dashboard.</p>'
+        + _btn(dashboard_url, "View dashboard")
+    )
+    return "Your referral commission was approved", _base(body)
 
 
 def _mentor_five_star_review(d: dict) -> tuple[str, str]:
@@ -560,6 +581,7 @@ _TEMPLATES = {
     "no_show_reported": _no_show_reported,
     "webinar_registered": _webinar_registered,
     "webinar_reminder": _webinar_reminder,
+    "commission_approved": _commission_approved,
 }
 
 

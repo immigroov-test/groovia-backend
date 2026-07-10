@@ -4,6 +4,7 @@ from typing import Any, Optional
 from supabase import Client, create_client
 
 import config
+from services import mailer
 
 logger = logging.getLogger("immigroov.db.referrals")
 
@@ -154,3 +155,27 @@ def admin_payout_batch_preview(batch_date: str) -> list[dict[str, Any]]:
 def admin_finalize_payout_batch(batch_date: str) -> str:
     res = _supabase.rpc("admin_finalize_payout_batch", {"p_batch_date": batch_date}).execute()
     return res.data
+
+
+# ── Dispatcher job: "commission approved" email ─────────────────────────────
+
+def send_pending_commission_emails() -> dict[str, Any]:
+    """claim_approved_commissions() (SQL) is the atomic claim, covering both
+    paths that flip commission_ledger.status to 'approved' - the cron-driven
+    auto-approve in run_referral_fraud_checks and the admin-triggered
+    admin_resolve_fraud_flag - uniformly. Same claim-then-send pattern as
+    db/reminders.py and db/reviews.send_due_review_requests: a send failure
+    isn't retried by the next tick, isolated per row."""
+    res = _supabase.rpc("claim_approved_commissions", {}).execute()
+    rows = res.data or []
+    sent = 0
+    for row in rows:
+        try:
+            mailer.send_transactional(row["email"], "commission_approved", {
+                "affiliate_name": row.get("affiliate_name") or "",
+                "commission_amount_inr": row.get("commission_amount_inr"),
+            })
+            sent += 1
+        except Exception:
+            logger.warning("commission_approved email failed ledger=%s", row.get("ledger_id"))
+    return {"claimed": len(rows), "emails_sent": sent}

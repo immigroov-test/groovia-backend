@@ -70,6 +70,8 @@ _JOBS = [
     ("send_customer_reminders_1h", db.send_customer_reminders_1h),
     ("send_mentor_reminders_1h", db.send_mentor_reminders_1h),
     ("send_mentor_reminders_10m", db.send_mentor_reminders_10m),
+    ("send_review_requests", db.send_due_review_requests),
+    ("send_commission_approved_emails", db.send_pending_commission_emails),
     ("sweep_verify_payments", db.sweep_verify_payments),
     ("process_refunds", db.process_refunds),
     ("reconcile_payments", _reconcile_payments_if_due),

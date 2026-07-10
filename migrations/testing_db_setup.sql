@@ -2929,13 +2929,13 @@ ON CONFLICT (key) DO NOTHING;
 -- Reviews hook (added when the Reviews module landed): every booking that
 -- transitions to 'completed' here gets a one-per-booking review token,
 -- matching immigroov's integration point in its own mark_past_bookings_completed
--- (0099). NOT ported: the review-request EMAIL immigroov sends in the same
--- pass via pg_net (app_send_email) — groovia has no equivalent SQL-side HTTP
--- capability, and this function runs on a pg_cron schedule with no FastAPI
--- request to hang a BackgroundTask off of. The token is generated and ready;
--- wiring up the nudge email is a follow-up (candidates: a periodic Python
--- poller, or surfacing "Leave a review" directly in the sessions dashboard
--- so the email isn't the only path to it).
+-- (0099). The review-request EMAIL immigroov sends in the same pass via
+-- pg_net (app_send_email) has no equivalent SQL-side HTTP capability here,
+-- and this function runs on a pg_cron schedule with no FastAPI request to
+-- hang a BackgroundTask off of — so the poller pattern was used instead:
+-- claim_due_review_requests() (Reviews section below) is polled by the
+-- FastAPI-side dispatcher (jobs/run_due.py), same architecture as the
+-- session-reminder jobs.
 CREATE OR REPLACE FUNCTION mark_past_bookings_completed()
 RETURNS INT LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE n INT := 0; v_token_days INT; r RECORD;
@@ -3348,6 +3348,11 @@ CREATE TABLE IF NOT EXISTS review_email_tokens (
   used_at    TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+-- notified_at: claim marker for the review-request nudge email (dispatcher
+-- job, not pg_cron — sending mail needs FastAPI's HTTP client). NULL = not
+-- yet claimed/sent. Added here rather than a separate migration since this
+-- table has no production rows yet to worry about backfilling.
+ALTER TABLE review_email_tokens ADD COLUMN IF NOT EXISTS notified_at TIMESTAMPTZ;
 -- No direct policies — reachable only via the SECURITY DEFINER token RPCs
 -- below, same masking pattern as booking_ledger/customer_payments.
 ALTER TABLE review_email_tokens ENABLE ROW LEVEL SECURITY;
@@ -3422,6 +3427,38 @@ CREATE TRIGGER review_guard
 -- just enough to render the form, or the fact a review already exists (with
 -- its star count, so a confirmation screen can redisplay it) so the page
 -- can't be resubmitted.
+-- Claim-then-send for the review-request nudge email — same pattern as
+-- claim_due_customer_reminders/claim_due_mentor_reminders: the UPDATE ...
+-- WHERE notified_at IS NULL ... RETURNING is the atomic claim itself, not a
+-- post-send marker, so a losing concurrent dispatcher tick simply gets an
+-- empty result for an already-claimed token. mark_past_bookings_completed
+-- (pg_cron) generates the token with no request context to send mail from;
+-- this RPC is what the FastAPI-side dispatcher polls instead.
+CREATE OR REPLACE FUNCTION claim_due_review_requests()
+RETURNS TABLE(
+  booking_id UUID, token UUID, email TEXT, candidate_name TEXT, mentor_name TEXT
+) LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+#variable_conflict use_column
+BEGIN
+  RETURN QUERY
+  WITH claimed AS (
+    UPDATE review_email_tokens rt
+    SET notified_at = NOW()
+    WHERE rt.notified_at IS NULL
+      AND rt.used_at IS NULL
+      AND rt.expires_at > NOW()
+    RETURNING rt.booking_id, rt.token
+  )
+  SELECT b.id, c.token, COALESCE(b.candidate_email, p.email), COALESCE(p.display_name, p.full_name, b.candidate_name), m.display_name
+  FROM claimed c
+  JOIN bookings b ON b.id = c.booking_id
+  LEFT JOIN profiles p ON p.id = b.candidate_id
+  JOIN mentors m ON m.id = b.mentor_id
+  WHERE COALESCE(b.candidate_email, p.email) IS NOT NULL;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION claim_due_review_requests() TO authenticated;
+
 CREATE OR REPLACE FUNCTION get_review_token_info(p_token UUID)
 RETURNS JSONB LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
 DECLARE t review_email_tokens; b bookings; v_mentor_name TEXT; v_service_title TEXT; v_rating INT;
@@ -3655,6 +3692,12 @@ CREATE TABLE IF NOT EXISTS commission_ledger (
   payout_batch_id        UUID,  -- FK added below, after payout_batches exists
   created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+-- notified_at: claim marker for the "commission approved" email (dispatcher
+-- job). Covers both paths to status='approved' uniformly — the cron-driven
+-- auto-approve in run_referral_fraud_checks (no request context) and the
+-- admin-triggered admin_resolve_fraud_flag (has one) — rather than hooking
+-- each call site separately.
+ALTER TABLE commission_ledger ADD COLUMN IF NOT EXISTS notified_at TIMESTAMPTZ;
 ALTER TABLE commission_ledger ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS commission_ledger_self_read ON commission_ledger;
 CREATE POLICY commission_ledger_self_read ON commission_ledger FOR SELECT USING (
@@ -3871,15 +3914,14 @@ GRANT EXECUTE ON FUNCTION validate_referral_code(TEXT) TO anon, authenticated;
 -- Ported from immigroov's 0078 (base logic) reconciled with 0098 (email
 -- hooks). The email hooks themselves are NOT ported — immigroov sends them
 -- via pg_net (app_send_email) directly from SQL; groovia has no SQL-side
--- HTTP capability. Same gap as the Reviews module's review-request email:
--- flagged, not silently dropped. The FastAPI layer (Referral 8 commit) can
--- send the "referral tracked" email as a BackgroundTask after calling
+-- HTTP capability. The FastAPI layer (Referral 8 commit) can send the
+-- "referral tracked" email as a BackgroundTask after calling
 -- resolve_referral_attribution, since that call always happens inside a real
--- request (confirm_booking_payment / confirm-mock), unlike the cron-driven
--- review-token case. "Commission approved" (from run_referral_fraud_checks)
--- has no such request context — it fires from process_referral_commissions,
--- a cron job — so that one has the same architecture gap as the review
--- nudge email and is deferred the same way.
+-- request (confirm_booking_payment / confirm-mock) — still not wired, a
+-- genuine open gap. "Commission approved" (from run_referral_fraud_checks,
+-- no request context — it fires from process_referral_commissions, a cron
+-- job) is no longer deferred: see claim_approved_commissions() below, polled
+-- by the FastAPI-side dispatcher (jobs/run_due.py).
 
 CREATE OR REPLACE FUNCTION log_referral_click(p_slug TEXT, p_session_token TEXT)
 RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
@@ -4087,10 +4129,41 @@ BEGIN
 
   IF NOT v_flagged THEN
     UPDATE commission_ledger SET status = 'approved' WHERE id = p_ledger_id;
-    -- "Commission approved" email deferred — see the module-level note above.
+    -- "Commission approved" email: no longer deferred — the FastAPI-side
+    -- dispatcher polls claim_approved_commissions() below regardless of
+    -- which path (auto-approve here, or admin_resolve_fraud_flag) got a
+    -- row to 'approved'.
   END IF;
 END;
 $$;
+
+-- Claim-then-send for the "commission approved" affiliate email. Same
+-- pattern as claim_due_review_requests: the UPDATE ... WHERE notified_at IS
+-- NULL ... RETURNING is the atomic claim. Deliberately polls on
+-- status='approved' rather than hooking either call site that can produce
+-- it (run_referral_fraud_checks' cron-context auto-approve, or the
+-- request-context admin_resolve_fraud_flag) — one poller covers both.
+CREATE OR REPLACE FUNCTION claim_approved_commissions()
+RETURNS TABLE(
+  ledger_id UUID, booking_id UUID, email TEXT, affiliate_name TEXT, commission_amount_inr NUMERIC
+) LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+#variable_conflict use_column
+BEGIN
+  RETURN QUERY
+  WITH claimed AS (
+    UPDATE commission_ledger cl
+    SET notified_at = NOW()
+    WHERE cl.status = 'approved' AND cl.notified_at IS NULL
+    RETURNING cl.id, cl.booking_id, cl.affiliate_id, cl.commission_amount_inr
+  )
+  SELECT c.id, c.booking_id, COALESCE(p.email, a.email), COALESCE(p.display_name, p.full_name, 'there'), c.commission_amount_inr
+  FROM claimed c
+  JOIN affiliates a ON a.id = c.affiliate_id
+  LEFT JOIN profiles p ON p.id = a.profile_id
+  WHERE COALESCE(p.email, a.email) IS NOT NULL;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION claim_approved_commissions() TO authenticated;
 
 -- Runs on a schedule (cron block below), not on booking creation — the
 -- business rule is completion-only. Idempotent: only processes bookings

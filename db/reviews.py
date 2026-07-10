@@ -4,6 +4,7 @@ from typing import Any, Optional
 from supabase import Client, create_client
 
 import config
+from services import mailer
 
 logger = logging.getLogger("immigroov.db.reviews")
 
@@ -45,6 +46,29 @@ def admin_moderate_review(review_id: str, decision: str, admin_user_id: Optional
     _supabase.rpc("admin_moderate_review", {
         "p_review_id": review_id, "p_decision": decision, "p_admin_user_id": admin_user_id,
     }).execute()
+
+
+def send_due_review_requests() -> dict[str, Any]:
+    """Dispatcher job: claim_due_review_requests() (SQL) is the atomic claim -
+    a booking's token can only be returned by one call, so a losing
+    concurrent tick just gets an empty result, same claim-then-send pattern
+    as db/reminders.py. A send failure here is not retried by the next tick
+    (the claim already happened) - logged for ops follow-up, isolated per
+    row so one bad address doesn't stop the rest of the batch."""
+    res = _supabase.rpc("claim_due_review_requests", {}).execute()
+    rows = res.data or []
+    sent = 0
+    for row in rows:
+        try:
+            mailer.send_transactional(row["email"], "review_request", {
+                "candidate_name": row.get("candidate_name") or "",
+                "mentor_name": row.get("mentor_name") or "your mentor",
+                "token": row.get("token") or "",
+            })
+            sent += 1
+        except Exception:
+            logger.warning("review_request email failed booking=%s", row.get("booking_id"))
+    return {"claimed": len(rows), "emails_sent": sent}
 
 
 def get_review_notify_info(booking_id: str) -> Optional[dict[str, Any]]:

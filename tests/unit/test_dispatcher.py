@@ -25,6 +25,7 @@ def test_run_due_calls_every_registered_job_when_lock_acquired():
         "refresh_fx_rates", "send_webinar_reminders",
         "send_customer_reminders_24h", "send_customer_reminders_1h",
         "send_mentor_reminders_1h", "send_mentor_reminders_10m",
+        "send_review_requests", "send_commission_approved_emails",
         "sweep_verify_payments", "process_refunds", "reconcile_payments",
     ]
 
