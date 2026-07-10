@@ -65,6 +65,8 @@ services:
         sync: false           # Supabase SESSION pooler URI, port 5432 (NOT 6543 - LangGraph uses prepared statements)
       - key: RESEND_API_KEY
         sync: false           # transactional email; optional
+      - key: EMAIL_FROM
+        sync: false           # must be a Resend-verified sender, e.g. "Immigroov <noreply@yourdomain.com>" - defaults to the Resend sandbox address (onboarding@resend.dev) if unset, which only delivers to the Resend account owner
       - key: ADMIN_EMAIL
         sync: false           # ops inbox copied on booking/reschedule/cancel (e.g. yokeshmd99@gmail.com)
 
@@ -102,6 +104,8 @@ services:
         sync: false
       - key: RESEND_API_KEY
         sync: false
+      - key: EMAIL_FROM
+        sync: false           # must match groovia-api's verified sender - see note above
       - key: ADMIN_EMAIL
         sync: false
       - key: RAZORPAY_KEY_ID
@@ -172,6 +176,8 @@ services:
         sync: false           # staging Supabase SESSION pooler URI, port 5432 (NOT 6543 - LangGraph uses prepared statements)
       - key: RESEND_API_KEY
         sync: false           # optional - leave unset to skip real emails
+      - key: EMAIL_FROM
+        sync: false           # must be a Resend-verified sender - defaults to the Resend sandbox address (onboarding@resend.dev) if unset, which only delivers to the Resend account owner
       - key: ADMIN_EMAIL
         sync: false           # ops inbox copied on booking/reschedule/cancel (e.g. yokeshmd99@gmail.com)
       - key: MOCK_SERVICES
@@ -204,6 +210,8 @@ services:
         sync: false           # staging Supabase SESSION pooler URI
       - key: RESEND_API_KEY
         sync: false
+      - key: EMAIL_FROM
+        sync: false           # must match groovia-api-staging's verified sender - see note above
       - key: ADMIN_EMAIL
         sync: false
       - key: RAZORPAY_KEY_ID
