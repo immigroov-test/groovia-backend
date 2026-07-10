@@ -175,7 +175,8 @@ def test_webhook_payment_captured_confirms_booking(client):
          patch.object(db, "fetch_razorpay_payment", return_value=remote_payment), \
          patch.object(payments, "confirm_booking_payment", return_value="confirmed") as mocked_confirm, \
          patch.object(payments, "record_provider_payload"), \
-         patch.object(db, "get_booking_notify_info", return_value=None):
+         patch.object(db, "get_booking_notify_info", return_value=None), \
+         patch.object(db, "get_referral_tracked_notify_info", return_value=None):
         resp = _post_webhook(client, "payment.captured", entity, event_id="evt_captured")
     assert resp.status_code == 200
     mocked_confirm.assert_called_once_with(booking_id, "pay_xyz")
@@ -287,7 +288,8 @@ def test_confirm_mock_happy_path(client):
     booking_id = str(uuid.uuid4())
     with patch.object(db, "payments_enabled", return_value=False), \
          patch.object(db, "confirm_booking_payment", return_value="confirmed") as mocked, \
-         patch.object(db, "get_booking_notify_info", return_value=None):
+         patch.object(db, "get_booking_notify_info", return_value=None), \
+         patch.object(db, "get_referral_tracked_notify_info", return_value=None):
         resp = client.post("/payments/confirm-mock", json={"booking_id": booking_id})
     assert resp.status_code == 200
     assert resp.json() == {"result": "confirmed"}
@@ -718,3 +720,41 @@ def test_admin_reconcile_payments_happy_path(client):
         mocked.assert_called_once()
     finally:
         client.app.dependency_overrides.clear()
+
+
+# ── "Referral tracked" affiliate notification ────────────────────────────────
+# routers.payments._send_referral_tracked_email — a BackgroundTask fired from
+# both the webhook and /confirm-mock's `result == "confirmed"` branch (see
+# tests above, which patch db.get_referral_tracked_notify_info to a no-op so
+# they don't also exercise this path). These tests cover the helper directly.
+import routers.payments as payments_router  # noqa: E402
+
+
+def test_send_referral_tracked_email_sends_when_attribution_resolved():
+    booking_id = str(uuid.uuid4())
+    info = {"email": "affiliate@example.com", "affiliate_name": "Aff A", "candidate_name": "Cand B"}
+    with patch.object(db, "get_referral_tracked_notify_info", return_value=info) as mocked_lookup, \
+         patch("services.mailer.send_transactional") as mocked_send:
+        payments_router._send_referral_tracked_email(booking_id)
+    mocked_lookup.assert_called_once_with(booking_id)
+    mocked_send.assert_called_once_with(
+        "affiliate@example.com", "referral_tracked",
+        {"affiliate_name": "Aff A", "candidate_name": "Cand B"},
+    )
+
+
+def test_send_referral_tracked_email_noop_when_no_attribution():
+    """No referral info on the booking, or attribution never resolved to an
+    affiliate — get_referral_tracked_notify_info returns None (per its SQL
+    RETURN with no rows), and nothing gets sent."""
+    with patch.object(db, "get_referral_tracked_notify_info", return_value=None), \
+         patch("services.mailer.send_transactional") as mocked_send:
+        payments_router._send_referral_tracked_email(str(uuid.uuid4()))
+    mocked_send.assert_not_called()
+
+
+def test_send_referral_tracked_email_swallows_failures():
+    """Never allowed to raise into the BackgroundTask runner - a lookup or
+    send failure is logged, not propagated."""
+    with patch.object(db, "get_referral_tracked_notify_info", side_effect=RuntimeError("db down")):
+        payments_router._send_referral_tracked_email(str(uuid.uuid4()))  # must not raise

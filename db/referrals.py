@@ -157,6 +157,16 @@ def admin_finalize_payout_batch(batch_date: str) -> str:
     return res.data
 
 
+def get_referral_tracked_notify_info(booking_id: str) -> Optional[dict[str, Any]]:
+    """Lookup for the "referral tracked" affiliate notification - called once,
+    synchronously, as a BackgroundTask right after confirm_booking_payment
+    (routers/payments.py), never polled. Returns None if the booking carried
+    no referral info or attribution didn't resolve to an affiliate."""
+    res = _supabase.rpc("get_referral_tracked_notify_info", {"p_booking_id": booking_id}).execute()
+    rows = res.data or []
+    return rows[0] if rows else None
+
+
 # ── Dispatcher job: "commission approved" email ─────────────────────────────
 
 def send_pending_commission_emails() -> dict[str, Any]:

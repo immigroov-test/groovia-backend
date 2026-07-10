@@ -9,6 +9,7 @@ from pydantic import BaseModel, field_validator
 import config
 import db
 from core.auth import AuthUser, get_current_user_optional
+from services import mailer
 
 logger = logging.getLogger("immigroov.routers.payments")
 
@@ -179,6 +180,7 @@ def _handle_webhook_event(event_type: str, payload: dict, background_tasks: Back
         result = db.finalize_captured_payment(local, remote)
         if result == "confirmed":
             background_tasks.add_task(_send_confirmation_email, local["booking_id"])
+            background_tasks.add_task(_send_referral_tracked_email, local["booking_id"])
 
     elif event_type == "payment.failed":
         razorpay_payment = entity.get("payment", {}).get("entity", {})
@@ -222,6 +224,25 @@ def _send_confirmation_email(booking_id: str) -> None:
         _send_booking_confirmation(booking_id, "", candidate_email, info.get("candidate_name"))
     except Exception:
         logger.warning("payment confirmation email failed booking=%s", booking_id)
+
+
+def _send_referral_tracked_email(booking_id: str) -> None:
+    """Notifies the affiliate that a referred booking was just confirmed.
+    Always called from a real request (webhook or /confirm-mock), inside the
+    same `result == "confirmed"` branch that already guards the booking-
+    confirmation email above against webhook-retry duplicates - no separate
+    claim/notified_at marker needed here. A no-op if the booking carried no
+    referral info or attribution didn't resolve to an affiliate."""
+    try:
+        info = db.get_referral_tracked_notify_info(booking_id)
+        if not info:
+            return
+        mailer.send_transactional(info["email"], "referral_tracked", {
+            "affiliate_name": info.get("affiliate_name") or "",
+            "candidate_name": info.get("candidate_name") or "",
+        })
+    except Exception:
+        logger.warning("referral_tracked email failed booking=%s", booking_id)
 
 
 # ── Webhook-independent verify (post-Checkout backstop, one booking at a time) ──
@@ -288,4 +309,5 @@ def confirm_mock(body: MockConfirmBody, background_tasks: BackgroundTasks):
         raise HTTPException(status_code=500, detail="Mock confirmation failed")
     if result == "confirmed":
         background_tasks.add_task(_send_confirmation_email, body.booking_id)
+        background_tasks.add_task(_send_referral_tracked_email, body.booking_id)
     return {"result": result}

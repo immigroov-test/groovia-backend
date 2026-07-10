@@ -355,6 +355,23 @@ def _commission_approved(d: dict) -> tuple[str, str]:
     return "Your referral commission was approved", _base(body)
 
 
+def _referral_tracked(d: dict) -> tuple[str, str]:
+    name = _e(d.get("affiliate_name") or "there")
+    candidate = _e(d.get("candidate_name") or "A customer")
+    dashboard_url = d.get("dashboard_url", config.FRONTEND_URL.rstrip("/") + "/affiliate")
+    body = (
+        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">A referral was tracked</h1>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {name},</p>'
+        '<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
+        f"<strong>{candidate}</strong> just booked a session using your referral link or code. Once the session "
+        "is completed, your commission will be calculated and reviewed."
+        "</p>"
+        '<p style="margin:0;font-size:15px;color:#444;line-height:1.6">You\'ll get a separate email once it\'s approved.</p>'
+        + _btn(dashboard_url, "View dashboard")
+    )
+    return "A referral was tracked", _base(body)
+
+
 def _mentor_five_star_review(d: dict) -> tuple[str, str]:
     mentor = _e(d.get("mentor_name", ""))
     title = d.get("review_title", "")
@@ -582,6 +599,7 @@ _TEMPLATES = {
     "webinar_registered": _webinar_registered,
     "webinar_reminder": _webinar_reminder,
     "commission_approved": _commission_approved,
+    "referral_tracked": _referral_tracked,
 }
 
 

@@ -3912,16 +3912,18 @@ GRANT EXECUTE ON FUNCTION validate_referral_code(TEXT) TO anon, authenticated;
 
 -- ── 8. Attribution pipeline (click -> durable per-email record) ────────────
 -- Ported from immigroov's 0078 (base logic) reconciled with 0098 (email
--- hooks). The email hooks themselves are NOT ported — immigroov sends them
--- via pg_net (app_send_email) directly from SQL; groovia has no SQL-side
--- HTTP capability. The FastAPI layer (Referral 8 commit) can send the
--- "referral tracked" email as a BackgroundTask after calling
--- resolve_referral_attribution, since that call always happens inside a real
--- request (confirm_booking_payment / confirm-mock) — still not wired, a
--- genuine open gap. "Commission approved" (from run_referral_fraud_checks,
--- no request context — it fires from process_referral_commissions, a cron
--- job) is no longer deferred: see claim_approved_commissions() below, polled
--- by the FastAPI-side dispatcher (jobs/run_due.py).
+-- hooks). The email hooks themselves are NOT ported wholesale — immigroov
+-- sends them via pg_net (app_send_email) directly from SQL; groovia has no
+-- SQL-side HTTP capability. Both are now wired via FastAPI instead:
+-- "referral tracked" fires as a BackgroundTask (routers/payments.py) right
+-- after confirm_booking_payment's call to resolve_referral_attribution
+-- above, since that call always happens inside a real request
+-- (confirm_booking_payment / confirm-mock) — see
+-- get_referral_tracked_notify_info() below. "Commission approved" (from
+-- run_referral_fraud_checks, no request context — it fires from
+-- process_referral_commissions, a cron job) uses the poller pattern instead:
+-- see claim_approved_commissions() below, polled by the FastAPI-side
+-- dispatcher (jobs/run_due.py).
 
 CREATE OR REPLACE FUNCTION log_referral_click(p_slug TEXT, p_session_token TEXT)
 RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
@@ -3985,6 +3987,39 @@ BEGIN
 END;
 $$;
 GRANT EXECUTE ON FUNCTION resolve_referral_attribution(TEXT, TEXT, TEXT) TO authenticated, service_role;
+
+-- "Referral tracked" notification lookup — called once, synchronously, right
+-- after confirm_booking_payment's call to resolve_referral_attribution above
+-- (always inside a real request: the Razorpay webhook handler or
+-- /payments/confirm-mock), unlike the cron-driven commission-approved case.
+-- No claim/notified_at marker needed: the caller only invokes this from the
+-- same `result == "confirmed"` branch that already guards the (trusted,
+-- pre-existing) booking-confirmation email against webhook-retry duplicates.
+-- Returns nothing if the booking carried no referral info, or attribution
+-- didn't actually resolve to an affiliate (e.g. an expired/frozen record).
+CREATE OR REPLACE FUNCTION get_referral_tracked_notify_info(p_booking_id UUID)
+RETURNS TABLE(email TEXT, affiliate_name TEXT, candidate_name TEXT)
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+DECLARE b bookings; v_hash TEXT; v_att attribution_records;
+BEGIN
+  SELECT * INTO b FROM bookings WHERE id = p_booking_id;
+  IF NOT FOUND THEN RETURN; END IF;
+  IF b.referral_session_token IS NULL AND b.referral_code IS NULL THEN RETURN; END IF;
+  IF b.candidate_email IS NULL THEN RETURN; END IF;
+
+  v_hash := encode(extensions.digest(LOWER(TRIM(b.candidate_email)), 'sha256'), 'hex');
+  SELECT * INTO v_att FROM attribution_records WHERE email_hash = v_hash;
+  IF NOT FOUND OR v_att.affiliate_id IS NULL THEN RETURN; END IF;
+
+  RETURN QUERY
+  SELECT COALESCE(p.email, a.email), COALESCE(p.display_name, p.full_name, 'there'), COALESCE(b.candidate_name, 'A customer')
+  FROM affiliates a
+  LEFT JOIN profiles p ON p.id = a.profile_id
+  WHERE a.id = v_att.affiliate_id
+    AND COALESCE(p.email, a.email) IS NOT NULL;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION get_referral_tracked_notify_info(UUID) TO authenticated, service_role;
 
 -- Freezes the 60-day (default) clock the moment a mentor no-show is logged
 -- against a referred booking. Called from flag_no_show below.
