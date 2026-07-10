@@ -440,7 +440,53 @@ def sweep_verify_payments(window_minutes: int = 60, limit: int = 100) -> dict[st
     return {"ok": True, "swept": len(results), "confirmed": confirmed, "results": results}
 
 
-# ── Payout admin ops (manual payouts — wired in the payouts phase) ─────────────
+# ── Admin financials (read) ────────────────────────────────────────────────────
+# Both return None (not []) when the payment tables don't exist yet, i.e. the
+# payments_setup.sql migration hasn't been applied. The admin router maps None to
+# a "not configured" flag so the panel shows a setup hint instead of an error.
+
+def admin_list_payments(limit: int = 200) -> Optional[list[dict[str, Any]]]:
+    """Recent customer payments with booking + mentor context, newest first."""
+    try:
+        res = (
+            _supabase.table("customer_payments")
+            .select(
+                "id, booking_id, amount, currency, state, provider_payment_id, created_at, "
+                "bookings(candidate_name, candidate_email, status, slot_time, mentors(display_name))"
+            )
+            .order("created_at", desc=True)
+            .limit(limit)
+            .execute()
+        )
+        return res.data or []
+    except Exception:
+        logger.warning("admin_list_payments unavailable (payments migration not applied?)")
+        return None
+
+
+def admin_list_payouts(state: Optional[str] = None, limit: int = 200) -> Optional[list[dict[str, Any]]]:
+    """Mentor payouts with mentor + booking context, newest first. Optional
+    payout_state filter (pending / paid / void / blocked)."""
+    try:
+        q = (
+            _supabase.table("mentor_payouts")
+            .select(
+                "id, booking_id, mentor_id, amount, net_amount_mentor_currency, mentor_currency, "
+                "gross_amount, customer_currency, payout_state, method, payout_reference, paid_date, created_at, "
+                "mentors(display_name), bookings(status, slot_time, candidate_name, candidate_email)"
+            )
+            .order("created_at", desc=True)
+            .limit(limit)
+        )
+        if state:
+            q = q.eq("payout_state", state)
+        return q.execute().data or []
+    except Exception:
+        logger.warning("admin_list_payouts unavailable (payments migration not applied?)")
+        return None
+
+
+# ── Payout admin ops (manual payouts) ──────────────────────────────────────────
 
 def mark_payout_paid(booking_id: str, reference: str) -> None:
     _supabase.rpc("mark_payout_paid", {"p_booking_id": booking_id, "p_reference": reference}).execute()

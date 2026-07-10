@@ -221,6 +221,54 @@ def reset_strikes(mentor_id: str, user: AuthUser = Depends(require_admin)):
         raise HTTPException(status_code=404, detail="Mentor not found")
 
 
+# ── Payments + payouts (financials) ─────────────────────────────────────────
+
+@router.get("/payments")
+def admin_payments(user: AuthUser = Depends(require_admin)):
+    """Recent customer payments. `configured` is false when the payments
+    migration hasn't been applied yet (tables absent)."""
+    rows = db.admin_list_payments()
+    return {"configured": rows is not None, "payments": rows or []}
+
+
+@router.get("/payouts")
+def admin_payouts(state: Optional[str] = None, user: AuthUser = Depends(require_admin)):
+    """Mentor payouts (optionally filtered by payout_state). `configured` is
+    false when the payments migration hasn't been applied yet."""
+    rows = db.admin_list_payouts(state=state)
+    return {"configured": rows is not None, "payouts": rows or []}
+
+
+class PayoutPaidBody(BaseModel):
+    reference: Optional[str] = None
+
+
+@router.post("/payouts/{booking_id}/mark-paid")
+def mark_payout_paid(booking_id: str, body: PayoutPaidBody = PayoutPaidBody(), user: AuthUser = Depends(require_admin)):
+    """Record a manual payout as paid. The RPC rejects bookings that aren't
+    'completed' (nothing to pay out yet) and payouts already void/blocked."""
+    try:
+        db.mark_payout_paid(booking_id, (body.reference or "").strip() or "manual")
+    except Exception as e:
+        msg = str(e)
+        if "not completed" in msg.lower():
+            raise HTTPException(status_code=409, detail="This booking isn't completed yet, so there's nothing to pay out.")
+        logger.exception("mark_payout_paid failed booking=%s", booking_id)
+        raise HTTPException(status_code=500, detail="Could not mark the payout as paid.")
+    return {"ok": True}
+
+
+@router.post("/payouts/{booking_id}/block")
+def block_payout(booking_id: str, body: RejectBody = RejectBody(), user: AuthUser = Depends(require_admin)):
+    """Hold a payout (dispute, compliance). Never overrides an already-paid payout."""
+    try:
+        db.set_payout_blocked(booking_id, (body.reason or "").strip() or None)
+    except Exception:
+        logger.exception("block_payout failed booking=%s", booking_id)
+        raise HTTPException(status_code=500, detail="Could not block the payout.")
+    return {"ok": True}
+
+
 # ── Service approval (services added by an already-approved mentor) ──────────
 
 @router.get("/services/pending")
