@@ -158,6 +158,45 @@ def get_booking_notify_info(booking_id: str) -> Optional[dict[str, Any]]:
         return None
 
 
+def get_booking_meeting_info(booking_id: str) -> Optional[dict[str, Any]]:
+    """Everything the /meeting/[bookingId] page needs: meeting_url (None for
+    'dm' services - handled in-app, no video component; set_meeting_url's
+    trigger only assigns one for 'video'), status, slot start/end, service
+    title, and both parties' display names. No ownership check here - the
+    caller (routers/booking.py) gates access via authorize_booking_party
+    first, same as every other single-booking endpoint."""
+    try:
+        res = (
+            _supabase.table("bookings")
+            .select("id, status, slot_time, slot_end, meeting_url, candidate_id, candidate_name, "
+                    "mentor_id, services(title), mentors(display_name)")
+            .eq("id", booking_id)
+            .single()
+            .execute()
+        )
+        b = res.data
+        if not b:
+            return None
+        svc = b.get("services") or {}
+        mentor = b.get("mentors") or {}
+        cand_name = b.get("candidate_name")
+        if b.get("candidate_id") and not cand_name:
+            prof = (_supabase.table("profiles").select("display_name, full_name")
+                    .eq("id", b["candidate_id"]).single().execute()).data or {}
+            cand_name = prof.get("display_name") or prof.get("full_name")
+        return {
+            "id": b["id"], "status": b.get("status"),
+            "slot_time": b.get("slot_time"), "slot_end": b.get("slot_end"),
+            "meeting_url": b.get("meeting_url"),
+            "service_title": svc.get("title") if isinstance(svc, dict) else None,
+            "mentor_name": mentor.get("display_name") if isinstance(mentor, dict) else None,
+            "candidate_name": cand_name,
+        }
+    except Exception:
+        logger.exception("get_booking_meeting_info failed booking=%s", booking_id)
+        return None
+
+
 def get_service_mentor_id(service_id: str) -> Optional[str]:
     """Return the mentor_id that owns a service (for ownership checks)."""
     try:

@@ -1,5 +1,6 @@
+import base64
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
@@ -8,6 +9,7 @@ from pydantic import BaseModel, field_validator
 import config
 import db
 from core.auth import AuthUser, get_current_user
+from core.permissions import authorize_booking_party
 from services import mailer
 
 logger = logging.getLogger("immigroov.routers.booking")
@@ -262,6 +264,20 @@ def confirm_attendance(booking_id: str, user: AuthUser = Depends(get_current_use
         raise HTTPException(status_code=500, detail="Failed to confirm attendance")
 
 
+@router.get("/{booking_id}/meeting")
+def get_meeting_info(booking_id: str, user: AuthUser = Depends(get_current_user)):
+    """Backs the /meeting/[bookingId] page: meeting_url (the Jitsi room -
+    set_meeting_url's trigger assigns one at booking creation for 'video'
+    services, none for 'dm'), status, slot time, and both parties' names.
+    Either party to the booking can view it."""
+    principals = db.get_booking_principals(booking_id)
+    authorize_booking_party(principals, user, allow="both")
+    info = db.get_booking_meeting_info(booking_id)
+    if not info:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    return info
+
+
 # ── My bookings (mentee) ───────────────────────────────────────────────────────
 
 @router.get("/my")
@@ -469,6 +485,56 @@ def list_requests(booking_id: str, user: AuthUser = Depends(get_current_user)):
 # booking_times_display, admin copy), so payments reuses it rather than
 # keeping a second, weaker duplicate.
 
+def _ics_escape(text: str) -> str:
+    return (text or "").replace("\\", "\\\\").replace(";", "\\;").replace(",", "\\,").replace("\n", "\\n")
+
+
+def _ics_datetime(iso: str) -> str:
+    dt = datetime.fromisoformat(iso.replace("Z", "+00:00"))
+    return dt.astimezone(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+
+def _build_ics_attachment(booking_id: str, cancelled: bool = False) -> Optional[dict]:
+    """Builds an RFC 5545 VEVENT for a booking, base64-encoded for a Resend
+    attachment. Ported from immigroov's booking_ics() (0031_ics_calendar_invite.sql):
+    same UID scheme (stable across the booking's lifecycle, so calendar apps
+    UPDATE the existing event on reschedule/cancel instead of duplicating it),
+    STATUS flips to CANCELLED, LOCATION/DESCRIPTION include the meeting_url
+    when present ('dm' services have none - the event is still useful
+    without a video link). Pure lookup + string formatting, no DB writes, so
+    unlike the SQL source this lives in Python (db/direct_booking.py's
+    get_booking_meeting_info is a plain PostgREST read, no locking concerns)."""
+    info = db.get_booking_meeting_info(booking_id)
+    if not info or not info.get("slot_time"):
+        return None
+    slot_end = info.get("slot_end") or info["slot_time"]
+    title = info.get("service_title") or "Immigroov session"
+    mentor_name = info.get("mentor_name") or "your mentor"
+    meeting_url = info.get("meeting_url")
+    location = f"LOCATION:{_ics_escape(meeting_url)}\r\n" if meeting_url else ""
+    description = _ics_escape(f"Session with {mentor_name}" + (f"\nJoin: {meeting_url}" if meeting_url else ""))
+    now = datetime.now(timezone.utc)
+    ics = (
+        "BEGIN:VCALENDAR\r\n"
+        "VERSION:2.0\r\n"
+        "PRODID:-//Immigroov//Booking//EN\r\n"
+        "METHOD:PUBLISH\r\n"
+        "BEGIN:VEVENT\r\n"
+        f"UID:booking-{booking_id}@immigroov\r\n"
+        f"SEQUENCE:{int(now.timestamp() // 60)}\r\n"
+        f"DTSTAMP:{now.strftime('%Y%m%dT%H%M%SZ')}\r\n"
+        f"DTSTART:{_ics_datetime(info['slot_time'])}\r\n"
+        f"DTEND:{_ics_datetime(slot_end)}\r\n"
+        f"SUMMARY:{_ics_escape(title + ' - Immigroov')}\r\n"
+        f"STATUS:{'CANCELLED' if cancelled else 'CONFIRMED'}\r\n"
+        + location +
+        f"DESCRIPTION:{description}\r\n"
+        "END:VEVENT\r\n"
+        "END:VCALENDAR\r\n"
+    )
+    return {"filename": "invite.ics", "content": base64.b64encode(ics.encode("utf-8")).decode("ascii")}
+
+
 def _send_booking_confirmation(
     booking_id: str, mentor_id: str, candidate_email: str, candidate_name: Optional[str],
     notes: Optional[str] = None,
@@ -482,6 +548,7 @@ def _send_booking_confirmation(
         mentor_email = info.get("mentor_email")
         service_title = info.get("service_title") or "1-on-1 session"
         meeting_url = f"{config.FRONTEND_URL}/meeting/{booking_id}"
+        ics = _build_ics_attachment(booking_id)
 
         # booking_times_display returns a per-party local timestamp + IANA tz name.
         def _fmt(local_key: str, tz_key: str) -> str:
@@ -501,6 +568,7 @@ def _send_booking_confirmation(
                 "session_time": _fmt("customer_local", "customer_tz"),
                 "meeting_url": meeting_url,
             },
+            attachments=[ics] if ics else None,
         )
 
         if mentor_email:
@@ -516,6 +584,7 @@ def _send_booking_confirmation(
                     "notes": notes or "",
                     "meeting_url": meeting_url,
                 },
+                attachments=[ics] if ics else None,
             )
 
         if config.ADMIN_EMAIL:
@@ -547,6 +616,11 @@ def _notify_parties(booking_id: str, event: str):
         m_email, m_name = info.get("mentor_email"), info.get("mentor_name") or "there"
         c_email, c_name = info.get("candidate_email"), info.get("candidate_name") or "there"
 
+        # Same UID/room, updated SEQUENCE+time (or STATUS:CANCELLED) - calendar
+        # apps update the existing event rather than duplicating it.
+        ics = _build_ics_attachment(booking_id, cancelled=(event == "cancelled")) \
+            if event in ("cancelled", "rescheduled") else None
+
         def send(to, template, recipient_name, other_name):
             if not to:
                 return
@@ -554,7 +628,7 @@ def _notify_parties(booking_id: str, event: str):
                 "recipient_name": recipient_name,
                 "other_name": other_name,
                 "session_time": session_time,
-            })
+            }, attachments=[ics] if ics else None)
 
         if event == "cancelled":
             send(c_email, "booking_cancelled", c_name, m_name)

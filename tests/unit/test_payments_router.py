@@ -176,6 +176,7 @@ def test_webhook_payment_captured_confirms_booking(client):
          patch.object(payments, "confirm_booking_payment", return_value="confirmed") as mocked_confirm, \
          patch.object(payments, "record_provider_payload"), \
          patch.object(db, "get_booking_notify_info", return_value=None), \
+         patch.object(db, "get_booking_meeting_info", return_value=None), \
          patch.object(db, "get_referral_tracked_notify_info", return_value=None):
         resp = _post_webhook(client, "payment.captured", entity, event_id="evt_captured")
     assert resp.status_code == 200
@@ -289,6 +290,7 @@ def test_confirm_mock_happy_path(client):
     with patch.object(db, "payments_enabled", return_value=False), \
          patch.object(db, "confirm_booking_payment", return_value="confirmed") as mocked, \
          patch.object(db, "get_booking_notify_info", return_value=None), \
+         patch.object(db, "get_booking_meeting_info", return_value=None), \
          patch.object(db, "get_referral_tracked_notify_info", return_value=None):
         resp = client.post("/payments/confirm-mock", json={"booking_id": booking_id})
     assert resp.status_code == 200

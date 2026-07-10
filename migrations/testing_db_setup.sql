@@ -268,6 +268,40 @@ CREATE INDEX IF NOT EXISTS idx_bookings_thread
 CREATE INDEX IF NOT EXISTS idx_bookings_external_id
   ON bookings(external_id) WHERE external_id IS NOT NULL;
 
+-- ── Jitsi meeting link (video services only) ────────────────────────────────
+-- Ported from immigroov's 0012_jitsi_meeting_link.sql: a unique, unguessable
+-- room is assigned at booking creation for 'video' services; 'dm' services
+-- get no link ("Direct message" - handled in-app, no video component).
+-- BEFORE INSERT (not a later UPDATE) so it's set atomically regardless of
+-- which code path creates the row (reserve_booking today; anything else
+-- later), and so it's already present the first time a confirmation email
+-- is composed. A reschedule only ever UPDATEs slot_time on the same row, so
+-- the trigger never re-fires and the room survives the reschedule by design.
+CREATE OR REPLACE FUNCTION set_meeting_url()
+RETURNS TRIGGER LANGUAGE plpgsql AS $$
+DECLARE v_type service_type;
+BEGIN
+  IF NEW.meeting_url IS NULL THEN
+    SELECT type INTO v_type FROM services WHERE id = NEW.service_id;
+    IF v_type = 'video' THEN
+      NEW.meeting_url := 'https://meet.jit.si/Immigroov-' || replace(gen_random_uuid()::text, '-', '');
+    END IF;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+
+DROP TRIGGER IF EXISTS trg_set_meeting_url ON bookings;
+CREATE TRIGGER trg_set_meeting_url
+  BEFORE INSERT ON bookings
+  FOR EACH ROW EXECUTE FUNCTION set_meeting_url();
+
+-- Backfill any bookings that predate this trigger.
+UPDATE bookings b
+  SET meeting_url = 'https://meet.jit.si/Immigroov-' || replace(gen_random_uuid()::text, '-', '')
+  FROM services s
+  WHERE s.id = b.service_id AND s.type = 'video' AND b.meeting_url IS NULL;
+
 -- Idempotency: dedupes a retried booking request (dropped network response, double-click).
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS idempotency_key text;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_bookings_idempotency

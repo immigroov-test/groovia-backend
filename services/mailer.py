@@ -608,10 +608,13 @@ def send_transactional(
     template: str,
     data: dict,
     scheduled_at: Optional[datetime] = None,
+    attachments: Optional[list[dict]] = None,
 ) -> None:
     """Send one transactional email via Resend. Raises on network error or non-2xx.
     Dispatch via FastAPI BackgroundTasks so the request path is never blocked.
-    When MOCK_SERVICES=true, writes to _dev_emails.jsonl instead of calling Resend."""
+    When MOCK_SERVICES=true, writes to _dev_emails.jsonl instead of calling Resend.
+    `attachments`, if given, is Resend's own shape: [{"filename": str, "content": <base64 str>}, ...]
+    (e.g. the .ics calendar invite built in routers/booking.py)."""
     fn = _TEMPLATES.get(template)
     if fn is None:
         logger.error("Unknown email template %r", template)
@@ -641,6 +644,8 @@ def send_transactional(
     }
     if scheduled_at:
         payload["scheduled_at"] = scheduled_at.isoformat()
+    if attachments:
+        payload["attachments"] = attachments
     try:
         resp = httpx.post(
             _RESEND_URL,
