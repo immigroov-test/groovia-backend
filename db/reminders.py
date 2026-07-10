@@ -57,6 +57,7 @@ def _send_claimed_reminders(rows: list[dict[str, Any]], template: str) -> dict[s
                 "other_party_name": row.get("other_party_name") or "",
                 "session_time": str(row.get("slot_utc") or ""),
                 "meeting_url": _reminder_link(row),
+                "service_title": row.get("service_title") or "",
             })
             sent += 1
         except Exception:
@@ -90,3 +91,27 @@ def send_mentor_reminders_10m() -> dict[str, Any]:
     # reminder job already has, without needing a faster second dispatcher.
     rows = _claim_mentor_reminders("mentor_10m", 3, 15)
     return _send_claimed_reminders(rows, "session_reminder_soon")
+
+
+def send_attendance_checks() -> dict[str, Any]:
+    """Mentor "are you available?" pre-confirmation nudge, ~1h before a
+    session, skipped entirely if the mentor already confirmed via
+    mentor_confirm_attendance (claim_due_attendance_checks re-checks
+    mentor_confirmed_at at claim time, not just at query time). Ported from
+    immigroov's send_attendance_checks (0027_reschedule_negotiation.sql) -
+    a separate, older mechanism from the join-link attendance engine
+    (see routers/booking.py's /join/{token} endpoints), not a duplicate."""
+    res = _supabase.rpc("claim_due_attendance_checks", {}).execute()
+    rows = res.data or []
+    sent = 0
+    for row in rows:
+        try:
+            mailer.send_transactional(row["email"], "attendance_check", {
+                "recipient_name": row.get("first_name") or "",
+                "session_time": str(row.get("slot_utc") or ""),
+                "service_title": row.get("service_title") or "",
+            })
+            sent += 1
+        except Exception:
+            logger.warning("attendance_check email failed booking=%s", row.get("booking_id"))
+    return {"claimed": len(rows), "emails_sent": sent}

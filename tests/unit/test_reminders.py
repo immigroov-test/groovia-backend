@@ -181,3 +181,75 @@ def test_admin_send_mentor_reminders_happy_path(client):
         assert resp.json()["mentor_10m"]["emails_sent"] == 1
     finally:
         client.app.dependency_overrides.clear()
+
+
+# ── db.reminders.send_attendance_checks (mentor pre-confirmation nudge) ─────
+# A separate, older mechanism from the join-link attendance engine (0027 vs
+# 0079) - not a duplicate of the reminder jobs above. claim_due_attendance_checks
+# re-checks mentor_confirmed_at IS NULL at claim time, so a mentor confirming
+# between ticks means the next tick's claim simply returns no row for that
+# booking (same overlap-safety property as the other claim-then-send jobs).
+
+def _attendance_row(**overrides):
+    row = {
+        "booking_id": str(uuid.uuid4()), "email": "mentor@example.com", "first_name": "M",
+        "slot_utc": "2026-08-01T10:00:00Z", "service_title": "Career chat",
+    }
+    row.update(overrides)
+    return row
+
+
+def test_send_attendance_checks_sends_one_email_per_claimed_row():
+    rows = [_attendance_row(), _attendance_row(email="m2@example.com")]
+    with patch.object(reminders, "_supabase") as mock_supabase, \
+         patch("services.mailer.send_transactional") as mocked_send:
+        mock_supabase.rpc.return_value.execute.return_value.data = rows
+        result = reminders.send_attendance_checks()
+    assert result == {"claimed": 2, "emails_sent": 2}
+    mock_supabase.rpc.assert_called_once_with("claim_due_attendance_checks", {})
+    assert mocked_send.call_count == 2
+    _, template, data = mocked_send.call_args_list[0].args
+    assert template == "attendance_check"
+    assert data["service_title"] == "Career chat"
+
+
+def test_send_attendance_checks_isolates_per_row_failures():
+    rows = [_attendance_row(email="bad@example.com"), _attendance_row(email="good@example.com")]
+
+    def flaky_send(to, template, data):
+        if to == "bad@example.com":
+            raise RuntimeError("resend rejected")
+
+    with patch.object(reminders, "_supabase") as mock_supabase, \
+         patch("services.mailer.send_transactional", side_effect=flaky_send) as mocked_send:
+        mock_supabase.rpc.return_value.execute.return_value.data = rows
+        result = reminders.send_attendance_checks()
+    assert result == {"claimed": 2, "emails_sent": 1}
+    assert mocked_send.call_count == 2
+
+
+def test_send_attendance_checks_empty_claim_sends_nothing():
+    with patch.object(reminders, "_supabase") as mock_supabase, \
+         patch("services.mailer.send_transactional") as mocked_send:
+        mock_supabase.rpc.return_value.execute.return_value.data = []
+        result = reminders.send_attendance_checks()
+    assert result == {"claimed": 0, "emails_sent": 0}
+    mocked_send.assert_not_called()
+
+
+def test_second_overlapping_attendance_check_claim_returns_empty():
+    """Regression coverage for the overlap-safety property: a booking already
+    claimed (or where the mentor confirmed in between) is simply absent from
+    a second call's result set - no separate 'sent' marker to race against."""
+    row = _attendance_row()
+    with patch.object(reminders, "_supabase") as mock_supabase, \
+         patch("services.mailer.send_transactional") as mocked_send:
+        mock_supabase.rpc.return_value.execute.side_effect = [
+            type("R", (), {"data": [row]})(),
+            type("R", (), {"data": []})(),
+        ]
+        run1 = reminders.send_attendance_checks()
+        run2 = reminders.send_attendance_checks()
+    assert run1 == {"claimed": 1, "emails_sent": 1}
+    assert run2 == {"claimed": 0, "emails_sent": 0}
+    mocked_send.assert_called_once()

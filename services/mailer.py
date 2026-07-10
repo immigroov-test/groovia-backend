@@ -271,14 +271,18 @@ def _session_reminder_24h(d: dict) -> tuple[str, str]:
     recipient = _e(d.get("recipient_name", ""))
     other = d.get("other_party_name", "your mentor")
     url = d.get("meeting_url", "")
+    service = d.get("service_title") or "1-on-1 session"
     body = (
         '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Your session is tomorrow</h1>'
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {recipient},</p>'
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
-        f"Just a reminder that your session with <strong>{_e(other)}</strong> is tomorrow."
+        f"Just a reminder that your session with <strong>{_e(other)}</strong> is tomorrow. Here are the details."
         "</p>"
-        + _info_row("Date & Time", d.get("session_time", ""))
+        + _details_card([("What", service), ("When", d.get("session_time", "")), ("Who", other)])
         + (_btn(url, "Join meeting") if url else "")
+        + '<p style="margin:20px 0 0;font-size:14px;color:#444;line-height:1.6">'
+        f'Need to change it? <a href="{config.FRONTEND_URL}/account/sessions" style="color:#6b7fff">Reschedule or cancel</a>'
+        " anytime from your account.</p>"
     )
     return f"Reminder: your session with {other} is tomorrow", _base(body)
 
@@ -287,12 +291,14 @@ def _session_reminder_1h(d: dict) -> tuple[str, str]:
     recipient = _e(d.get("recipient_name", ""))
     other = d.get("other_party_name", "your mentor")
     url = d.get("meeting_url", "")
+    service = d.get("service_title") or "1-on-1 session"
     body = (
         '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Your session starts in 1 hour</h1>'
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {recipient},</p>'
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
         f"Your session with <strong>{_e(other)}</strong> starts in 1 hour. Make sure you're ready!"
         "</p>"
+        + _details_card([("What", service), ("When", d.get("session_time", ""))])
         + (_btn(url, "Join meeting") if url else "")
     )
     return f"Your session with {other} starts in 1 hour", _base(body)
@@ -306,15 +312,38 @@ def _session_reminder_soon(d: dict) -> tuple[str, str]:
     recipient = _e(d.get("recipient_name", ""))
     other = d.get("other_party_name", "your mentee")
     url = d.get("meeting_url", "")
+    service = d.get("service_title") or "1-on-1 session"
     body = (
         '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Your session starts in about 10 minutes</h1>'
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {recipient},</p>'
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
         f"Your session with <strong>{_e(other)}</strong> starts in about 10 minutes."
         "</p>"
+        + _details_card([("What", service)])
         + (_btn(url, "Join meeting") if url else "")
     )
     return f"Your session with {other} starts in about 10 minutes", _base(body)
+
+
+def _attendance_check(d: dict) -> tuple[str, str]:
+    """Mentor "are you available?" pre-confirmation nudge, ~1h before a
+    session, sent only if mentor_confirm_attendance hasn't already fired
+    (see db.reminders.send_attendance_checks). Ported from immigroov's
+    send_attendance_checks (0027_reschedule_negotiation.sql) - a separate,
+    older mechanism from the join-link attendance engine's own emails."""
+    recipient = _e(d.get("recipient_name", ""))
+    service = d.get("service_title") or "1-on-1 session"
+    console_url = d.get("console_url", config.FRONTEND_URL.rstrip("/") + "/mentor")
+    body = (
+        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Are you available for your upcoming session?</h1>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {recipient},</p>'
+        '<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
+        "You have a session in about an hour. Open your mentor console to confirm you can attend, or propose a new time."
+        "</p>"
+        + _details_card([("What", service), ("When", d.get("session_time", ""))])
+        + _btn(console_url, "Open mentor console")
+    )
+    return "Are you available for your upcoming session?", _base(body)
 
 
 def _review_request(d: dict) -> tuple[str, str]:
@@ -586,6 +615,7 @@ _TEMPLATES = {
     "session_reminder_24h": _session_reminder_24h,
     "session_reminder_1h": _session_reminder_1h,
     "session_reminder_soon": _session_reminder_soon,
+    "attendance_check": _attendance_check,
     "review_request": _review_request,
     "mentor_five_star_review": _mentor_five_star_review,
     "welcome_candidate": _welcome_candidate,

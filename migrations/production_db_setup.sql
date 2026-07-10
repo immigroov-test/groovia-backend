@@ -3030,16 +3030,18 @@ $$;
 -- ambiguity above) — it tells plpgsql to always prefer the table column
 -- over an identically-named OUT variable for any bare reference in this
 -- function, everywhere, not just the ones a manual pass happens to qualify.
--- join_token added (DROP first: adding an output column changes the return
--- type, which CREATE OR REPLACE can't do) so reminder emails can link to
--- /join/[token] (records attendance) instead of the generic meeting_url
--- (doesn't). meeting_url stays in the output too, as a fallback for 'dm'
--- services or if the frontend join page is ever pulled.
+-- join_token + service_title added (DROP first: adding output columns
+-- changes the return type, which CREATE OR REPLACE can't do). join_token
+-- lets reminder emails link to /join/[token] (records attendance) instead
+-- of the generic meeting_url; service_title backs a branded What/When/Who
+-- details card in the templates, matching booking_confirmed_candidate/
+-- _mentor's existing style. meeting_url stays in the output too, as a
+-- fallback for 'dm' services or if the frontend join page is ever pulled.
 DROP FUNCTION IF EXISTS claim_due_customer_reminders(TEXT, INT, INT);
 CREATE OR REPLACE FUNCTION claim_due_customer_reminders(p_kind TEXT, p_lo_minutes INT, p_hi_minutes INT)
 RETURNS TABLE(
   booking_id UUID, email TEXT, first_name TEXT, slot_utc TIMESTAMPTZ,
-  customer_tz TEXT, other_party_name TEXT, meeting_url TEXT, join_token UUID
+  customer_tz TEXT, other_party_name TEXT, meeting_url TEXT, join_token UUID, service_title TEXT
 ) LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 #variable_conflict use_column
 BEGIN
@@ -3055,11 +3057,12 @@ BEGIN
     RETURNING br.booking_id
   )
   SELECT b.id, COALESCE(b.candidate_email, p.email), COALESCE(p.display_name, p.full_name, b.candidate_name),
-         b.slot_time, COALESCE(b.attendee_timezone, p.timezone, 'UTC'), m.display_name, b.meeting_url, b.candidate_join_token
+         b.slot_time, COALESCE(b.attendee_timezone, p.timezone, 'UTC'), m.display_name, b.meeting_url, b.candidate_join_token, s.title
   FROM claimed c
   JOIN bookings b ON b.id = c.booking_id
   LEFT JOIN profiles p ON p.id = b.candidate_id
   JOIN mentors m ON m.id = b.mentor_id
+  LEFT JOIN services s ON s.id = b.service_id
   WHERE COALESCE(b.candidate_email, p.email) IS NOT NULL;
 END;
 $$;
@@ -3069,7 +3072,7 @@ DROP FUNCTION IF EXISTS claim_due_mentor_reminders(TEXT, INT, INT);
 CREATE OR REPLACE FUNCTION claim_due_mentor_reminders(p_kind TEXT, p_lo_minutes INT, p_hi_minutes INT)
 RETURNS TABLE(
   booking_id UUID, email TEXT, first_name TEXT, slot_utc TIMESTAMPTZ,
-  mentor_tz TEXT, other_party_name TEXT, meeting_url TEXT, join_token UUID
+  mentor_tz TEXT, other_party_name TEXT, meeting_url TEXT, join_token UUID, service_title TEXT
 ) LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 #variable_conflict use_column
 BEGIN
@@ -3085,15 +3088,53 @@ BEGIN
     RETURNING br.booking_id
   )
   SELECT b.id, COALESCE(p.email, m.email), COALESCE(p.display_name, p.full_name, m.display_name),
-         b.slot_time, COALESCE(m.app_timezone, 'UTC'), COALESCE(b.candidate_name, b.candidate_email), b.meeting_url, b.mentor_join_token
+         b.slot_time, COALESCE(m.app_timezone, 'UTC'), COALESCE(b.candidate_name, b.candidate_email), b.meeting_url, b.mentor_join_token, s.title
   FROM claimed c
   JOIN bookings b ON b.id = c.booking_id
   JOIN mentors m ON m.id = b.mentor_id
   LEFT JOIN profiles p ON p.id = m.profile_id
+  LEFT JOIN services s ON s.id = b.service_id
   WHERE COALESCE(p.email, m.email) IS NOT NULL;
 END;
 $$;
 GRANT EXECUTE ON FUNCTION claim_due_mentor_reminders(TEXT, INT, INT) TO authenticated;
+
+-- Claim-then-send for the mentor "are you available?" pre-confirmation
+-- nudge, ~1h before a session, if the mentor hasn't already confirmed via
+-- mentor_confirm_attendance. Ported from immigroov's send_attendance_checks
+-- (0027_reschedule_negotiation.sql) - a separate, older mechanism from the
+-- join-link attendance engine (0079/0080/0087): this one is a proactive
+-- ask-first-then-record nudge, not a post-hoc join-click record. Reuses
+-- booking_reminders' existing UNIQUE(booking_id, kind) as the atomic claim,
+-- same pattern as every other reminder job.
+DROP FUNCTION IF EXISTS claim_due_attendance_checks();
+CREATE OR REPLACE FUNCTION claim_due_attendance_checks()
+RETURNS TABLE(booking_id UUID, email TEXT, first_name TEXT, slot_utc TIMESTAMPTZ, service_title TEXT)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+#variable_conflict use_column
+BEGIN
+  RETURN QUERY
+  WITH claimed AS (
+    INSERT INTO booking_reminders AS br (booking_id, kind)
+    SELECT b.id, 'attend_check'
+    FROM bookings b
+    WHERE b.status IN ('confirmed', 'rescheduled')
+      AND b.mentor_confirmed_at IS NULL
+      AND b.slot_time BETWEEN NOW() AND NOW() + INTERVAL '60 minutes'
+    ON CONFLICT (booking_id, kind) DO NOTHING
+    RETURNING br.booking_id
+  )
+  SELECT b.id, COALESCE(p.email, m.email), COALESCE(p.display_name, p.full_name, m.display_name),
+         b.slot_time, s.title
+  FROM claimed c
+  JOIN bookings b ON b.id = c.booking_id
+  JOIN mentors m ON m.id = b.mentor_id
+  LEFT JOIN profiles p ON p.id = m.profile_id
+  LEFT JOIN services s ON s.id = b.service_id
+  WHERE COALESCE(p.email, m.email) IS NOT NULL;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION claim_due_attendance_checks() TO authenticated;
 
 -- ── Dispatcher-wide lease lock ────────────────────────────────────────────────
 -- Render Cron Jobs have no built-in mutex: if a dispatcher tick's runtime ever
