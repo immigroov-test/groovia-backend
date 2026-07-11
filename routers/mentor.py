@@ -9,6 +9,7 @@ import config
 import db
 from services import mailer
 from core.auth import AuthUser, get_current_user
+from core.permissions import require_mentor
 
 logger = logging.getLogger("immigroov.routers.mentor")
 
@@ -110,6 +111,7 @@ class MentorSignupBody(BaseModel):
     agreed_to_mentor_terms: bool = False
     hourly_rate: Optional[float] = None
     currency: str = "USD"
+    smart_pricing: bool = False
     weekly_availability: list[WeeklySlot] = []
     services: list[ServiceDraft] = []
     booking_rules: Optional[BookingRules] = None
@@ -164,6 +166,7 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
         professional_domains=body.professional_domains,
         hourly_rate=body.hourly_rate,
         currency=body.currency,
+        smart_pricing=body.smart_pricing,
     )
     mentor_id = result["id"]
     # Weekly availability -> weekly_availability (the table the booking engine reads).
@@ -302,6 +305,19 @@ def update_profile(body: ProfileUpdateBody, user: AuthUser = Depends(get_current
         raise HTTPException(status_code=403, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+class SmartPricingBody(BaseModel):
+    enabled: bool
+
+
+@router.post("/smart-pricing")
+def set_smart_pricing(body: SmartPricingBody, mentor: dict = Depends(require_mentor)):
+    """Toggle smart (PPP) pricing for the mentor. Applied live (not staged for
+    re-approval): flips the flag and re-syncs is_ppp across all their services so
+    booking prices reflect it immediately."""
+    db.set_mentor_smart_pricing(mentor["id"], body.enabled)
+    return {"smart_pricing": body.enabled}
 
 
 # ── Availability ───────────────────────────────────────────────────────────────

@@ -108,7 +108,7 @@ def get_mentor_by_profile_id(profile_id: str) -> Optional[dict[str, Any]]:
         .select("id, slug, display_name, status, session_duration_minutes, rejection_reason, "
                 "headline, bio, photo_url, phone, country, city, timezone, languages, social_links, "
                 "expertise_country_codes, expertise_categories, professional_domains, "
-                "years_lived_experience, public_notes, submission_count, hourly_rate, currency, "
+                "years_lived_experience, public_notes, submission_count, hourly_rate, currency, smart_pricing, "
                 "pending_changes, pending_submitted_at")
         .eq("profile_id", profile_id)
         .limit(1)
@@ -166,6 +166,13 @@ def link_guest_bookings(profile_id: str, email: Optional[str]) -> int:
     except Exception:
         logger.warning("link_guest_bookings failed for %s", profile_id)
         return 0
+
+
+def set_mentor_smart_pricing(mentor_id: str, enabled: bool) -> None:
+    """Flip the mentor's smart (PPP) pricing and re-sync is_ppp across all their
+    services, so the mentor-level flag is the single source of truth for PPP."""
+    _supabase.table("mentors").update({"smart_pricing": enabled}).eq("id", mentor_id).execute()
+    _supabase.table("services").update({"is_ppp": enabled}).eq("mentor_id", mentor_id).execute()
 
 
 def link_mentor_by_email(profile_id: str, email: str) -> Optional[dict[str, Any]]:
@@ -243,6 +250,7 @@ def create_mentor_signup(
     public_notes: Optional[str] = None,
     hourly_rate: Optional[float] = None,
     currency: str = "USD",
+    smart_pricing: bool = False,
     session_duration_minutes: int = 60,
 ) -> dict[str, Any]:
     """Creates a new mentor row for a self-service signup, pending admin review."""
@@ -275,6 +283,7 @@ def create_mentor_signup(
         "public_notes": public_notes,
         "hourly_rate": hourly_rate,
         "currency": (currency or "USD").upper(),
+        "smart_pricing": smart_pricing,
         "session_duration_minutes": session_duration_minutes,
     }).execute()
 

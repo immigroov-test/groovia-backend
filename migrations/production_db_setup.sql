@@ -272,8 +272,10 @@ ALTER TABLE bookings ADD COLUMN IF NOT EXISTS idempotency_key text;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_bookings_idempotency
   ON bookings(idempotency_key) WHERE idempotency_key IS NOT NULL;
 
--- July bug-fix batch: mentor hourly rate + mandatory booking phone.
+-- July bug-fix batch: mentor hourly rate + smart pricing + mandatory booking phone.
+-- (service_create's smart-pricing derivation lives in bugfixes_phone_hourly_rate.sql.)
 ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS hourly_rate NUMERIC;
+ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS smart_pricing BOOLEAN NOT NULL DEFAULT FALSE;
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS candidate_phone TEXT;
 
 -- ============================================================================
