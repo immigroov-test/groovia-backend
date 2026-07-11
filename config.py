@@ -111,3 +111,14 @@ if not (RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET and RAZORPAY_WEBHOOK_SECRET):
         "real payments will fail; use MOCK_SERVICES=true for local dev",
         stacklevel=1,
     )
+
+# Loud warning: when EMAIL_TEST_REDIRECT is set, EVERY transactional email is routed
+# to that one inbox instead of the real mentor/mentee/admin. Easy to forget in prod
+# and it looks like "only the admin gets mail" - so make it visible on startup.
+if EMAIL_TEST_REDIRECT and not MOCK_SERVICES:
+    import warnings
+    warnings.warn(
+        f"[WARN] EMAIL_TEST_REDIRECT={EMAIL_TEST_REDIRECT!r} - ALL transactional email is "
+        "being redirected to this one inbox, not real recipients. Unset it in production.",
+        stacklevel=1,
+    )
