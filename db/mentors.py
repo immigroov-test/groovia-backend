@@ -108,7 +108,7 @@ def get_mentor_by_profile_id(profile_id: str) -> Optional[dict[str, Any]]:
         .select("id, slug, display_name, status, session_duration_minutes, rejection_reason, "
                 "headline, bio, photo_url, phone, country, city, timezone, languages, social_links, "
                 "expertise_country_codes, expertise_categories, professional_domains, "
-                "years_lived_experience, public_notes, submission_count, "
+                "years_lived_experience, public_notes, submission_count, hourly_rate, currency, "
                 "pending_changes, pending_submitted_at")
         .eq("profile_id", profile_id)
         .limit(1)
@@ -241,6 +241,8 @@ def create_mentor_signup(
     country: Optional[str] = None,
     social_links: list[dict[str, str]] | None = None,
     public_notes: Optional[str] = None,
+    hourly_rate: Optional[float] = None,
+    currency: str = "USD",
     session_duration_minutes: int = 60,
 ) -> dict[str, Any]:
     """Creates a new mentor row for a self-service signup, pending admin review."""
@@ -271,6 +273,8 @@ def create_mentor_signup(
         "country": country,
         "social_links": social_links or [],
         "public_notes": public_notes,
+        "hourly_rate": hourly_rate,
+        "currency": (currency or "USD").upper(),
         "session_duration_minutes": session_duration_minutes,
     }).execute()
 
@@ -316,6 +320,7 @@ _EDITABLE_PROFILE_FIELDS = {
     "display_name", "headline", "bio", "photo_url",
     "phone", "city", "country", "social_links", "public_notes", "languages", "timezone",
     "expertise_country_codes", "expertise_categories", "years_lived_experience", "professional_domains",
+    "hourly_rate", "currency",
 }
 
 

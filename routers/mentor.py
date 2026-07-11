@@ -76,6 +76,7 @@ class ServiceDraft(BaseModel):
     title: str
     duration: int       # 15 | 30 | 45 | 60
     is_active: bool = True
+    set_price: float = 0   # prorated from the mentor's hourly rate, editable per session
 
 
 class BookingRules(BaseModel):
@@ -107,6 +108,8 @@ class MentorSignupBody(BaseModel):
     years_lived_experience: Optional[int] = None
     professional_domains: list[str] = []
     agreed_to_mentor_terms: bool = False
+    hourly_rate: Optional[float] = None
+    currency: str = "USD"
     weekly_availability: list[WeeklySlot] = []
     services: list[ServiceDraft] = []
     booking_rules: Optional[BookingRules] = None
@@ -159,6 +162,8 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
         expertise_country_codes=body.expertise_country_codes,
         years_lived_experience=body.years_lived_experience,
         professional_domains=body.professional_domains,
+        hourly_rate=body.hourly_rate,
+        currency=body.currency,
     )
     mentor_id = result["id"]
     # Weekly availability -> weekly_availability (the table the booking engine reads).
@@ -171,7 +176,8 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
     # Session types the mentee can book.
     for svc in body.services:
         try:
-            db.create_service(mentor_id=mentor_id, title=svc.title, duration=svc.duration, is_active=svc.is_active)
+            db.create_service(mentor_id=mentor_id, title=svc.title, duration=svc.duration,
+                              is_active=svc.is_active, set_price=svc.set_price)
         except Exception:
             logger.exception("Service create failed during signup for mentor %s", mentor_id)
     # Booking rules (mandatory) -> stored on the mentor row via avail_set_rules.
@@ -226,6 +232,8 @@ class ProfileUpdateBody(BaseModel):
     expertise_categories: Optional[list[str]] = None
     years_lived_experience: Optional[int] = None
     professional_domains: Optional[list[str]] = None
+    hourly_rate: Optional[float] = None
+    currency: Optional[str] = None
 
     @field_validator("years_lived_experience")
     @classmethod
@@ -233,6 +241,13 @@ class ProfileUpdateBody(BaseModel):
         if v is not None and (v < 0 or v > 60):
             raise ValueError("years_lived_experience must be between 0 and 60")
         return v
+
+    @field_validator("hourly_rate")
+    @classmethod
+    def validate_rate(cls, v: Optional[float]) -> Optional[float]:
+        if v is not None and (v < 0 or v > 100000):
+            raise ValueError("hourly_rate must be between 0 and 100000")
+        return round(v, 2) if v is not None else v
 
 
 @router.post("/profile")
@@ -277,6 +292,10 @@ def update_profile(body: ProfileUpdateBody, user: AuthUser = Depends(get_current
         fields["years_lived_experience"] = body.years_lived_experience
     if body.professional_domains is not None:
         fields["professional_domains"] = body.professional_domains
+    if body.hourly_rate is not None:
+        fields["hourly_rate"] = body.hourly_rate
+    if body.currency is not None:
+        fields["currency"] = (body.currency.strip().upper() or "USD")
     try:
         return db.save_mentor_profile_edit(mentor["id"], fields)
     except PermissionError as e:

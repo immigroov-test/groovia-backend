@@ -273,6 +273,10 @@ ALTER TABLE bookings ADD COLUMN IF NOT EXISTS idempotency_key text;
 CREATE UNIQUE INDEX IF NOT EXISTS idx_bookings_idempotency
   ON bookings(idempotency_key) WHERE idempotency_key IS NOT NULL;
 
+-- July bug-fix batch: mentor hourly rate + mandatory booking phone.
+ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS hourly_rate NUMERIC;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS candidate_phone TEXT;
+
 -- ============================================================================
 -- mentor_availability (legacy manual fallback system - superseded by weekly_availability)
 -- ============================================================================

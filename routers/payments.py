@@ -1,4 +1,5 @@
 import logging
+import re
 from datetime import datetime
 from typing import Optional
 
@@ -28,6 +29,7 @@ class ReserveBody(BaseModel):
     service_id: str
     slot_time: datetime
     email: str
+    phone: str
     name: Optional[str] = None
     notes: Optional[str] = None
     timezone: str = "UTC"
@@ -40,6 +42,14 @@ class ReserveBody(BaseModel):
         v = v.strip().lower()
         if "@" not in v or "." not in v.split("@")[-1]:
             raise ValueError("Invalid email address")
+        return v
+
+    @field_validator("phone")
+    @classmethod
+    def validate_phone(cls, v: str) -> str:
+        v = (v or "").strip()
+        if len(re.sub(r"\D", "", v)) < 7:
+            raise ValueError("A valid phone number is required")
         return v
 
 
@@ -64,6 +74,12 @@ def reserve(body: ReserveBody, user: Optional[AuthUser] = Depends(get_current_us
             specific_availability_id=body.specific_availability_id,
             candidate_id=candidate_id,
         )
+        try:
+            db.set_booking_phone(result["booking_id"], body.phone)
+            if candidate_id:
+                db.set_profile_phone_if_empty(candidate_id, body.phone)
+        except Exception:
+            logger.warning("could not save phone for reserved booking %s", result.get("booking_id"))
         return result
     except Exception as e:
         msg = str(e)

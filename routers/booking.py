@@ -1,4 +1,5 @@
 import logging
+import re
 from datetime import date, datetime
 from typing import Optional
 
@@ -91,11 +92,22 @@ class BookingAnswerItem(BaseModel):
     answer_text: str
 
 
+def _validate_phone(v: str) -> str:
+    """Mandatory contact phone. The frontend collects it with a country code; here
+    we just require enough digits to be a real number (E.164 is 8-15 digits incl.
+    country code, but keep the floor lenient for short national formats)."""
+    v = (v or "").strip()
+    if len(re.sub(r"\D", "", v)) < 7:
+        raise ValueError("A valid phone number is required")
+    return v
+
+
 class BookSessionBody(BaseModel):
     mentor_id: str
     service_id: str
     slot_time: datetime
     email: str
+    phone: str
     name: Optional[str] = None
     notes: Optional[str] = None
     timezone: str = "UTC"
@@ -110,6 +122,11 @@ class BookSessionBody(BaseModel):
         if "@" not in v or "." not in v.split("@")[-1]:
             raise ValueError("Invalid email address")
         return v
+
+    @field_validator("phone")
+    @classmethod
+    def validate_phone(cls, v: str) -> str:
+        return _validate_phone(v)
 
     @field_validator("name")
     @classmethod
@@ -154,6 +171,9 @@ def book_session(
             booking_id = result[0]["booking_id"]
             if body.idempotency_key:
                 db.set_booking_idempotency_key(booking_id, body.idempotency_key)
+            db.set_booking_phone(booking_id, body.phone)
+            if candidate_id:
+                db.set_profile_phone_if_empty(candidate_id, body.phone)
             background_tasks.add_task(
                 _send_booking_confirmation, booking_id, body.mentor_id, body.email, body.name, body.notes
             )

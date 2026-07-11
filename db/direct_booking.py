@@ -524,3 +524,22 @@ def list_candidate_bookings(candidate_id: str) -> list[dict]:
     """All of a mentee's bookings with full lifecycle state for the manager UI."""
     res = _supabase.rpc("my_bookings", {"p_candidate_id": candidate_id}).execute()
     return res.data or []
+
+
+def set_booking_phone(booking_id: str, phone: str) -> None:
+    """Store the mentee's contact phone on the booking (collected at checkout)."""
+    _supabase.table("bookings").update({"candidate_phone": (phone or "").strip()}).eq("id", booking_id).execute()
+
+
+def set_profile_phone_if_empty(profile_id: str, phone: str) -> None:
+    """Save the phone entered at booking to the mentee's profile, without ever
+    overwriting a number they already set."""
+    if not profile_id or not (phone or "").strip():
+        return
+    try:
+        cur = _supabase.table("profiles").select("phone").eq("id", profile_id).limit(1).execute()
+        existing = (cur.data[0].get("phone") if cur.data else None) or ""
+        if not existing.strip():
+            _supabase.table("profiles").update({"phone": phone.strip()}).eq("id", profile_id).execute()
+    except Exception:
+        logger.warning("set_profile_phone_if_empty failed for %s", profile_id)
