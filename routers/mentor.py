@@ -78,6 +78,9 @@ class ServiceDraft(BaseModel):
     duration: int       # 15 | 30 | 45 | 60
     is_active: bool = True
     set_price: float = 0   # prorated from the mentor's hourly rate, editable per session
+    description: Optional[str] = None
+    category: Optional[str] = None
+    tags: list[str] = []
 
 
 class BookingRules(BaseModel):
@@ -180,7 +183,10 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
     for svc in body.services:
         try:
             db.create_service(mentor_id=mentor_id, title=svc.title, duration=svc.duration,
-                              is_active=svc.is_active, set_price=svc.set_price)
+                              is_active=svc.is_active, set_price=svc.set_price,
+                              description=(svc.description or "").strip() or None,
+                              category=(svc.category or "").strip() or None,
+                              tags=svc.tags)
         except Exception:
             logger.exception("Service create failed during signup for mentor %s", mentor_id)
     # Booking rules (mandatory) -> stored on the mentor row via avail_set_rules.

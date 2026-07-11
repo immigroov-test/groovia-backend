@@ -325,19 +325,18 @@ def mentor_confirm_attendance(booking_id: str) -> None:
 
 # ── Services ───────────────────────────────────────────────────────────────────
 
+_SERVICE_COLS = ("id, title, description, type, duration, category, set_price, "
+                 "set_currency, platform_fee, is_active, is_ppp, status, tags")
+
+
 def list_services(mentor_id: str, active_only: bool = False) -> list[dict]:
+    q = (_supabase.table("services")
+         .select(_SERVICE_COLS)
+         .eq("mentor_id", mentor_id))
     if active_only:
         # Public/bookable: active AND admin-approved only.
-        res = (_supabase.table("services")
-               .select("id, title, description, type, duration, category, set_price, set_currency, platform_fee, is_active, is_ppp, status")
-               .eq("mentor_id", mentor_id)
-               .eq("is_active", True)
-               .eq("status", "approved")
-               .order("created_at")
-               .execute())
-    else:
-        res = _supabase.rpc("service_list", {"p_mentor_id": mentor_id}).execute()
-    return res.data or []
+        q = q.eq("is_active", True).eq("status", "approved")
+    return q.order("created_at").execute().data or []
 
 
 def approve_pending_services(mentor_id: str) -> int:
@@ -389,6 +388,9 @@ def set_service_status(service_id: str, status: str) -> dict:
     return res.data[0]
 
 
+MAX_SERVICE_TAGS = 5   # industry-standard cap for search/matching keywords
+
+
 def create_service(
     *,
     mentor_id: str,
@@ -400,6 +402,7 @@ def create_service(
     set_price: float = 0,
     is_active: bool = True,
     is_ppp: bool = False,
+    tags: Optional[list[str]] = None,
 ) -> str:
     res = _supabase.rpc("service_create", {
         "p_mentor_id":   mentor_id,
@@ -412,7 +415,28 @@ def create_service(
         "p_active":      is_active,
         "p_ppp":         is_ppp,
     }).execute()
-    return res.data
+    service_id = res.data
+    # tags live on the services row directly (not a service_create param, to keep that
+    # RPC's signature stable). Store the deduped, capped keyword list.
+    if tags and service_id:
+        clean: list[str] = []
+        for t in tags:
+            t = (t or "").strip()
+            if t and t.lower() not in {c.lower() for c in clean}:
+                clean.append(t)
+        if clean:
+            _supabase.table("services").update({"tags": clean[:MAX_SERVICE_TAGS]}).eq("id", service_id).execute()
+    return service_id
+
+
+def set_service_tags(service_id: str, tags: list[str]) -> None:
+    """Replace a service's search tags (deduped, capped)."""
+    clean: list[str] = []
+    for t in tags or []:
+        t = (t or "").strip()
+        if t and t.lower() not in {c.lower() for c in clean}:
+            clean.append(t)
+    _supabase.table("services").update({"tags": clean[:MAX_SERVICE_TAGS]}).eq("id", service_id).execute()
 
 
 def set_service_active(service_id: str, is_active: bool) -> None:

@@ -23,6 +23,19 @@ class ServiceCreateBody(BaseModel):
     set_price: float = 0
     is_active: bool = True
     is_ppp: bool = False
+    tags: list[str] = []
+
+    @field_validator("tags")
+    @classmethod
+    def validate_tags(cls, v: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        for t in (v or []):
+            t = (t or "").strip()[:40]
+            if t and t.lower() not in {c.lower() for c in cleaned}:
+                cleaned.append(t)
+        if len(cleaned) > 5:
+            raise ValueError("You can add up to 5 tags")
+        return cleaned
 
     @field_validator("type")
     @classmethod
@@ -70,6 +83,7 @@ def create_service(body: ServiceCreateBody, mentor: dict = Depends(require_mento
             set_price=body.set_price,
             is_active=body.is_active,
             is_ppp=body.is_ppp,
+            tags=body.tags,
         )
         return {"id": service_id}
     except Exception:
