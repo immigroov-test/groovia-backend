@@ -19,14 +19,16 @@ logger = logging.getLogger("immigroov.permissions")
 
 
 def require_mentor(user: AuthUser = Depends(get_current_user)) -> dict[str, Any]:
-    """Require the caller to own a mentor profile (approved OR pending_review - a
-    pending mentor may still set up services/availability). Returns the mentor row
-    so the endpoint doesn't refetch it."""
+    """Require the caller to own a mentor profile that is allowed to set up
+    services/availability. That is every state except 'suspended' — including
+    'changes_requested' and 'rejected', where the mentor must be able to edit
+    their services/availability to address the reviewer's notes and resubmit.
+    Returns the mentor row so the endpoint doesn't refetch it."""
     import db as _db
     mentor = _db.get_mentor_by_profile_id(user.id)
     if not mentor:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Mentor access required")
-    if mentor.get("status") not in ("approved", "pending_review"):
+    if mentor.get("status") == "suspended":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Mentor profile not active")
     return mentor
 

@@ -36,7 +36,9 @@ def list_active_mentors(
     if category:
         q = q.contains("expertise_categories", [category])
     if profile_keyword:
-        q = q.ilike("headline", f"%{profile_keyword}%")
+        # Match the mentor's name OR headline (commas would break PostgREST's or() syntax).
+        kw = profile_keyword.replace(",", " ").strip()
+        q = q.or_(f"display_name.ilike.%{kw}%,headline.ilike.%{kw}%")
     return q.execute().data or []
 
 
@@ -113,6 +115,57 @@ def get_mentor_by_profile_id(profile_id: str) -> Optional[dict[str, Any]]:
         .execute()
     )
     return res.data[0] if res.data else None
+
+
+def backfill_profile_name(profile_id: str, full_name: Optional[str] = None) -> None:
+    """Fill profiles.full_name/display_name when they're empty. The signup trigger
+    creates the profile with a null name (magic-link OTP carries no name), and the
+    name is only entered later during password setup - which updates auth metadata
+    but not the profiles row. This closes that gap. Uses the passed name, or falls
+    back to the auth user's metadata. Never overwrites an existing name."""
+    if not profile_id:
+        return
+    name = (full_name or "").strip()
+    if not name:
+        try:
+            resp = _supabase.auth.admin.get_user_by_id(profile_id)
+            meta = (resp.user.user_metadata or {}) if resp and resp.user else {}
+            name = (meta.get("full_name") or meta.get("name") or "").strip()
+        except Exception:
+            logger.warning("backfill_profile_name: could not read auth metadata for %s", profile_id)
+    if not name:
+        return
+    try:
+        cur = _supabase.table("profiles").select("full_name, display_name").eq("id", profile_id).limit(1).execute()
+        row = cur.data[0] if cur.data else {}
+        updates: dict[str, Any] = {}
+        if not (row.get("full_name") or "").strip():
+            updates["full_name"] = name
+        if not (row.get("display_name") or "").strip():
+            updates["display_name"] = name
+        if updates:
+            _supabase.table("profiles").update(updates).eq("id", profile_id).execute()
+    except Exception:
+        logger.warning("backfill_profile_name: update failed for %s", profile_id)
+
+
+def link_guest_bookings(profile_id: str, email: Optional[str]) -> int:
+    """Attach a signed-in account to the guest bookings it made before signing up
+    (same email, candidate_id still null) so they appear under My sessions."""
+    if not profile_id or not email:
+        return 0
+    try:
+        res = (
+            _supabase.table("bookings")
+            .update({"candidate_id": profile_id})
+            .is_("candidate_id", "null")
+            .eq("candidate_email", email.strip().lower())
+            .execute()
+        )
+        return len(res.data or [])
+    except Exception:
+        logger.warning("link_guest_bookings failed for %s", profile_id)
+        return 0
 
 
 def link_mentor_by_email(profile_id: str, email: str) -> Optional[dict[str, Any]]:

@@ -1,3 +1,5 @@
+from typing import Optional
+
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
@@ -9,6 +11,10 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 
 class CheckEmailBody(BaseModel):
     email: str
+
+
+class SyncBody(BaseModel):
+    full_name: Optional[str] = None
 
 
 @router.post("/check-email")
@@ -29,13 +35,18 @@ def set_guest(user: AuthUser = Depends(get_current_user)):
 
 
 @router.post("/sync")
-def sync_account(user: AuthUser = Depends(get_current_user)):
-    """Run once right after login. If this email was pre-approved as a mentor by an
-    admin (a mentors row with a matching email and no linked account yet), attach it
-    to this account so they get mentor access without registering again."""
+def sync_account(body: SyncBody = SyncBody(), user: AuthUser = Depends(get_current_user)):
+    """Run right after login/signup. Three idempotent jobs:
+    1. Link a pre-approved mentor (mentors row matched by email, no account yet).
+    2. Backfill the profile's name (the signup trigger left it null; the name is
+       entered later during password setup).
+    3. Attach any guest bookings this email made before signing up."""
     mentor = db.link_mentor_by_email(user.id, user.email)
+    db.backfill_profile_name(user.id, body.full_name)
+    linked_bookings = db.link_guest_bookings(user.id, user.email)
     return {
         "linked": bool(mentor),
         "role": "mentor" if mentor else "candidate",
         "mentor_status": mentor.get("status") if mentor else None,
+        "linked_bookings": linked_bookings,
     }
