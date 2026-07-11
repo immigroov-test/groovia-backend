@@ -109,6 +109,7 @@ class MentorSignupBody(BaseModel):
     social_links: list[SocialLink] = []
     public_notes: Optional[str] = None
     expertise_country_codes: list[str] = []
+    expertise_categories: list[str] = []
     years_lived_experience: Optional[int] = None
     professional_domains: list[str] = []
     agreed_to_mentor_terms: bool = False
@@ -165,6 +166,7 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
         social_links=[s.model_dump() for s in body.social_links],
         public_notes=(body.public_notes or "").strip() or None,
         expertise_country_codes=body.expertise_country_codes,
+        expertise_categories=body.expertise_categories,
         years_lived_experience=body.years_lived_experience,
         professional_domains=body.professional_domains,
         hourly_rate=body.hourly_rate,

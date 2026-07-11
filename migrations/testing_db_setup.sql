@@ -1632,6 +1632,63 @@ UPDATE services SET set_price = 50, set_currency = 'EUR'
 UPDATE services SET status = 'approved'
   WHERE status <> 'approved' AND mentor_id IN (SELECT id FROM mentors WHERE profile_id IS NULL);
 
+-- ============================================================================
+-- Enrich seed mentors into full, varied "real-looking" profiles: hourly rate,
+-- random PPP (smart pricing), ratings, and 1-3 prorated bookable sessions with
+-- tags - i.e. every detail a real mentor provides. Idempotent: mentor fields are
+-- set via UPDATE and sessions are only added up to each mentor's target count, so
+-- re-running the setup doesn't pile them up.
+-- ============================================================================
+DO $$
+DECLARE
+  m RECORD;
+  i INT := 0;
+  v_rate NUMERIC;
+  v_ppp BOOLEAN;
+  v_target INT;
+  v_have INT;
+  v_dur INT;
+  v_durs INT[] := ARRAY[30, 45, 60];
+BEGIN
+  FOR m IN SELECT id, slug, expertise_categories FROM mentors WHERE profile_id IS NULL ORDER BY slug LOOP
+    i := i + 1;
+    v_rate   := 40 + (i % 6) * 10;      -- 40..90 per hour, varied
+    v_ppp    := (i % 2 = 0);            -- alternate smart pricing on/off
+    v_target := 1 + (i % 3);           -- 1, 2 or 3 sessions
+
+    UPDATE mentors SET
+      hourly_rate   = v_rate,
+      currency      = 'EUR',
+      smart_pricing = v_ppp,
+      avg_rating    = CASE WHEN avg_rating > 0 THEN avg_rating ELSE ROUND((3.8 + (i % 12) * 0.1)::numeric, 1) END,
+      review_count  = CASE WHEN review_count > 0 THEN review_count ELSE (7 + (i * 5) % 55) END,
+      timezone      = COALESCE(NULLIF(timezone, ''), 'Europe/Amsterdam')
+    WHERE id = m.id;
+
+    -- Add sessions (30/45/60 min) until the mentor has v_target of them.
+    FOREACH v_dur IN ARRAY v_durs LOOP
+      SELECT count(*) INTO v_have FROM services WHERE mentor_id = m.id;
+      EXIT WHEN v_have >= v_target;
+      IF NOT EXISTS (SELECT 1 FROM services WHERE mentor_id = m.id AND duration = v_dur) THEN
+        INSERT INTO services (mentor_id, title, description, type, duration, category,
+                              set_price, set_currency, is_active, is_ppp, status, tags)
+        VALUES (m.id,
+                v_dur || '-min ' || (CASE v_dur WHEN 30 THEN 'Quick Consult' WHEN 45 THEN 'Deep Dive' ELSE 'Full Session' END),
+                '<p>A ' || v_dur || '-minute video call to work through your immigration and career questions, ending with clear next steps.</p>',
+                'video', v_dur, COALESCE(m.expertise_categories[1], 'job_career'),
+                ROUND(v_rate * v_dur / 60.0, 2), 'EUR', TRUE, v_ppp, 'approved',
+                ARRAY['visa', 'career', 'relocation']);
+      END IF;
+    END LOOP;
+
+    -- Keep prices prorated from the rate, sync PPP, and default any empty tags.
+    UPDATE services SET set_price = ROUND(v_rate * duration / 60.0, 2), set_currency = 'EUR', is_ppp = v_ppp
+      WHERE mentor_id = m.id;
+    UPDATE services SET tags = ARRAY['visa', 'career', 'relocation']
+      WHERE mentor_id = m.id AND (tags IS NULL OR array_length(tags, 1) IS NULL);
+  END LOOP;
+END $$;
+
 
 -- ###########################################################################
 -- Booking lifecycle v2 (folded in from 017_booking_lifecycle_v2.sql)

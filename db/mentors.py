@@ -26,7 +26,9 @@ def list_active_mentors(
         _supabase.table("mentors")
         .select("id, slug, display_name, headline, bio, photo_url, "
                 "expertise_country_codes, expertise_categories, languages, "
-                "professional_domains, booking_url, years_lived_experience")
+                "professional_domains, booking_url, years_lived_experience, "
+                "avg_rating, review_count, currency, "
+                "services(set_price, set_currency, is_active, status)")
         .eq("status", "approved")
         .eq("is_active", True)
         .limit(limit)
@@ -39,7 +41,20 @@ def list_active_mentors(
         # Match the mentor's name OR headline (commas would break PostgREST's or() syntax).
         kw = profile_keyword.replace(",", " ").strip()
         q = q.or_(f"display_name.ilike.%{kw}%,headline.ilike.%{kw}%")
-    return q.execute().data or []
+    rows = q.execute().data or []
+    # Collapse the mentor's bookable services into a single "starting from" price for
+    # the card (cheapest active + approved session), then drop the raw list.
+    for r in rows:
+        svcs = [s for s in (r.pop("services", None) or [])
+                if s.get("is_active") and s.get("status") == "approved" and s.get("set_price") is not None]
+        if svcs:
+            cheapest = min(svcs, key=lambda s: float(s["set_price"]))
+            r["min_price"] = float(cheapest["set_price"])
+            r["price_currency"] = cheapest.get("set_currency") or r.get("currency") or "USD"
+        else:
+            r["min_price"] = None
+            r["price_currency"] = None
+    return rows
 
 
 def list_mentors_grouped_by_country(limit_per_country: int = 2) -> dict[str, list[dict[str, Any]]]:
@@ -238,6 +253,7 @@ def create_mentor_signup(
     headline: Optional[str],
     timezone_name: str,
     expertise_country_codes: list[str] | None = None,
+    expertise_categories: list[str] | None = None,
     languages: list[str] | None = None,
     professional_domains: list[str] | None = None,
     years_lived_experience: Optional[int] = None,
@@ -271,6 +287,7 @@ def create_mentor_signup(
         "status": "pending_review",
         "submission_count": 1,
         "expertise_country_codes": expertise_country_codes or [],
+        "expertise_categories": expertise_categories or [],
         "languages": languages or [],
         "professional_domains": professional_domains or [],
         "years_lived_experience": years_lived_experience,
