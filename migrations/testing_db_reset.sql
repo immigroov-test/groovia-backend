@@ -14,6 +14,18 @@
 --   - The 14 seed mentors (inserted in testing_db_setup.sql, profile_id IS NULL)
 --   - platform_settings
 
+-- ============================================================================
+-- !!! SAFETY GUARD - DO NOT REMOVE CASUALLY !!!
+-- This script is DESTRUCTIVE. It DELETES every booking, every non-admin user,
+-- and every self-signup mentor (only the 14 named seed mentors survive). It is
+-- for a THROWAWAY TEST database ONLY, never production.
+-- To run it: (1) take a backup first (Supabase Dashboard -> Database -> Backups),
+-- then (2) delete the DO $$ ... $$ guard block just below.
+-- ============================================================================
+DO $$ BEGIN
+  RAISE EXCEPTION 'SAFETY STOP: testing_db_reset.sql wipes data (all bookings, all non-admin users, all self-signup mentors). Read the header, back up first, delete this guard block to proceed, and NEVER run it on production.';
+END $$;
+
 -- 0. SET ADMIN - promote the admins so they get the 'admin' role and are preserved by the
 --    wipe in step 3. Each admin must have signed up at least once. Idempotent.
 UPDATE profiles SET role = 'admin'

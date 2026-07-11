@@ -37,6 +37,11 @@ ORDER BY p.created_at;
 
 -- 2) DELETE - removes the mentee accounts. Cascades handle profiles / chats /
 --    consent_log; bookings.candidate_id is SET NULL by the FK.
+--    SAFETY GUARD: run step 1 (preview) first and eyeball the list. Then take a
+--    backup, delete the DO $$ ... $$ guard below, and run this DELETE.
+DO $$ BEGIN
+  RAISE EXCEPTION 'SAFETY STOP: this DELETE removes mentee accounts on PRODUCTION. Run the step 1 preview, back up, then delete this guard block to proceed.';
+END $$;
 DELETE FROM auth.users u
 USING profiles p
 WHERE p.id = u.id
