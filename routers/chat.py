@@ -15,7 +15,7 @@ import db
 import ai.graph as backend  # accessed at request-time so we read the lifespan-initialized app
 from core.auth import AuthUser, get_current_user, get_current_user_optional
 from ai.graph import _text
-from ai.smalltalk import smalltalk_reply
+from ai.smalltalk import smalltalk_reply, RESUME_GATE_REPLY
 from core.rate_limit import limiter
 from schema import ChatResponse
 from ai.tools import parse_docx_to_text, parse_pdf_to_text
@@ -131,15 +131,6 @@ async def chat_handler(
             parse_pdf_to_text(file_bytes) if file_type == "pdf" else parse_docx_to_text(file_bytes)
         )
 
-    # Short-circuit pure small talk (hi / thanks / bye / "what can you do") so it never
-    # costs an LLM (Groq) call. Skipped when a resume is attached (that must reach the
-    # agent) and only fires for unambiguous social messages, so real questions and short
-    # answers ("yes"/"no") always go through.
-    if not resume_text:
-        canned = smalltalk_reply(message)
-        if canned:
-            return {"status": "success", "response": canned, "thread_id": thread_id}
-
     input_state = {"messages": [HumanMessage(content=message)]}
     if resume_text:
         input_state["resume_text"] = resume_text
@@ -149,6 +140,34 @@ async def chat_handler(
         raise HTTPException(status_code=503, detail="Agent not ready. Try again in a moment.")
 
     await backend.ensure_pg_connected()
+
+    # ── Resume-first gate + generic-term warning (no LLM call) ──────────────────────
+    # System messages (e.g. the resume-upload trigger) are never gated. Otherwise:
+    #   • No resume/profile yet in this thread  -> ask the user to upload one first.
+    #   • Resume present + pure small talk       -> short credits/relevance warning.
+    #   • Resume present + a real question       -> falls through to the agent.
+    # `has_resume` is true if a resume is attached now, one was processed earlier in this
+    # thread (checkpoint), or a logged-in user already has a saved profile summary.
+    if not message.strip().startswith("[SYSTEM_"):
+        has_resume = resume_text is not None
+        if not has_resume and user:
+            # Cheap single-row lookup first: a logged-in user who uploaded before is done.
+            has_resume = bool(await asyncio.to_thread(db.get_profile_summary, user.id))
+        if not has_resume:
+            # Fall back to the thread checkpoint (covers guests + first-thread uploads).
+            try:
+                snap = await backend.app.aget_state(session_config)
+                vals = (snap.values if snap else {}) or {}
+                has_resume = bool(vals.get("resume_processed") or vals.get("resume_text"))
+            except Exception:
+                pass
+
+        if not has_resume:
+            return {"status": "success", "response": RESUME_GATE_REPLY, "thread_id": thread_id}
+
+        canned = smalltalk_reply(message)
+        if canned:
+            return {"status": "success", "response": canned, "thread_id": thread_id}
 
     t_start = time.monotonic()
     try:
@@ -258,7 +277,10 @@ async def get_thread_messages(
         raise HTTPException(status_code=503, detail="Agent not ready.")
 
     state = await backend.app.aget_state({"configurable": {"thread_id": thread_id}})
-    raw_messages = state.values.get("messages", []) if state and state.values else []
+    vals = state.values if (state and state.values) else {}
+    raw_messages = vals.get("messages", [])
+    # So the client can restore the resume-uploaded state accurately instead of assuming it.
+    resume_uploaded = bool(vals.get("resume_processed") or vals.get("resume_text"))
 
     out = []
     for m in raw_messages:
@@ -272,4 +294,4 @@ async def get_thread_messages(
         if content:
             out.append({"role": role, "content": content})
 
-    return {"thread_id": thread_id, "messages": out}
+    return {"thread_id": thread_id, "messages": out, "resume_uploaded": resume_uploaded}

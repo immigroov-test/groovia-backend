@@ -682,6 +682,19 @@ def save_profile_summary_if_empty(user_id: str, summary: str) -> None:
         logger.exception("Failed to save profile summary for %s", user_id)
 
 
+def get_profile_summary(user_id: str) -> Optional[str]:
+    """Return the user's stored resume/profile summary, or None. Used to tell whether a
+    logged-in user has already provided a resume (so the chat's upload gate can skip)."""
+    if not user_id:
+        return None
+    try:
+        res = _supabase.table("profiles").select("profile_summary").eq("id", user_id).limit(1).execute()
+        val = res.data[0].get("profile_summary") if res.data else None
+        return val or None
+    except Exception:
+        return None
+
+
 def get_mentor_email(mentor_id: str) -> tuple[Optional[str], Optional[str]]:
     """Return (display_name, email) for a mentor, joining through profiles.
     Used by admin endpoints to address transactional emails after status changes."""
