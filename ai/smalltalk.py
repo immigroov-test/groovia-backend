@@ -46,8 +46,6 @@ _CAPABILITIES = {
 
 _NUDGE = ("Quick note: every message uses AI credits, so please use Groovia for your "
           "career, job, and immigration questions, and ask them directly.")
-_EXAMPLE = ('For example: "I\'m a software engineer in India looking to move to the '
-            'Netherlands, where do I start?"')
 
 # Shown when someone types before uploading a resume/profile: asks them to upload first,
 # and carries the same credits + relevance reminder as the generic-term warning.
@@ -59,20 +57,16 @@ RESUME_GATE_REPLY = (
 )
 
 _REPLIES: dict[str, str] = {
-    "greeting": (f"Hi! 👋 I'm Groovia, your AI assistant for moving abroad and growing your "
-                 f"career. {_NUDGE} {_EXAMPLE}\n\nWhat can I help you with?"),
-    "farewell": ("Take care! 👋 Come back anytime with your immigration or career questions, "
-                 "I'll be right here."),
-    "thanks":   (f"You're welcome! 😊 {_NUDGE} Whenever you're ready, just ask your next question."),
-    "pleasantry": (f"I'm doing great and ready to help! 🙂 I'm Groovia, an AI assistant for "
-                   f"immigration and career guidance. {_NUDGE} {_EXAMPLE}"),
+    "greeting": (f"Hi! 👋 What would you like help with today? {_NUDGE}"),
+    "farewell": ("Take care! 👋 Come back anytime with your career, job or immigration questions."),
+    "thanks":   (f"You're welcome! 😊 Whenever you're ready, just ask your next question. {_NUDGE}"),
+    "pleasantry": (f"Doing well and ready to help! 🙂 What's your career, job or immigration question? {_NUDGE}"),
     "capabilities": ("Here's what I can help with:\n"
                      "• 🌍 Find countries that fit your skills, goals and budget\n"
                      "• 📋 Explain visas and the steps to move\n"
                      "• 🤝 Match you with mentors who've already made the move\n"
                      "• 💼 Plan your job search abroad\n\n"
-                     f"{_NUDGE} Ask away, e.g. \"I have 5 years in marketing, which countries "
-                     "should I consider?\""),
+                     f"{_NUDGE}"),
 }
 
 # Order matters: check the more specific sets (capabilities/thanks) before greetings.
