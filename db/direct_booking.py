@@ -327,16 +327,23 @@ def mentor_confirm_attendance(booking_id: str) -> None:
 
 _SERVICE_COLS = ("id, title, description, type, duration, category, set_price, "
                  "set_currency, platform_fee, is_active, is_ppp, status, tags")
+_SERVICE_COLS_NO_TAGS = _SERVICE_COLS.replace(", tags", "")
 
 
 def list_services(mentor_id: str, active_only: bool = False) -> list[dict]:
-    q = (_supabase.table("services")
-         .select(_SERVICE_COLS)
-         .eq("mentor_id", mentor_id))
-    if active_only:
-        # Public/bookable: active AND admin-approved only.
-        q = q.eq("is_active", True).eq("status", "approved")
-    return q.order("created_at").execute().data or []
+    def run(cols: str) -> list[dict]:
+        q = _supabase.table("services").select(cols).eq("mentor_id", mentor_id)
+        if active_only:
+            # Public/bookable: active AND admin-approved only.
+            q = q.eq("is_active", True).eq("status", "approved")
+        return q.order("created_at").execute().data or []
+    try:
+        return run(_SERVICE_COLS)
+    except Exception:
+        # The tags column may not be migrated yet - fall back so the booking widget
+        # and service lists keep working instead of failing on a missing column.
+        logger.warning("list_services: retrying without tags column")
+        return run(_SERVICE_COLS_NO_TAGS)
 
 
 def approve_pending_services(mentor_id: str) -> int:
@@ -425,7 +432,10 @@ def create_service(
             if t and t.lower() not in {c.lower() for c in clean}:
                 clean.append(t)
         if clean:
-            _supabase.table("services").update({"tags": clean[:MAX_SERVICE_TAGS]}).eq("id", service_id).execute()
+            try:
+                _supabase.table("services").update({"tags": clean[:MAX_SERVICE_TAGS]}).eq("id", service_id).execute()
+            except Exception:
+                logger.warning("create_service: could not save tags (column not migrated yet?)")
     return service_id
 
 
@@ -436,7 +446,10 @@ def set_service_tags(service_id: str, tags: list[str]) -> None:
         t = (t or "").strip()
         if t and t.lower() not in {c.lower() for c in clean}:
             clean.append(t)
-    _supabase.table("services").update({"tags": clean[:MAX_SERVICE_TAGS]}).eq("id", service_id).execute()
+    try:
+        _supabase.table("services").update({"tags": clean[:MAX_SERVICE_TAGS]}).eq("id", service_id).execute()
+    except Exception:
+        logger.warning("set_service_tags: could not save tags (column not migrated yet?)")
 
 
 def set_service_active(service_id: str, is_active: bool) -> None:
