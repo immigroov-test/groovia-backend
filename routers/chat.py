@@ -258,6 +258,18 @@ def claim_thread(thread_id: str, user: AuthUser = Depends(get_current_user)):
     return {"claimed": ok}
 
 
+@router.post("/chat/threads/{thread_id}/archive")
+async def archive_thread(thread_id: str, user: AuthUser = Depends(get_current_user)):
+    """Soft-delete a thread so it won't be auto-resumed on the next sign-in.
+    Called by the frontend when the user clears the chat."""
+    try:
+        uuid.UUID(thread_id)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid thread_id format.")
+    ok = await asyncio.to_thread(db.archive_thread, thread_id, user.id)
+    return {"archived": ok}
+
+
 @router.get("/chat/threads/{thread_id}/messages")
 async def get_thread_messages(
     thread_id: str,

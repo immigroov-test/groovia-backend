@@ -75,6 +75,24 @@ def list_user_threads(user_id: str, *, limit: int = 5) -> list[dict[str, Any]]:
     return res.data or []
 
 
+def archive_thread(thread_id: str, user_id: str) -> bool:
+    """Soft-delete a thread: hide it from history and from sign-in auto-resume. Owner-scoped
+    (only archives a row that belongs to this user). Used by 'Clear chat' so a cleared
+    conversation does not reappear after the user logs in again."""
+    try:
+        res = (
+            _supabase.table("chat_threads")
+            .update({"is_archived": True})
+            .eq("id", thread_id)
+            .eq("user_id", user_id)
+            .execute()
+        )
+        return bool(res.data)
+    except Exception:
+        logger.exception("Failed to archive chat_thread %s for %s", thread_id, user_id)
+        return False
+
+
 def get_thread_owner(thread_id: str) -> Optional[str]:
     """Return the user_id that owns this thread, or None if no row / guest thread."""
     res = (
