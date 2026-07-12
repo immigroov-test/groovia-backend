@@ -15,6 +15,7 @@ import db
 import ai.graph as backend  # accessed at request-time so we read the lifespan-initialized app
 from core.auth import AuthUser, get_current_user, get_current_user_optional
 from ai.graph import _text
+from ai.smalltalk import smalltalk_reply
 from core.rate_limit import limiter
 from schema import ChatResponse
 from ai.tools import parse_docx_to_text, parse_pdf_to_text
@@ -129,6 +130,15 @@ async def chat_handler(
         resume_text = (
             parse_pdf_to_text(file_bytes) if file_type == "pdf" else parse_docx_to_text(file_bytes)
         )
+
+    # Short-circuit pure small talk (hi / thanks / bye / "what can you do") so it never
+    # costs an LLM (Groq) call. Skipped when a resume is attached (that must reach the
+    # agent) and only fires for unambiguous social messages, so real questions and short
+    # answers ("yes"/"no") always go through.
+    if not resume_text:
+        canned = smalltalk_reply(message)
+        if canned:
+            return {"status": "success", "response": canned, "thread_id": thread_id}
 
     input_state = {"messages": [HumanMessage(content=message)]}
     if resume_text:
