@@ -236,7 +236,7 @@ class VerifyBody(BaseModel):
 
 
 @router.post("/verify")
-def verify(body: VerifyBody):
+def verify(body: VerifyBody, background_tasks: BackgroundTasks):
     order_id = body.order_id
     if not order_id and body.booking_id:
         payment = db.get_payment_by_booking(body.booking_id)
@@ -244,10 +244,21 @@ def verify(body: VerifyBody):
     if not order_id:
         raise HTTPException(status_code=404, detail="No order found for this booking")
     try:
-        return db.verify_order(order_id)
+        result = db.verify_order(order_id)
     except httpx.HTTPStatusError as e:
         logger.exception("verify_order failed order=%s", order_id)
         raise HTTPException(status_code=502, detail=f"Could not verify payment: {e}")
+    # BUG-024: this is the webhook-independent backstop path (fires whenever Razorpay's
+    # webhook hasn't landed - e.g. no public HTTPS URL registered, common in local/staging
+    # dev). Unlike _handle_webhook_event, this endpoint used to finalize the payment
+    # without ever sending the candidate their confirmation email. Only fire on a FRESH
+    # confirmation (status == "confirmed"), not "already"/"already_confirmed", so a
+    # repeated client-side poll never double-sends.
+    if result.get("status") == "confirmed":
+        local = db.get_payment_by_provider_order(order_id)
+        if local:
+            background_tasks.add_task(_send_confirmation_email, local["booking_id"])
+    return result
 
 
 # ── Checkout config + mock confirm ──────────────────────────────────────────────
