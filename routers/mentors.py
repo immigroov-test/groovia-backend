@@ -47,6 +47,17 @@ def supported_countries():
         raise HTTPException(status_code=500, detail="Failed to load supported countries")
 
 
+@router.get("/facets")
+def mentor_facets():
+    """Topic + country facets for the find-a-mentor dropdowns (dependent + auto-expanding).
+    Declared before /{slug} so it isn't captured by the slug route."""
+    try:
+        return db.list_mentor_facets()
+    except Exception:
+        logger.exception("mentor_facets failed")
+        raise HTTPException(status_code=500, detail="Failed to load mentor facets")
+
+
 @router.get("/{slug}")
 def get_mentor(slug: str):
     """Public mentor profile by slug."""

@@ -119,6 +119,37 @@ def list_supported_countries() -> list[str]:
     return sorted(codes)
 
 
+def list_mentor_facets() -> dict[str, Any]:
+    """Facets for the find-a-mentor dropdowns: the distinct expertise categories (topics)
+    and country codes across approved+active mentors, plus the countries available *per
+    category*. Lets the two dropdowns be dependent (pick a topic, only its countries show)
+    the way big marketplaces do faceted filtering, and both auto-expand as mentors join
+    from new topics/countries. One query, computed in memory."""
+    rows = (
+        _supabase.table("mentors")
+        .select("expertise_categories, expertise_country_codes")
+        .eq("status", "approved")
+        .eq("is_active", True)
+        .execute()
+        .data or []
+    )
+    categories: set[str] = set()
+    countries: set[str] = set()
+    by_category: dict[str, set[str]] = {}
+    for r in rows:
+        cats = [c for c in (r.get("expertise_categories") or []) if c]
+        ccs = [c for c in (r.get("expertise_country_codes") or []) if c]
+        countries.update(ccs)
+        for c in cats:
+            categories.add(c)
+            by_category.setdefault(c, set()).update(ccs)
+    return {
+        "categories": sorted(categories),
+        "countries": sorted(countries),
+        "by_category": {k: sorted(v) for k, v in by_category.items()},
+    }
+
+
 def mentors_available_for_country(country_code: str) -> bool:
     """Cheap existence check - does the mentors table have any approved+active mentor
     whose expertise covers this ISO-2 country code?"""
