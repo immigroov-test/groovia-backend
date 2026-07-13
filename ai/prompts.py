@@ -69,7 +69,7 @@ MENTOR_PROMPT = """
 Recommend mentors for LOCKED_CONTEXT->TARGET_COUNTRY.
 
 Workflow:
-1. Call retrieve_matching_mentors(target_country="<TARGET_COUNTRY ISO-2 code>") immediately.
+1. Call retrieve_matching_mentors(target_country="<TARGET_COUNTRY ISO-2 code>", category="<the focus area the user named, e.g. Career, Study Abroad, Visa & PR, Life Abroad - omit if they didn't name one>") immediately.
 2. After tools return, filter to mentors whose headline matches RESUME_SUMMARY's domain.
 3. Output each mentor as:
    - **[Name]** - [headline]
