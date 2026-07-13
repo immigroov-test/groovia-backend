@@ -20,33 +20,48 @@ def list_active_mentors(
     profile_keyword: Optional[str] = None,
     limit: int = 50,
 ) -> list[dict[str, Any]]:
-    """Public mentor browse query.
+    """Public mentor browse query. Also backs the agent's mentor lookup.
     All filters are AND-ed. country_code is an ISO 3166-1 alpha-2 code (e.g. 'NL')."""
-    q = (
-        _supabase.table("mentors")
-        .select("id, slug, display_name, headline, bio, photo_url, "
-                "expertise_country_codes, expertise_categories, languages, "
-                "professional_domains, booking_url, years_lived_experience, "
-                "avg_rating, review_count, currency, "
-                "services(set_price, set_currency, is_active, status)")
-        .eq("status", "approved")
-        .eq("is_active", True)
-        .limit(limit)
-    )
-    if country_code:
-        q = q.contains("expertise_country_codes", [country_code.upper()])
-    if category:
-        q = q.contains("expertise_categories", [category])
-    if profile_keyword:
-        # Match the mentor's name OR headline (commas would break PostgREST's or() syntax).
-        kw = profile_keyword.replace(",", " ").strip()
-        q = q.or_(f"display_name.ilike.%{kw}%,headline.ilike.%{kw}%")
-    rows = q.execute().data or []
-    # Collapse the mentor's bookable services into a single "starting from" price for
-    # the card (cheapest active + approved session), then drop the raw list.
+    base_cols = ("id, slug, display_name, headline, bio, photo_url, "
+                 "expertise_country_codes, expertise_categories, languages, "
+                 "professional_domains, booking_url, years_lived_experience, "
+                 "avg_rating, review_count, currency, ")
+
+    def build(svc_cols: str):
+        q = (
+            _supabase.table("mentors")
+            .select(base_cols + f"services({svc_cols})")
+            .eq("status", "approved")
+            .eq("is_active", True)
+            .limit(limit)
+        )
+        if country_code:
+            q = q.contains("expertise_country_codes", [country_code.upper()])
+        if category:
+            q = q.contains("expertise_categories", [category])
+        if profile_keyword:
+            # Match the mentor's name OR headline (commas would break PostgREST's or() syntax).
+            kw = profile_keyword.replace(",", " ").strip()
+            q = q.or_(f"display_name.ilike.%{kw}%,headline.ilike.%{kw}%")
+        return q.execute().data or []
+
+    # services.status isn't present in every environment; fall back without it so the
+    # query (and the agent's mentor lookup) never crashes on a missing column.
+    try:
+        rows = build("set_price, set_currency, is_active, status")
+        has_status = True
+    except Exception:
+        logger.warning("list_active_mentors: services.status missing; retrying without it")
+        rows = build("set_price, set_currency, is_active")
+        has_status = False
+
+    # Collapse the mentor's bookable services into a single "starting from" price for the
+    # card (cheapest active, admin-approved when status exists), then drop the raw list.
     for r in rows:
         svcs = [s for s in (r.pop("services", None) or [])
-                if s.get("is_active") and s.get("status") == "approved" and s.get("set_price") is not None]
+                if s.get("is_active")
+                and (not has_status or s.get("status") == "approved")
+                and s.get("set_price") is not None]
         if svcs:
             cheapest = min(svcs, key=lambda s: float(s["set_price"]))
             r["min_price"] = float(cheapest["set_price"])
