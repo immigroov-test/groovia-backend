@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import Any, Optional
 from urllib.parse import urlparse
 
@@ -14,6 +15,26 @@ from core.permissions import require_mentor
 logger = logging.getLogger("immigroov.routers.mentor")
 
 router = APIRouter(prefix="/mentor", tags=["mentor"])
+
+
+# Letters (incl. accented), spaces, hyphens, apostrophes, periods, commas - covers
+# real-world city names ("Winston-Salem", "Xi'an", "Washington, D.C.", "Düsseldorf")
+# while rejecting stray digits/symbols (BUG-004).
+_CITY_ALLOWED_RE = re.compile(r"^[A-Za-zÀ-ɏḀ-ỿ\s'.,-]+$")
+_CITY_HAS_LETTER_RE = re.compile(r"[A-Za-zÀ-ɏḀ-ỿ]")
+
+
+def _validate_city(v: Optional[str]) -> Optional[str]:
+    if v is None:
+        return v
+    v = v.strip()
+    if not v:
+        return None
+    if len(v) > 100:
+        raise ValueError("City must be 100 characters or fewer")
+    if not _CITY_ALLOWED_RE.match(v) or not _CITY_HAS_LETTER_RE.search(v):
+        raise ValueError("City must contain only letters, spaces, hyphens, apostrophes, periods, and commas")
+    return v
 
 
 _SOCIAL_DOMAINS: dict[str, list[str]] = {
@@ -120,6 +141,11 @@ class MentorSignupBody(BaseModel):
     services: list[ServiceDraft] = []
     booking_rules: Optional[BookingRules] = None
     date_overrides: list[DateOverrideDraft] = []
+
+    @field_validator("city")
+    @classmethod
+    def validate_city(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_city(v)
 
     @field_validator("years_lived_experience")
     @classmethod
@@ -245,6 +271,11 @@ class ProfileUpdateBody(BaseModel):
     professional_domains: Optional[list[str]] = None
     hourly_rate: Optional[float] = None
     currency: Optional[str] = None
+
+    @field_validator("city")
+    @classmethod
+    def validate_city(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_city(v)
 
     @field_validator("years_lived_experience")
     @classmethod
