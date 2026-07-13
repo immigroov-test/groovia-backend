@@ -1661,6 +1661,118 @@ INSERT INTO mentors (
     ARRAY['en'],
     ARRAY['Non-profit'],
     'grace-adeyemi', 7
+  ),
+  -- More varied mentors so the list isn't all tech/business: fine arts, performing arts,
+  -- culinary, architecture, film, etc., and a wider spread of countries.
+  (
+    'sofia-ricci',
+    'Sofia Ricci',
+    'Visual artist building a studio practice in Italy',
+    'Grants, artist residencies and the self-employment visa route for painters and sculptors moving to Italy.',
+    ARRAY['IT']::CHAR(2)[],
+    ARRAY['life_settling', 'study_abroad'],
+    ARRAY['en', 'it'],
+    ARRAY['Fine Arts'],
+    'sofia-ricci', 7
+  ),
+  (
+    'kenji-mori',
+    'Kenji Mori',
+    'Musician navigating the Japan artist visa',
+    'Performing and teaching music in Japan: the artist and entertainer visa, auditions, and building a network.',
+    ARRAY['JP']::CHAR(2)[],
+    ARRAY['job_career', 'visa_pr'],
+    ARRAY['en', 'ja'],
+    ARRAY['Performing Arts'],
+    'kenji-mori', 6
+  ),
+  (
+    'amelie-dubois',
+    'Amelie Dubois',
+    'Chef who moved to France',
+    'Restaurant kitchens, culinary school, and the talent passport for chefs relocating to France.',
+    ARRAY['FR']::CHAR(2)[],
+    ARRAY['job_career', 'life_settling'],
+    ARRAY['en', 'fr'],
+    ARRAY['Culinary Arts'],
+    'amelie-dubois', 8
+  ),
+  (
+    'wei-lim',
+    'Wei Lim',
+    'Architect practising in Singapore',
+    'Getting architecture qualifications recognised, the Employment Pass, and firm culture in Singapore.',
+    ARRAY['SG']::CHAR(2)[],
+    ARRAY['job_career', 'visa_pr'],
+    ARRAY['en', 'zh'],
+    ARRAY['Architecture'],
+    'wei-lim', 9
+  ),
+  (
+    'giulia-conti',
+    'Giulia Conti',
+    'Fashion designer in Milan',
+    'Breaking into Italian fashion houses, portfolio expectations, and the self-employment route for designers.',
+    ARRAY['IT']::CHAR(2)[],
+    ARRAY['job_career'],
+    ARRAY['en', 'it'],
+    ARRAY['Fashion Design'],
+    'giulia-conti', 5
+  ),
+  (
+    'liam-walsh',
+    'Liam Walsh',
+    'Film professional in the New Zealand screen industry',
+    'Working in NZ film and screen, the Accredited Employer Work Visa, and life on set in Wellington.',
+    ARRAY['NZ']::CHAR(2)[],
+    ARRAY['job_career', 'visa_pr'],
+    ARRAY['en'],
+    ARRAY['Film & Screen'],
+    'liam-walsh', 6
+  ),
+  (
+    'omar-haddad',
+    'Omar Haddad',
+    'Management consultant in Dubai',
+    'Consulting roles in the UAE, the Golden Visa, tax-free salary realities, and settling in Dubai.',
+    ARRAY['AE']::CHAR(2)[],
+    ARRAY['job_career', 'life_settling'],
+    ARRAY['en', 'ar'],
+    ARRAY['Consulting'],
+    'omar-haddad', 7
+  ),
+  (
+    'niamh-byrne',
+    'Niamh Byrne',
+    'Psychotherapist supporting newcomers in Ireland',
+    'Registering as a therapist in Ireland, the Critical Skills route for health professionals, and settling in Dublin.',
+    ARRAY['IE']::CHAR(2)[],
+    ARRAY['job_career', 'life_settling'],
+    ARRAY['en'],
+    ARRAY['Healthcare'],
+    'niamh-byrne', 6
+  ),
+  (
+    'mads-nielsen',
+    'Mads Nielsen',
+    'Senior auditor in Copenhagen',
+    'Finance and audit roles in Denmark, the Pay Limit scheme, and the Danish work-life balance.',
+    ARRAY['DK']::CHAR(2)[],
+    ARRAY['job_career', 'visa_pr'],
+    ARRAY['en', 'da'],
+    ARRAY['Finance & Banking'],
+    'mads-nielsen', 8
+  ),
+  (
+    'grace-tan',
+    'Grace Tan',
+    'Dance teacher and choreographer, moved to Australia',
+    'Working in dance and performing arts in Australia, the skilled visa for artists, and studio life in Melbourne.',
+    ARRAY['AU']::CHAR(2)[],
+    ARRAY['job_career', 'study_abroad'],
+    ARRAY['en'],
+    ARRAY['Fine Arts', 'Performing Arts'],
+    'grace-tan', 5
   )
 ON CONFLICT (slug) DO NOTHING;
 
@@ -1704,6 +1816,13 @@ UPDATE mentors SET
          WHEN 'US' = ANY(expertise_country_codes) THEN 'US'
          WHEN 'AU' = ANY(expertise_country_codes) THEN 'AU'
          WHEN 'FR' = ANY(expertise_country_codes) THEN 'FR'
+         WHEN 'IT' = ANY(expertise_country_codes) THEN 'IT'
+         WHEN 'JP' = ANY(expertise_country_codes) THEN 'JP'
+         WHEN 'SG' = ANY(expertise_country_codes) THEN 'SG'
+         WHEN 'NZ' = ANY(expertise_country_codes) THEN 'NZ'
+         WHEN 'AE' = ANY(expertise_country_codes) THEN 'AE'
+         WHEN 'IE' = ANY(expertise_country_codes) THEN 'IE'
+         WHEN 'DK' = ANY(expertise_country_codes) THEN 'DK'
          ELSE 'NL' END),
   city = COALESCE(city,
     CASE WHEN 'DE' = ANY(expertise_country_codes) THEN 'Berlin'
@@ -1712,6 +1831,13 @@ UPDATE mentors SET
          WHEN 'US' = ANY(expertise_country_codes) THEN 'San Francisco'
          WHEN 'AU' = ANY(expertise_country_codes) THEN 'Melbourne'
          WHEN 'FR' = ANY(expertise_country_codes) THEN 'Paris'
+         WHEN 'IT' = ANY(expertise_country_codes) THEN 'Rome'
+         WHEN 'JP' = ANY(expertise_country_codes) THEN 'Tokyo'
+         WHEN 'SG' = ANY(expertise_country_codes) THEN 'Singapore'
+         WHEN 'NZ' = ANY(expertise_country_codes) THEN 'Wellington'
+         WHEN 'AE' = ANY(expertise_country_codes) THEN 'Dubai'
+         WHEN 'IE' = ANY(expertise_country_codes) THEN 'Dublin'
+         WHEN 'DK' = ANY(expertise_country_codes) THEN 'Copenhagen'
          ELSE 'Amsterdam' END),
   phone = COALESCE(phone,
     CASE WHEN 'DE' = ANY(expertise_country_codes) THEN '+49 151 23456789'
@@ -1720,6 +1846,13 @@ UPDATE mentors SET
          WHEN 'US' = ANY(expertise_country_codes) THEN '+1 415 555 0186'
          WHEN 'AU' = ANY(expertise_country_codes) THEN '+61 412 345 678'
          WHEN 'FR' = ANY(expertise_country_codes) THEN '+33 6 12 34 56 78'
+         WHEN 'IT' = ANY(expertise_country_codes) THEN '+39 340 123 4567'
+         WHEN 'JP' = ANY(expertise_country_codes) THEN '+81 90 1234 5678'
+         WHEN 'SG' = ANY(expertise_country_codes) THEN '+65 8123 4567'
+         WHEN 'NZ' = ANY(expertise_country_codes) THEN '+64 21 123 4567'
+         WHEN 'AE' = ANY(expertise_country_codes) THEN '+971 50 123 4567'
+         WHEN 'IE' = ANY(expertise_country_codes) THEN '+353 87 123 4567'
+         WHEN 'DK' = ANY(expertise_country_codes) THEN '+45 20 12 34 56'
          ELSE '+31 6 12345678' END),
   social_links = CASE WHEN social_links = '[]'::jsonb
     THEN jsonb_build_array(jsonb_build_object('type', 'linkedin', 'url', 'https://www.linkedin.com/in/' || slug))
