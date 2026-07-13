@@ -1538,8 +1538,149 @@ INSERT INTO mentors (
     ARRAY['en', 'fr', 'de'],
     ARRAY['Consulting'],
     'sophie-laurent', 10
+  ),
+  -- Extra seed mentors so every one of the 20 canonical professional fields
+  -- (see MentorOnboardingForm DOMAIN_OPTIONS) has at least one mentor to browse/book.
+  (
+    'nina-volkova',
+    'Nina Volkova',
+    'Product Designer - Ukraine to Berlin',
+    'UX/UI portfolio for the EU market, design interviews, and switching from a freelance to an employed visa.',
+    ARRAY['DE']::CHAR(2)[],
+    ARRAY['job_career'],
+    ARRAY['en', 'de', 'uk'],
+    ARRAY['Design (UX/UI)'],
+    'nina-volkova', 5
+  ),
+  (
+    'carlos-mendez',
+    'Carlos Mendez',
+    'Growth Marketer - Mexico to Canada',
+    'Breaking into Canadian marketing roles, LinkedIn positioning, and Express Entry for marketers.',
+    ARRAY['CA']::CHAR(2)[],
+    ARRAY['job_career', 'visa_pr'],
+    ARRAY['en', 'es'],
+    ARRAY['Marketing'],
+    'carlos-mendez', 4
+  ),
+  (
+    'tom-wright',
+    'Tom Wright',
+    'Enterprise Sales - settling in the Netherlands',
+    'B2B sales roles in NL, comp structures, and the 30% ruling for expats.',
+    ARRAY['NL']::CHAR(2)[],
+    ARRAY['job_career'],
+    ARRAY['en', 'nl'],
+    ARRAY['Sales'],
+    'tom-wright', 6
+  ),
+  (
+    'amara-okeke',
+    'Amara Okeke',
+    'Immigration paralegal - the UK visa system',
+    'How the paperwork side of UK work and family visas works, document prep, and avoiding refusals. General info, not legal advice.',
+    ARRAY['GB']::CHAR(2)[],
+    ARRAY['visa_pr'],
+    ARRAY['en'],
+    ARRAY['Legal'],
+    'amara-okeke', 7
+  ),
+  (
+    'mei-tanaka',
+    'Mei Tanaka',
+    'International teacher - Japan to Australia',
+    'Getting teaching qualifications recognised in AU, school hiring, and the skilled visa for educators.',
+    ARRAY['AU']::CHAR(2)[],
+    ARRAY['job_career', 'visa_pr'],
+    ARRAY['en', 'ja'],
+    ARRAY['Education'],
+    'mei-tanaka', 5
+  ),
+  (
+    'lena-fischer',
+    'Lena Fischer',
+    'Tech Recruiter in Berlin',
+    'How hiring managers screen non-EU candidates, and what a strong application looks like.',
+    ARRAY['DE']::CHAR(2)[],
+    ARRAY['job_career'],
+    ARRAY['en', 'de'],
+    ARRAY['HR & Recruiting'],
+    'lena-fischer', 6
+  ),
+  (
+    'raj-menon',
+    'Raj Menon',
+    'Manufacturing engineer - India to Germany',
+    'Automotive and industrial roles in Germany, the Blue Card for engineers, and workplace German.',
+    ARRAY['DE']::CHAR(2)[],
+    ARRAY['job_career', 'visa_pr'],
+    ARRAY['en', 'hi', 'de'],
+    ARRAY['Manufacturing'],
+    'raj-menon', 8
+  ),
+  (
+    'olivia-brown',
+    'Olivia Brown',
+    'Relocation and housing - settling in Toronto',
+    'Renting vs buying as a newcomer, building credit history, and neighbourhoods for families.',
+    ARRAY['CA']::CHAR(2)[],
+    ARRAY['life_settling'],
+    ARRAY['en'],
+    ARRAY['Real Estate'],
+    'olivia-brown', 9
+  ),
+  (
+    'diego-santos',
+    'Diego Santos',
+    'Journalist - Brazil to France',
+    'Freelance and staff media roles in France, the visa route, and building a European portfolio.',
+    ARRAY['FR']::CHAR(2)[],
+    ARRAY['job_career', 'visa_pr'],
+    ARRAY['en', 'fr', 'pt'],
+    ARRAY['Media & Journalism'],
+    'diego-santos', 4
+  ),
+  (
+    'amir-hassan',
+    'Amir Hassan',
+    'Policy analyst - Egypt to the UK',
+    'Public-sector and think-tank roles, and the Skilled Worker route for policy professionals.',
+    ARRAY['GB']::CHAR(2)[],
+    ARRAY['job_career', 'visa_pr'],
+    ARRAY['en', 'ar'],
+    ARRAY['Government & Policy'],
+    'amir-hassan', 6
+  ),
+  (
+    'grace-adeyemi',
+    'Grace Adeyemi',
+    'NGO program manager - Nigeria to the US',
+    'International development roles, work visas for non-profit leaders, and life in DC.',
+    ARRAY['US']::CHAR(2)[],
+    ARRAY['job_career', 'visa_pr'],
+    ARRAY['en'],
+    ARRAY['Non-profit'],
+    'grace-adeyemi', 7
   )
 ON CONFLICT (slug) DO NOTHING;
+
+-- Remap legacy professional_domains to the 20 canonical field names used by the mentor
+-- onboarding form, so browse filters and the field list stay consistent. Runs for both a
+-- fresh setup (the 14 original rows above still hold legacy values) and an already-seeded
+-- DB. Idempotent: once every value is canonical the WHERE clause matches nothing.
+UPDATE mentors SET professional_domains = ARRAY(
+  SELECT DISTINCT CASE elem
+    WHEN 'IT'          THEN 'Software Engineering'
+    WHEN 'Engineering' THEN 'Software Engineering'
+    WHEN 'AI/ML'       THEN 'Data Science & AI'
+    WHEN 'Product'     THEN 'Product Management'
+    WHEN 'Finance'     THEN 'Finance & Banking'
+    WHEN 'Startups'    THEN 'Entrepreneurship'
+    ELSE elem
+  END
+  FROM unnest(professional_domains) AS elem
+)
+WHERE professional_domains && ARRAY['IT', 'Engineering', 'AI/ML', 'Product', 'Finance', 'Startups'];
 
 -- Give seed mentors a contact email so booking-confirmation emails to mentors work in
 -- testing. Uses Gmail plus-addressing so all mail still lands in your inbox, but the
@@ -1562,6 +1703,7 @@ UPDATE mentors SET
          WHEN 'GB' = ANY(expertise_country_codes) THEN 'GB'
          WHEN 'US' = ANY(expertise_country_codes) THEN 'US'
          WHEN 'AU' = ANY(expertise_country_codes) THEN 'AU'
+         WHEN 'FR' = ANY(expertise_country_codes) THEN 'FR'
          ELSE 'NL' END),
   city = COALESCE(city,
     CASE WHEN 'DE' = ANY(expertise_country_codes) THEN 'Berlin'
@@ -1569,6 +1711,7 @@ UPDATE mentors SET
          WHEN 'GB' = ANY(expertise_country_codes) THEN 'London'
          WHEN 'US' = ANY(expertise_country_codes) THEN 'San Francisco'
          WHEN 'AU' = ANY(expertise_country_codes) THEN 'Melbourne'
+         WHEN 'FR' = ANY(expertise_country_codes) THEN 'Paris'
          ELSE 'Amsterdam' END),
   phone = COALESCE(phone,
     CASE WHEN 'DE' = ANY(expertise_country_codes) THEN '+49 151 23456789'
@@ -1576,6 +1719,7 @@ UPDATE mentors SET
          WHEN 'GB' = ANY(expertise_country_codes) THEN '+44 7700 900123'
          WHEN 'US' = ANY(expertise_country_codes) THEN '+1 415 555 0186'
          WHEN 'AU' = ANY(expertise_country_codes) THEN '+61 412 345 678'
+         WHEN 'FR' = ANY(expertise_country_codes) THEN '+33 6 12 34 56 78'
          ELSE '+31 6 12345678' END),
   social_links = CASE WHEN social_links = '[]'::jsonb
     THEN jsonb_build_array(jsonb_build_object('type', 'linkedin', 'url', 'https://www.linkedin.com/in/' || slug))

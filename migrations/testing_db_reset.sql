@@ -12,7 +12,7 @@
 --   Net effect: every real email used during testing (mentee OR mentor) is freed.
 --
 -- What this PRESERVES (never deleted):
---   - The 14 dummy/seed mentors (profile_id IS NULL) with their services,
+--   - The dummy/seed mentors (profile_id IS NULL) with their services,
 --     availability and prices - the fixed test fixtures
 --   - All admins and platform_settings
 --
