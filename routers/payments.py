@@ -9,7 +9,7 @@ from pydantic import BaseModel, field_validator
 
 import config
 import db
-from core.auth import AuthUser, get_current_user_optional
+from core.auth import AuthUser, get_current_user
 
 logger = logging.getLogger("immigroov.routers.payments")
 
@@ -54,13 +54,14 @@ class ReserveBody(BaseModel):
 
 
 @router.post("/reserve")
-def reserve(body: ReserveBody, user: Optional[AuthUser] = Depends(get_current_user_optional)):
+def reserve(body: ReserveBody, user: AuthUser = Depends(get_current_user)):
     """Consume a binding price quote into a 10-minute payment-hold booking.
-    Works for both authenticated users and guests. The caller must follow up with
+    BUG-025: requires a real account - guest booking was removed, so every booking
+    is attached to a candidate_id from here on. The caller must follow up with
     /payments/razorpay/create-order (or, when payments are disabled,
     /payments/confirm-mock) before the hold expires."""
     answers_json = [a.model_dump() for a in body.answers]
-    candidate_id = user.id if user else None
+    candidate_id = user.id
     try:
         result = db.reserve_booking(
             quote_id=body.quote_id,

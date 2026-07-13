@@ -8,7 +8,7 @@ from pydantic import BaseModel, EmailStr, field_validator
 
 import config
 import db
-from core.auth import AuthUser, get_current_user, get_current_user_optional
+from core.auth import AuthUser, get_current_user
 from services import mailer
 
 logger = logging.getLogger("immigroov.routers.booking")
@@ -143,9 +143,12 @@ class BookSessionBody(BaseModel):
 def book_session(
     body: BookSessionBody,
     background_tasks: BackgroundTasks,
-    user: Optional[AuthUser] = Depends(get_current_user_optional),
+    user: AuthUser = Depends(get_current_user),
 ):
-    """Book a direct session slot. Works for both authenticated users and guests."""
+    """Book a direct session slot. BUG-025: requires a real account - this legacy
+    endpoint (superseded by the quote/reserve/confirm flow in routers/payments.py,
+    but still reachable directly) previously allowed guest bookings via
+    get_current_user_optional; closed to keep the no-guest-checkout rule airtight."""
     # Idempotency: a retried/duplicated request (e.g. after a dropped network response)
     # returns the original booking instead of creating a second one.
     if body.idempotency_key:
@@ -154,7 +157,7 @@ def book_session(
             return {"booking_id": existing["id"], "status": existing.get("status", "confirmed")}
 
     answers_json = [a.model_dump() for a in body.answers]
-    candidate_id = user.id if user else None
+    candidate_id = user.id
     try:
         result = db.book_session(
             mentor_id=body.mentor_id,
