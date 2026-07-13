@@ -36,6 +36,17 @@ def list_mentors(
         raise HTTPException(status_code=500, detail="Failed to load mentors")
 
 
+@router.get("/countries")
+def supported_countries():
+    """ISO-2 country codes we currently have mentors in (for the 'find a mentor' dropdown).
+    Declared before /{slug} so it isn't captured by the slug route."""
+    try:
+        return {"countries": db.list_supported_countries()}
+    except Exception:
+        logger.exception("supported_countries failed")
+        raise HTTPException(status_code=500, detail="Failed to load supported countries")
+
+
 @router.get("/{slug}")
 def get_mentor(slug: str):
     """Public mentor profile by slug."""

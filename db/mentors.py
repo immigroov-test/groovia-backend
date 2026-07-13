@@ -84,6 +84,26 @@ def list_mentors_grouped_by_country(limit_per_country: int = 2) -> dict[str, lis
     return grouped
 
 
+def list_supported_countries() -> list[str]:
+    """Distinct ISO-2 country codes that have at least one approved, active mentor.
+    Powers the 'find a mentor' country dropdown so it only lists countries we actually
+    cover; it auto-expands as mentors join from new countries."""
+    rows = (
+        _supabase.table("mentors")
+        .select("expertise_country_codes")
+        .eq("status", "approved")
+        .eq("is_active", True)
+        .execute()
+        .data or []
+    )
+    codes: set[str] = set()
+    for r in rows:
+        for code in (r.get("expertise_country_codes") or []):
+            if code:
+                codes.add(code)
+    return sorted(codes)
+
+
 def mentors_available_for_country(country_code: str) -> bool:
     """Cheap existence check - does the mentors table have any approved+active mentor
     whose expertise covers this ISO-2 country code?"""
