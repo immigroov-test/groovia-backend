@@ -22,7 +22,7 @@ def msg_no_mentors_for_country(country_display: str) -> str:
 
 # Frontend INTENT_OPTIONS messages. Keep in sync with groovia-frontend/lib/content.ts.
 # Backend uses these for deterministic intent routing.
-INTENT_REPORT_PHRASE = "i want to generate a career report."
+INTENT_REPORT_PHRASE = "i want to generate a career pathway."
 INTENT_MENTOR_PHRASE = "i want to find a mentor."
 INTENT_QNA_PHRASE    = "i just want to ask some questions."
 

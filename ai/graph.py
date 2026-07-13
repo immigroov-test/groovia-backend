@@ -223,7 +223,7 @@ _TRACK_STUDY_RE = re.compile(r"\bstud(y|ies|ying)\b", re.IGNORECASE)
 # (The report flow is matched separately by the word "report".)
 _MENTOR_REQ_RE = re.compile(r"\bmentors?\b", re.IGNORECASE)
 _REPORT_REQ_RE = re.compile(
-    r"\b(?:generate|create|give|build|make|need|want|regenerate|new|another)\b(?:\s+\w+){0,3}?\s+(?:career\s+)?reports?\b",
+    r"\b(?:generate|create|give|build|make|need|want|regenerate|new|another)\b(?:\s+\w+){0,3}?\s+(?:career\s+)?(?:reports?|pathways?)\b",
     re.IGNORECASE,
 )
 
