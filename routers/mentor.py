@@ -200,6 +200,11 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
         smart_pricing=body.smart_pricing,
     )
     mentor_id = result["id"]
+    # BUG-012: these inserts used to fail silently (logged server-side only), so a
+    # transient error left a mentor with a "successful" signup but an empty
+    # Availability/Sessions tab and no idea why. Collect what failed and surface it
+    # in the response instead of pretending everything saved.
+    warnings: list[str] = []
     # Weekly availability -> weekly_availability (the table the booking engine reads).
     for slot in body.weekly_availability:
         try:
@@ -207,6 +212,7 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
                                        start_time=slot.start_time, end_time=slot.end_time)
         except Exception:
             logger.exception("Weekly availability insert failed during signup for mentor %s", mentor_id)
+            warnings.append(f"Could not save your {slot.weekday} availability. Please re-add it from your dashboard.")
     # Session types the mentee can book.
     for svc in body.services:
         try:
@@ -217,6 +223,7 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
                               tags=svc.tags)
         except Exception:
             logger.exception("Service create failed during signup for mentor %s", mentor_id)
+            warnings.append(f"Could not save your session type \"{svc.title}\". Please re-add it from your dashboard.")
     # Booking rules (mandatory) -> stored on the mentor row via avail_set_rules.
     if body.booking_rules:
         try:
@@ -228,6 +235,7 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
             )
         except Exception:
             logger.exception("Booking rules save failed during signup for mentor %s", mentor_id)
+            warnings.append("Could not save your booking rules. Please re-set them from your dashboard.")
     # Date overrides (optional) -> specific_availability via block/override RPCs.
     for ov in body.date_overrides:
         try:
@@ -237,6 +245,9 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
                 db.override_date(mentor_id=mentor_id, slot_date=ov.slot_date, start_time=ov.start_time, end_time=ov.end_time)
         except Exception:
             logger.exception("Date override save failed during signup for mentor %s", mentor_id)
+            warnings.append(f"Could not save your date override for {ov.slot_date}. Please re-add it from your dashboard.")
+    if warnings:
+        result["warnings"] = warnings
     _, mentor_email = db.get_mentor_email(mentor_id)
     if mentor_email:
         background_tasks.add_task(
