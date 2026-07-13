@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import Any, Optional
 from urllib.parse import urlparse
 
@@ -14,6 +15,26 @@ from core.permissions import require_mentor
 logger = logging.getLogger("immigroov.routers.mentor")
 
 router = APIRouter(prefix="/mentor", tags=["mentor"])
+
+
+# Letters (incl. accented), spaces, hyphens, apostrophes, periods, commas - covers
+# real-world city names ("Winston-Salem", "Xi'an", "Washington, D.C.", "Düsseldorf")
+# while rejecting stray digits/symbols (BUG-004).
+_CITY_ALLOWED_RE = re.compile(r"^[A-Za-zÀ-ɏḀ-ỿ\s'.,-]+$")
+_CITY_HAS_LETTER_RE = re.compile(r"[A-Za-zÀ-ɏḀ-ỿ]")
+
+
+def _validate_city(v: Optional[str]) -> Optional[str]:
+    if v is None:
+        return v
+    v = v.strip()
+    if not v:
+        return None
+    if len(v) > 100:
+        raise ValueError("City must be 100 characters or fewer")
+    if not _CITY_ALLOWED_RE.match(v) or not _CITY_HAS_LETTER_RE.search(v):
+        raise ValueError("City must contain only letters, spaces, hyphens, apostrophes, periods, and commas")
+    return v
 
 
 _SOCIAL_DOMAINS: dict[str, list[str]] = {
@@ -121,6 +142,11 @@ class MentorSignupBody(BaseModel):
     booking_rules: Optional[BookingRules] = None
     date_overrides: list[DateOverrideDraft] = []
 
+    @field_validator("city")
+    @classmethod
+    def validate_city(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_city(v)
+
     @field_validator("years_lived_experience")
     @classmethod
     def validate_years(cls, v: Optional[int]) -> Optional[int]:
@@ -174,6 +200,11 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
         smart_pricing=body.smart_pricing,
     )
     mentor_id = result["id"]
+    # BUG-012: these inserts used to fail silently (logged server-side only), so a
+    # transient error left a mentor with a "successful" signup but an empty
+    # Availability/Sessions tab and no idea why. Collect what failed and surface it
+    # in the response instead of pretending everything saved.
+    warnings: list[str] = []
     # Weekly availability -> weekly_availability (the table the booking engine reads).
     for slot in body.weekly_availability:
         try:
@@ -181,6 +212,7 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
                                        start_time=slot.start_time, end_time=slot.end_time)
         except Exception:
             logger.exception("Weekly availability insert failed during signup for mentor %s", mentor_id)
+            warnings.append(f"Could not save your {slot.weekday} availability. Please re-add it from your dashboard.")
     # Session types the mentee can book.
     for svc in body.services:
         try:
@@ -191,6 +223,7 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
                               tags=svc.tags)
         except Exception:
             logger.exception("Service create failed during signup for mentor %s", mentor_id)
+            warnings.append(f"Could not save your session type \"{svc.title}\". Please re-add it from your dashboard.")
     # Booking rules (mandatory) -> stored on the mentor row via avail_set_rules.
     if body.booking_rules:
         try:
@@ -202,6 +235,7 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
             )
         except Exception:
             logger.exception("Booking rules save failed during signup for mentor %s", mentor_id)
+            warnings.append("Could not save your booking rules. Please re-set them from your dashboard.")
     # Date overrides (optional) -> specific_availability via block/override RPCs.
     for ov in body.date_overrides:
         try:
@@ -211,6 +245,9 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
                 db.override_date(mentor_id=mentor_id, slot_date=ov.slot_date, start_time=ov.start_time, end_time=ov.end_time)
         except Exception:
             logger.exception("Date override save failed during signup for mentor %s", mentor_id)
+            warnings.append(f"Could not save your date override for {ov.slot_date}. Please re-add it from your dashboard.")
+    if warnings:
+        result["warnings"] = warnings
     _, mentor_email = db.get_mentor_email(mentor_id)
     if mentor_email:
         background_tasks.add_task(
@@ -245,6 +282,11 @@ class ProfileUpdateBody(BaseModel):
     professional_domains: Optional[list[str]] = None
     hourly_rate: Optional[float] = None
     currency: Optional[str] = None
+
+    @field_validator("city")
+    @classmethod
+    def validate_city(cls, v: Optional[str]) -> Optional[str]:
+        return _validate_city(v)
 
     @field_validator("years_lived_experience")
     @classmethod
