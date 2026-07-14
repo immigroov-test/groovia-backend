@@ -660,8 +660,8 @@ def _notify_parties(booking_id: str, event: str):
             send(c_email, "no_show_reported", c_name, m_name)
             send(m_email, "no_show_reported", m_name, c_name)
 
-        # Admin/ops copy on the money-relevant lifecycle events.
-        if event in ("cancelled", "rescheduled") and config.ADMIN_EMAIL:
+        # Admin/ops copy on the money-relevant lifecycle events (cancel, reschedule, no-show).
+        if event in ("cancelled", "rescheduled", "no_show") and config.ADMIN_EMAIL:
             mailer.send_transactional(config.ADMIN_EMAIL, "booking_admin_notice", {
                 "event": event,
                 "mentor_name": info.get("mentor_name") or "",

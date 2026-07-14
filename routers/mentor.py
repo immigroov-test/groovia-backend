@@ -259,6 +259,19 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
                 "availability_url": config.FRONTEND_URL + "/mentor/availability",
             },
         )
+    # Notify the admin(s) that a new application is waiting in the review queue.
+    if config.ADMIN_EMAIL:
+        background_tasks.add_task(
+            mailer.send_transactional,
+            config.ADMIN_EMAIL,
+            "admin_mentor_application",
+            {
+                "display_name": display_name,
+                "mentor_email": mentor_email or "",
+                "headline": (body.headline or "").strip(),
+                "review_url": config.FRONTEND_URL + "/admin",
+            },
+        )
     return result
 
 

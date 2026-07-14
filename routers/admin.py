@@ -179,11 +179,20 @@ def suspend_mentor(mentor_id: str, background_tasks: BackgroundTasks, user: Auth
 
 
 @router.post("/mentors/{mentor_id}/reinstate")
-def reinstate_mentor(mentor_id: str, user: AuthUser = Depends(require_admin)):
+def reinstate_mentor(mentor_id: str, background_tasks: BackgroundTasks, user: AuthUser = Depends(require_admin)):
     try:
-        return db.set_mentor_status(mentor_id, "approved")
+        display_name, mentor_email = db.get_mentor_email(mentor_id)
+        result = db.set_mentor_status(mentor_id, "approved")
     except ValueError:
         raise HTTPException(status_code=404, detail="Mentor not found")
+    if mentor_email:
+        background_tasks.add_task(
+            mailer.send_transactional,
+            mentor_email,
+            "mentor_reinstated",
+            {"display_name": display_name or "", "mentor_hub_url": config.FRONTEND_URL + "/mentor"},
+        )
+    return result
 
 
 # ── Booking oversight + no-show ops ─────────────────────────────────────────

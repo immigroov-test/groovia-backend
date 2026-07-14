@@ -367,6 +367,38 @@ def _mentor_application_received(d: dict) -> tuple[str, str]:
     return "We've received your Immigroov mentor application", _base(body)
 
 
+def _mentor_reinstated(d: dict) -> tuple[str, str]:
+    name = _e(d.get("display_name", ""))
+    hub = d.get("mentor_hub_url", config.FRONTEND_URL + "/mentor")
+    body = (
+        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Your mentor account is active again</h1>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {name},</p>'
+        '<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
+        "Good news - your Immigroov mentor account has been reinstated. Your profile is visible to "
+        "candidates again and you can take new bookings."
+        "</p>"
+        + _btn(hub, "Go to Mentor Hub")
+    )
+    return "Your Immigroov mentor account is active again", _base(body)
+
+
+def _admin_mentor_application(d: dict) -> tuple[str, str]:
+    """Ops/admin copy when a new mentor applies, so the review queue is actioned."""
+    name = d.get("display_name") or "-"
+    email = d.get("mentor_email") or ""
+    headline = d.get("headline") or ""
+    review_url = d.get("review_url", config.FRONTEND_URL + "/admin")
+    body = (
+        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">New mentor application</h1>'
+        '<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">A new mentor has applied and is awaiting review.</p>'
+        + _info_row("Name", name)
+        + (_info_row("Email", email) if email else "")
+        + (_info_row("Headline", headline) if headline else "")
+        + _btn(review_url, "Review application")
+    )
+    return f"[Admin] New mentor application: {name}", _base(body)
+
+
 # ── Lifecycle v2 templates (cancel / reschedule / no-show) ──────────────────────
 
 def _booking_cancelled(d: dict) -> tuple[str, str]:
@@ -454,7 +486,12 @@ def _no_show_reported(d: dict) -> tuple[str, str]:
 def _booking_admin_notice(d: dict) -> tuple[str, str]:
     """Ops/admin copy for every booking, reschedule, and cancellation."""
     event = d.get("event", "updated")
-    titles = {"booked": "New booking", "cancelled": "Booking cancelled", "rescheduled": "Booking rescheduled"}
+    titles = {
+        "booked": "New booking",
+        "cancelled": "Booking cancelled",
+        "rescheduled": "Booking rescheduled",
+        "no_show": "Session no-show",
+    }
     title = titles.get(event, "Booking update")
     mentor = d.get("mentor_name") or "-"
     candidate = d.get("candidate_name") or "-"
@@ -487,10 +524,12 @@ _TEMPLATES = {
     "booking_admin_notice": _booking_admin_notice,
     "contact_form": _contact_form,
     "mentor_application_received": _mentor_application_received,
+    "admin_mentor_application": _admin_mentor_application,
     "mentor_approved": _mentor_approved,
     "mentor_rejected": _mentor_rejected,
     "mentor_changes_requested": _mentor_changes_requested,
     "mentor_suspended": _mentor_suspended,
+    "mentor_reinstated": _mentor_reinstated,
     "booking_confirmed_candidate": _booking_confirmed_candidate,
     "booking_confirmed_mentor": _booking_confirmed_mentor,
     "session_reminder_24h": _session_reminder_24h,
