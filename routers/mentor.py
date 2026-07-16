@@ -260,10 +260,10 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
             },
         )
     # Notify the admin(s) that a new application is waiting in the review queue.
-    if config.ADMIN_EMAIL:
+    for admin_email in db.admin_notify_emails():
         background_tasks.add_task(
             mailer.send_transactional,
-            config.ADMIN_EMAIL,
+            admin_email,
             "admin_mentor_application",
             {
                 "display_name": display_name,

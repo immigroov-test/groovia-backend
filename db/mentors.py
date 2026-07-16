@@ -13,6 +13,33 @@ logger = logging.getLogger("immigroov.db")
 _supabase: Client = create_client(config.SUPABASE_URL, config.SUPABASE_SERVICE_ROLE_KEY)
 
 
+def list_admin_emails() -> list[str]:
+    """Emails of all admin accounts (profiles.role = 'admin', not soft-deleted)."""
+    try:
+        res = _supabase.table("profiles").select("email, deleted_at").eq("role", "admin").execute()
+        return [r["email"] for r in (res.data or []) if r.get("email") and not r.get("deleted_at")]
+    except Exception:
+        logger.exception("list_admin_emails failed")
+        return []
+
+
+def admin_notify_emails() -> list[str]:
+    """Recipients for admin/ops notifications: every admin account in the DB, plus the
+    optional ADMIN_EMAIL env override. Deduped case-insensitively, so admins are driven
+    by profiles.role='admin' and no Render env var is required."""
+    emails = list_admin_emails()
+    if config.ADMIN_EMAIL:
+        emails.append(config.ADMIN_EMAIL)
+    seen: set[str] = set()
+    out: list[str] = []
+    for e in emails:
+        k = (e or "").strip().lower()
+        if k and k not in seen:
+            seen.add(k)
+            out.append(e.strip())
+    return out
+
+
 def list_active_mentors(
     *,
     country_code: Optional[str] = None,

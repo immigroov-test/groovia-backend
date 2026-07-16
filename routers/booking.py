@@ -622,9 +622,9 @@ def _send_booking_confirmation(
                 },
             )
 
-        if config.ADMIN_EMAIL:
+        for admin_email in db.admin_notify_emails():
             mailer.send_transactional(
-                config.ADMIN_EMAIL,
+                admin_email,
                 "booking_admin_notice",
                 {
                     "event": "booked",
@@ -678,13 +678,14 @@ def _notify_parties(booking_id: str, event: str):
             send(m_email, "no_show_reported", m_name, c_name)
 
         # Admin/ops copy on the money-relevant lifecycle events (cancel, reschedule, no-show).
-        if event in ("cancelled", "rescheduled", "no_show") and config.ADMIN_EMAIL:
-            mailer.send_transactional(config.ADMIN_EMAIL, "booking_admin_notice", {
-                "event": event,
-                "mentor_name": info.get("mentor_name") or "",
-                "candidate_name": info.get("candidate_name") or "",
-                "candidate_email": c_email or "",
-                "session_time": session_time,
-            })
+        if event in ("cancelled", "rescheduled", "no_show"):
+            for admin_email in db.admin_notify_emails():
+                mailer.send_transactional(admin_email, "booking_admin_notice", {
+                    "event": event,
+                    "mentor_name": info.get("mentor_name") or "",
+                    "candidate_name": info.get("candidate_name") or "",
+                    "candidate_email": c_email or "",
+                    "session_time": session_time,
+                })
     except Exception:
         logger.warning("lifecycle email dispatch failed booking=%s event=%s", booking_id, event)
