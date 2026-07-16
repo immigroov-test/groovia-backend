@@ -25,7 +25,7 @@ def list_active_mentors(
     base_cols = ("id, slug, display_name, headline, bio, photo_url, "
                  "expertise_country_codes, expertise_categories, languages, "
                  "professional_domains, booking_url, years_lived_experience, "
-                 "avg_rating, review_count, currency, ")
+                 "avg_rating, review_count, currency, city, country, ")
 
     def build(svc_cols: str):
         q = (
