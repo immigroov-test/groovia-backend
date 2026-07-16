@@ -4,6 +4,7 @@ from fastapi import APIRouter, BackgroundTasks, Request
 from pydantic import BaseModel, Field, field_validator
 
 import config
+import db
 from core.rate_limit import limiter
 from services import mailer
 
@@ -31,17 +32,16 @@ class ContactBody(BaseModel):
 @router.post("")
 @limiter.limit("5/minute")
 def submit_contact(request: Request, body: ContactBody, background_tasks: BackgroundTasks):
-    """Public contact form. Emails the message to the support inbox (best-effort)."""
-    to = config.ADMIN_EMAIL or "support@immigroov.com"
-    background_tasks.add_task(
-        mailer.send_transactional, to, "contact_form",
-        {
-            "first_name": body.first_name,
-            "last_name": body.last_name,
-            "email": body.email,
-            "topic": body.topic,
-            "message": body.message,
-        },
-    )
+    """Public contact form. Emails the message to the admin accounts (best-effort)."""
+    recipients = db.admin_notify_emails() or ["support@immigroov.com"]
+    data = {
+        "first_name": body.first_name,
+        "last_name": body.last_name,
+        "email": body.email,
+        "topic": body.topic,
+        "message": body.message,
+    }
+    for to in recipients:
+        background_tasks.add_task(mailer.send_transactional, to, "contact_form", data)
     logger.info("contact form from %s topic=%r", body.email, body.topic)
     return {"ok": True}
