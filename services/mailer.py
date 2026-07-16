@@ -134,6 +134,24 @@ def _details_card(rows: list[tuple[str, str]]) -> str:
     )
 
 
+def _detail_list(rows: list[tuple[str, str]]) -> str:
+    """Airy label/value pairs with no box - matches the confirmed-booking page style."""
+    inner = ""
+    for label, value in rows:
+        if not value:
+            continue
+        inner += (
+            '<tr><td style="padding:0 0 16px">'
+            f'<p style="margin:0 0 3px;font-size:11px;font-weight:600;color:#8a8a8a;text-transform:uppercase;letter-spacing:.7px">{_e(label)}</p>'
+            f'<p style="margin:0;font-size:15px;font-weight:600;color:#0a0a0a;line-height:1.4">{_e(value)}</p>'
+            "</td></tr>"
+        )
+    return (
+        '<table cellpadding="0" cellspacing="0" role="presentation" style="width:100%;margin:12px 0 20px">'
+        + inner + "</table>"
+    )
+
+
 # ── Templates ─────────────────────────────────────────────────────────────────
 
 def _mentor_approved(d: dict) -> tuple[str, str]:
@@ -242,7 +260,7 @@ def _booking_confirmed_candidate(d: dict) -> tuple[str, str]:
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {candidate},</p>'
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Your session with <strong>{_e(mentor)}</strong> is confirmed. Here are the details.</p>'
         + _mentor_row(mentor, photo, "Your mentor")
-        + _details_card([
+        + _detail_list([
             ("What", service),
             ("When (your time)", d.get("candidate_time", "")),
             ("When (mentor's time)", d.get("mentor_time", "")),
@@ -278,7 +296,7 @@ def _booking_confirmed_mentor(d: dict) -> tuple[str, str]:
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
         f"<strong>{_e(candidate)}</strong> has booked a session with you. Here are the details."
         "</p>"
-        + _details_card([
+        + _detail_list([
             ("What", service),
             ("When (your time)", d.get("mentor_time", "")),
             ("When (candidate's time)", d.get("candidate_time", "")),
@@ -520,20 +538,20 @@ def _booking_admin_notice(d: dict) -> tuple[str, str]:
     mentor = d.get("mentor_name") or "-"
     candidate = d.get("candidate_name") or "-"
     candidate_email = d.get("candidate_email") or ""
+    rows: list[tuple[str, str]] = [
+        ("Mentor", mentor),
+        ("Candidate", f"{candidate} ({candidate_email})" if candidate_email else candidate),
+    ]
     # New bookings carry both parties' times; lifecycle events carry a single session_time.
     if d.get("mentor_time") or d.get("candidate_time"):
-        when_rows = (
-            _info_row("When (mentor's time)", d.get("mentor_time") or "-")
-            + _info_row("When (candidate's time)", d.get("candidate_time") or "-")
-        )
+        rows.append(("When (mentor's time)", d.get("mentor_time") or "-"))
+        rows.append(("When (candidate's time)", d.get("candidate_time") or "-"))
     else:
-        when_rows = _info_row("When", d.get("session_time", "-"))
+        rows.append(("When", d.get("session_time", "-")))
     body = (
         f'<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">{_e(title)}</h1>'
         '<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Admin notification - a booking event occurred.</p>'
-        + _info_row("Mentor", mentor)
-        + _info_row("Candidate", f"{candidate} ({candidate_email})" if candidate_email else candidate)
-        + when_rows
+        + _detail_list(rows)
     )
     return f"[Admin] {title}: {candidate} × {mentor}", _base(body)
 
