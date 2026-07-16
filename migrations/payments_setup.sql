@@ -758,3 +758,19 @@ CREATE TABLE IF NOT EXISTS job_run_history (
   job_name    TEXT PRIMARY KEY,
   last_run_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+
+
+-- ── Auto-expire abandoned payment holds (pg_cron; free, no external dispatcher for
+-- THIS job). Releases a slot whose 10-minute payment hold was never paid, so it can
+-- be rebooked. Guarded so the setup still succeeds where pg_cron isn't enabled.
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN
+    IF EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'expire-stale-holds') THEN
+      PERFORM cron.unschedule('expire-stale-holds');
+    END IF;
+    PERFORM cron.schedule('expire-stale-holds', '*/5 * * * *', 'SELECT expire_stale_holds()');
+  ELSE
+    RAISE NOTICE 'pg_cron not enabled - skipping expire-stale-holds schedule. Enable pg_cron (Database -> Extensions) and re-run this block.';
+  END IF;
+END $$;
