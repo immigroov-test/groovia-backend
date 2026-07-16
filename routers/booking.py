@@ -568,16 +568,29 @@ def _send_booking_confirmation(
         info = db.get_booking_notify_info(booking_id) or {}
         mentor_name = info.get("mentor_name")
         mentor_email = info.get("mentor_email")
+        mentor_photo = info.get("mentor_photo")
         service_title = info.get("service_title") or "1-on-1 session"
         meeting_url = f"{config.FRONTEND_URL}/meeting/{booking_id}"
 
         # booking_times_display returns a per-party local timestamp + IANA tz name.
+        # Format both parties' times so every email can show "your time" AND "their time".
         def _fmt(local_key: str, tz_key: str) -> str:
             if not times:
                 return ""
             local = times.get(local_key)
             tz = times.get(tz_key) or "UTC"
-            return f"{local} ({tz})" if local else ""
+            if not local:
+                return ""
+            try:
+                dt = datetime.fromisoformat(str(local).replace("Z", ""))
+                stamp = dt.strftime("%a, %b %d, %Y at %I:%M %p").replace(" 0", " ")
+            except Exception:
+                stamp = str(local)
+            city = tz.split("/")[-1].replace("_", " ")
+            return f"{stamp} ({city})"
+
+        candidate_time = _fmt("customer_local", "customer_tz")
+        mentor_time = _fmt("mentor_local", "mentor_tz")
 
         mailer.send_transactional(
             candidate_email,
@@ -585,8 +598,10 @@ def _send_booking_confirmation(
             {
                 "candidate_name": candidate_name or "there",
                 "mentor_name": mentor_name or "your mentor",
+                "mentor_photo": mentor_photo or "",
                 "service_title": service_title,
-                "session_time": _fmt("customer_local", "customer_tz"),
+                "candidate_time": candidate_time,
+                "mentor_time": mentor_time,
                 "meeting_url": meeting_url,
             },
         )
@@ -600,7 +615,8 @@ def _send_booking_confirmation(
                     "candidate_name": candidate_name or "A candidate",
                     "candidate_email": candidate_email,
                     "service_title": service_title,
-                    "session_time": _fmt("mentor_local", "mentor_tz"),
+                    "candidate_time": candidate_time,
+                    "mentor_time": mentor_time,
                     "notes": notes or "",
                     "meeting_url": meeting_url,
                 },
@@ -615,7 +631,8 @@ def _send_booking_confirmation(
                     "mentor_name": mentor_name or "",
                     "candidate_name": candidate_name or "",
                     "candidate_email": candidate_email,
-                    "session_time": _fmt("mentor_local", "mentor_tz"),
+                    "candidate_time": candidate_time,
+                    "mentor_time": mentor_time,
                     "service_title": service_title,
                 },
             )

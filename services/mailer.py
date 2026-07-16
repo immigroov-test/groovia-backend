@@ -211,18 +211,41 @@ def _mentor_suspended(d: dict) -> tuple[str, str]:
     return "Your Immigroov mentor account has been suspended", _base(body)
 
 
+def _mentor_row(name: str, photo: str, subtitle: str = "") -> str:
+    """A small mentor avatar + name block for booking emails."""
+    photo = (photo or "").strip()
+    avatar = (
+        f'<img src="{_e(photo)}" alt="{_e(name)}" width="52" height="52"'
+        ' style="width:52px;height:52px;border-radius:50%;object-fit:cover;display:block;border:0">'
+    ) if photo else (
+        '<div style="width:52px;height:52px;border-radius:50%;background:#e8ebff;color:#3a4bd0;'
+        'text-align:center;line-height:52px;font-weight:700;font-size:18px">'
+        f'{_e((name or "?")[:1].upper())}</div>'
+    )
+    sub = f'<p style="margin:2px 0 0;font-size:13px;color:#777">{_e(subtitle)}</p>' if subtitle else ""
+    return (
+        '<table cellpadding="0" cellspacing="0" role="presentation" style="margin:0 0 20px;width:100%">'
+        f'<tr><td width="52" style="vertical-align:middle;padding-right:14px">{avatar}</td>'
+        f'<td style="vertical-align:middle"><p style="margin:0;font-size:16px;font-weight:700;color:#0a0a0a">{_e(name)}</p>{sub}</td>'
+        "</tr></table>"
+    )
+
+
 def _booking_confirmed_candidate(d: dict) -> tuple[str, str]:
     candidate = _e(d.get("candidate_name", ""))
     mentor = d.get("mentor_name", "your mentor")
+    photo = d.get("mentor_photo", "")
     service = d.get("service_title", "1-on-1 session")
     url = d.get("meeting_url", "")
     body = (
         '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Your session is confirmed ✓</h1>'
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {candidate},</p>'
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Your session with <strong>{_e(mentor)}</strong> is confirmed. Here are the details.</p>'
+        + _mentor_row(mentor, photo, "Your mentor")
         + _details_card([
             ("What", service),
-            ("When", d.get("session_time", "")),
+            ("When (your time)", d.get("candidate_time", "")),
+            ("When (mentor's time)", d.get("mentor_time", "")),
             ("Who", f"{mentor} (mentor) and you"),
             ("Where", "Video call - use the Join meeting button below"),
         ])
@@ -257,7 +280,8 @@ def _booking_confirmed_mentor(d: dict) -> tuple[str, str]:
         "</p>"
         + _details_card([
             ("What", service),
-            ("When", d.get("session_time", "")),
+            ("When (your time)", d.get("mentor_time", "")),
+            ("When (candidate's time)", d.get("candidate_time", "")),
             ("Who", who),
             ("Where", "Video call - use the Join meeting button below"),
         ])
@@ -496,12 +520,20 @@ def _booking_admin_notice(d: dict) -> tuple[str, str]:
     mentor = d.get("mentor_name") or "-"
     candidate = d.get("candidate_name") or "-"
     candidate_email = d.get("candidate_email") or ""
+    # New bookings carry both parties' times; lifecycle events carry a single session_time.
+    if d.get("mentor_time") or d.get("candidate_time"):
+        when_rows = (
+            _info_row("When (mentor's time)", d.get("mentor_time") or "-")
+            + _info_row("When (candidate's time)", d.get("candidate_time") or "-")
+        )
+    else:
+        when_rows = _info_row("When", d.get("session_time", "-"))
     body = (
         f'<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">{_e(title)}</h1>'
         '<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Admin notification - a booking event occurred.</p>'
         + _info_row("Mentor", mentor)
         + _info_row("Candidate", f"{candidate} ({candidate_email})" if candidate_email else candidate)
-        + _info_row("When", d.get("session_time", "-"))
+        + when_rows
     )
     return f"[Admin] {title}: {candidate} × {mentor}", _base(body)
 

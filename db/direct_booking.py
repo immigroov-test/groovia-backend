@@ -126,7 +126,7 @@ def get_booking_notify_info(booking_id: str) -> Optional[dict[str, Any]]:
         res = (
             _supabase.table("bookings")
             .select("mentor_id, candidate_id, candidate_email, candidate_name, slot_time, "
-                    "service_id, services(title), mentors(display_name)")
+                    "service_id, services(title), mentors(display_name, photo_url)")
             .eq("id", booking_id)
             .single()
             .execute()
@@ -145,9 +145,11 @@ def get_booking_notify_info(booking_id: str) -> Optional[dict[str, Any]]:
             cand_email = cand_email or prof.get("email")
             cand_name = cand_name or prof.get("display_name") or prof.get("full_name")
         svc = b.get("services") or {}
+        mnt = b.get("mentors") or {}
         return {
             "mentor_name":     mentor_name,
             "mentor_email":    mentor_email,
+            "mentor_photo":    mnt.get("photo_url") if isinstance(mnt, dict) else None,
             "candidate_name":  cand_name,
             "candidate_email": cand_email,
             "service_title":   svc.get("title") if isinstance(svc, dict) else None,
