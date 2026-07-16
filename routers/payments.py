@@ -122,8 +122,21 @@ def create_order(body: CreateOrderBody):
             booking_id=body.booking_id, amount_major=payment["amount"], currency=payment["currency"],
         )
     except httpx.HTTPStatusError as e:
-        logger.exception("razorpay create-order failed booking=%s", body.booking_id)
-        raise HTTPException(status_code=502, detail=f"Could not create payment order: {e}")
+        # Surface Razorpay's actual reason (e.g. unsupported currency) instead of a bare 400.
+        reason = ""
+        try:
+            reason = ((e.response.json().get("error") or {}).get("description") or "").strip()
+        except Exception:
+            reason = (getattr(e.response, "text", "") or "")[:200]
+        status_code = getattr(e.response, "status_code", "?")
+        logger.error("razorpay create-order failed booking=%s status=%s reason=%s currency=%s",
+                     body.booking_id, status_code, reason, payment.get("currency"))
+        # Free the held slot so the user can retry (or pick another time) right away.
+        try:
+            db.abandon_hold(body.booking_id)
+        except Exception:
+            logger.warning("could not release hold after failed order booking=%s", body.booking_id)
+        raise HTTPException(status_code=502, detail=f"Could not create payment order: {reason or e}")
     db.set_provider_order(body.booking_id, order["id"])
     db.record_provider_payload(payment["id"], order)
     return {

@@ -110,6 +110,19 @@ def payments_enabled() -> bool:
     return str(res.data).strip().lower() == "true"
 
 
+def abandon_hold(booking_id: str) -> None:
+    """Release a payment-hold booking whose order could not be created, so the slot
+    frees immediately instead of staying blocked until expire_stale_holds runs (which
+    needs the dispatcher cron). Only touches a still-'pending' hold and its unpaid
+    'created' payment, so it can't disturb an already-confirmed booking."""
+    _supabase.table("bookings").update(
+        {"status": "cancelled", "payment_hold_expires_at": None}
+    ).eq("id", booking_id).eq("status", "pending").execute()
+    _supabase.table("customer_payments").update(
+        {"state": "failed"}
+    ).eq("booking_id", booking_id).eq("state", "created").execute()
+
+
 def get_payment_by_booking(booking_id: str) -> Optional[dict[str, Any]]:
     res = (
         _supabase.table("customer_payments")
@@ -214,7 +227,9 @@ def create_razorpay_order(*, booking_id: str, amount_major: float, currency: str
         json={
             "amount": amount_minor,
             "currency": currency.upper(),
-            "receipt": f"booking-{booking_id}",
+            # Razorpay caps `receipt` at 40 chars; "booking-" + a 36-char UUID is 44 and
+            # is rejected with a 400. The bare booking id (36 chars) is unique and fits.
+            "receipt": booking_id[:40],
             "notes": {"booking_id": booking_id},
         },
         timeout=15.0,
