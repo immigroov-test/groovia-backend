@@ -1340,41 +1340,13 @@ $$;
 GRANT EXECUTE ON FUNCTION is_valid_timezone(TEXT) TO anon, authenticated;
 
 -- ============================================================================
--- ppp_factors  (Purchasing Power Parity price adjustments per country)
+-- ppp_factors, get_ppp_factor, the FX engine, the pricing engine and the whole
+-- Razorpay payment/payout schema are consolidated at the END of this file
+-- (folded in from payments_setup.sql), placed there so every dependency
+-- (bookings, services, mentors, is_slot_available, is_valid_timezone,
+-- booking_question_answers) already exists. See the section:
+--   "Pricing (PPP + FX) + Razorpay payments" below.
 -- ============================================================================
-CREATE TABLE IF NOT EXISTS ppp_factors (
-  country_code  CHAR(2)      PRIMARY KEY,
-  factor        NUMERIC(5,4) NOT NULL CHECK (factor > 0 AND factor <= 1),
-  updated_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
-);
-
-INSERT INTO ppp_factors (country_code, factor) VALUES
-  ('IN', 0.2500), ('PK', 0.2000), ('BD', 0.1800), ('NP', 0.1800),
-  ('LK', 0.2200), ('MM', 0.2000), ('PH', 0.3000), ('VN', 0.2800),
-  ('ID', 0.3000), ('TH', 0.4000), ('CN', 0.4500),
-  ('NG', 0.2200), ('GH', 0.2200), ('KE', 0.2500), ('ET', 0.1500),
-  ('TZ', 0.2000), ('UG', 0.2000), ('CM', 0.2200), ('ZA', 0.3800),
-  ('EG', 0.2800), ('MA', 0.3000),
-  ('BR', 0.4000), ('MX', 0.4500), ('CO', 0.3500), ('PE', 0.3800),
-  ('AR', 0.3500), ('EC', 0.4000), ('CL', 0.5000),
-  ('UA', 0.3000), ('RO', 0.5000), ('TR', 0.3200)
-ON CONFLICT (country_code) DO NOTHING;
-
-ALTER TABLE ppp_factors ENABLE ROW LEVEL SECURITY;
-DROP POLICY IF EXISTS ppp_factors_read ON ppp_factors;
-CREATE POLICY ppp_factors_read ON ppp_factors FOR SELECT USING (TRUE);
-
--- ============================================================================
--- get_ppp_factor  - returns 1.0 for countries not in the table (full price)
--- ============================================================================
-CREATE OR REPLACE FUNCTION get_ppp_factor(p_country_code TEXT)
-RETURNS NUMERIC LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
-  SELECT COALESCE(
-    (SELECT factor FROM ppp_factors WHERE country_code = UPPER(p_country_code)),
-    1.0
-  );
-$$;
-GRANT EXECUTE ON FUNCTION get_ppp_factor(TEXT) TO anon, authenticated;
 
 
 -- ###########################################################################
@@ -2009,3 +1981,752 @@ CREATE POLICY "mentor-photos owner delete"
 ALTER TABLE booking_events    ENABLE ROW LEVEL SECURITY;
 ALTER TABLE booking_reminders ENABLE ROW LEVEL SECURITY;
 ALTER TABLE platform_settings ENABLE ROW LEVEL SECURITY;
+
+
+-- ###########################################################################
+-- Pricing (PPP + FX) + Razorpay payments  (folded in from payments_setup.sql)
+-- ###########################################################################
+-- Consolidated so a fresh run of this file also provisions the pricing +
+-- payment engine. This is the SAME schema as migrations/payments_setup.sql.
+-- Every statement is idempotent. Dependencies (bookings, services, mentors,
+-- is_slot_available, is_valid_timezone, booking_question_answers,
+-- platform_settings) are all defined earlier in this file. payments_enabled
+-- seeds to 'false' - flip it on only when you're ready to charge.
+
+-- ── PPP factors (Purchasing Power Parity per-country price adjustment) ────────
+-- factor has no upper bound: higher-cost-of-living countries are priced ABOVE
+-- the US baseline (NO=1.05, CH=1.15). PPP only applies to services where the
+-- mentor enabled is_ppp.
+CREATE TABLE IF NOT EXISTS ppp_factors (
+  country_code  CHAR(2)      PRIMARY KEY,
+  factor        NUMERIC(5,4) NOT NULL CHECK (factor > 0),
+  updated_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
+);
+-- Normalize the factor CHECK for older DBs that used factor<=1 (which would reject
+-- above-baseline rows like NO=1.05, CH=1.15). Drop+re-add so the rule is always factor>0.
+ALTER TABLE ppp_factors DROP CONSTRAINT IF EXISTS ppp_factors_factor_check;
+ALTER TABLE ppp_factors ADD  CONSTRAINT ppp_factors_factor_check CHECK (factor > 0);
+
+INSERT INTO ppp_factors (country_code, factor) VALUES
+  ('US',1.00),('CA',0.92),('GB',0.94),('IE',0.95),('DE',0.90),('FR',0.92),('NL',0.93),
+  ('ES',0.78),('IT',0.80),('PT',0.72),('SE',0.97),('NO',1.05),('CH',1.15),('PL',0.55),
+  ('RO',0.50),('AU',0.95),('NZ',0.90),('JP',0.85),('KR',0.78),('SG',0.85),('HK',0.90),
+  ('AE',0.72),('SA',0.60),('QA',0.70),('IN',0.30),('PK',0.29),('BD',0.32),('LK',0.32),
+  ('NP',0.30),('ID',0.38),('PH',0.40),('VN',0.37),('TH',0.45),('MY',0.45),('CN',0.55),
+  ('BR',0.45),('MX',0.50),('AR',0.40),('CO',0.42),('CL',0.55),('PE',0.45),('ZA',0.45),
+  ('NG',0.40),('KE',0.42),('EG',0.28),('MA',0.45),('TR',0.40),('RU',0.42),('UA',0.35)
+ON CONFLICT (country_code) DO UPDATE SET factor = excluded.factor;
+
+ALTER TABLE ppp_factors ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS ppp_factors_read ON ppp_factors;
+CREATE POLICY ppp_factors_read ON ppp_factors FOR SELECT USING (TRUE);
+
+INSERT INTO platform_settings (key, value, description) VALUES
+  ('ppp_floor', '0.40', 'Minimum PPP factor (never price below this fraction of base)')
+ON CONFLICT (key) DO NOTHING;
+
+-- get_ppp_factor: countries NOT in ppp_factors get 1.0; countries IN get
+-- GREATEST(their factor, ppp_floor). The floor dominates seeded-low rows
+-- (IN=0.30 -> effective 0.40) by design.
+CREATE OR REPLACE FUNCTION get_ppp_factor(p_country_code TEXT)
+RETURNS NUMERIC LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT GREATEST(
+    COALESCE((SELECT factor FROM ppp_factors WHERE country_code = UPPER(p_country_code)), 1.0),
+    COALESCE((SELECT value::numeric FROM platform_settings WHERE key = 'ppp_floor'), 0.40)
+  );
+$$;
+GRANT EXECUTE ON FUNCTION get_ppp_factor(TEXT) TO anon, authenticated;
+
+-- ── FX rate infrastructure (EUR-pivot model, Frankfurter/ECB) ────────────────
+-- One API call refreshes the whole table. get_fx() is the STRICT variant the
+-- booking engine uses: it RAISES FX_UNAVAILABLE rather than silently falling
+-- back to rate=1 (which would corrupt the ledger). get_fx_or_null() is the
+-- soft variant for display-only pricing.
+CREATE TABLE IF NOT EXISTS fx_rates (
+  base        TEXT        NOT NULL,             -- always 'EUR'
+  quote       TEXT        NOT NULL,             -- ISO currency code
+  rate        NUMERIC     NOT NULL,             -- quote units per 1 base unit
+  as_of       DATE,                             -- provider's published date
+  fetched_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (base, quote)
+);
+
+CREATE TABLE IF NOT EXISTS fx_refresh_log (
+  id          BIGSERIAL PRIMARY KEY,
+  provider    TEXT DEFAULT 'frankfurter',
+  as_of       DATE,
+  raw_json    JSONB,
+  success     BOOLEAN,
+  error       TEXT,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+INSERT INTO platform_settings (key, value, description) VALUES
+  ('fx_max_age_minutes', '1440', 'Max age (minutes) of an FX rate before bookings fail with FX_UNAVAILABLE (default 24h)')
+ON CONFLICT (key) DO NOTHING;
+
+-- Cross-rate via the EUR pivot. NULL if either leg is missing or stale.
+CREATE OR REPLACE FUNCTION get_fx_or_null(p_from TEXT, p_to TEXT)
+RETURNS NUMERIC LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_from TEXT := UPPER(COALESCE(p_from, ''));
+  v_to   TEXT := UPPER(COALESCE(p_to, ''));
+  v_max  INT := COALESCE((SELECT value::numeric FROM platform_settings WHERE key = 'fx_max_age_minutes'), 1440);
+  r_from NUMERIC; r_to NUMERIC; f_from TIMESTAMPTZ; f_to TIMESTAMPTZ;
+BEGIN
+  IF v_from = '' OR v_to = '' THEN RETURN NULL; END IF;
+  IF v_from = v_to THEN RETURN 1; END IF;
+
+  IF v_from = 'EUR' THEN r_from := 1; f_from := NOW();
+  ELSE SELECT rate, fetched_at INTO r_from, f_from FROM fx_rates WHERE base = 'EUR' AND quote = v_from; END IF;
+
+  IF v_to = 'EUR' THEN r_to := 1; f_to := NOW();
+  ELSE SELECT rate, fetched_at INTO r_to, f_to FROM fx_rates WHERE base = 'EUR' AND quote = v_to; END IF;
+
+  IF r_from IS NULL OR r_to IS NULL THEN RETURN NULL; END IF;                              -- missing
+  IF LEAST(f_from, f_to) < NOW() - MAKE_INTERVAL(mins => v_max) THEN RETURN NULL; END IF;  -- stale
+  RETURN r_to / r_from;
+END; $$;
+GRANT EXECUTE ON FUNCTION get_fx_or_null(TEXT, TEXT) TO anon, authenticated;
+
+-- Strict variant used by the booking engine: aborts rather than mis-price.
+CREATE OR REPLACE FUNCTION get_fx(p_from TEXT, p_to TEXT)
+RETURNS NUMERIC LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+DECLARE v NUMERIC := get_fx_or_null(p_from, p_to);
+BEGIN
+  IF v IS NULL THEN
+    RAISE EXCEPTION 'FX_UNAVAILABLE: no fresh exchange rate for %->%', UPPER(p_from), UPPER(p_to)
+      USING errcode = 'P0001';
+  END IF;
+  RETURN v;
+END; $$;
+GRANT EXECUTE ON FUNCTION get_fx(TEXT, TEXT) TO anon, authenticated;
+
+-- Country -> display currency. Only Frankfurter-supported currencies; else USD.
+CREATE OR REPLACE FUNCTION currency_for_country(p_cc TEXT)
+RETURNS TEXT LANGUAGE sql IMMUTABLE SET search_path = public AS $$
+  SELECT COALESCE(
+    (CASE UPPER(COALESCE(p_cc, ''))
+      WHEN 'US' THEN 'USD' WHEN 'GB' THEN 'GBP' WHEN 'IN' THEN 'INR'
+      WHEN 'DE' THEN 'EUR' WHEN 'FR' THEN 'EUR' WHEN 'NL' THEN 'EUR' WHEN 'IE' THEN 'EUR'
+      WHEN 'ES' THEN 'EUR' WHEN 'IT' THEN 'EUR' WHEN 'PT' THEN 'EUR'
+      WHEN 'CA' THEN 'CAD' WHEN 'AU' THEN 'AUD' WHEN 'NZ' THEN 'NZD' WHEN 'SG' THEN 'SGD'
+      WHEN 'HK' THEN 'HKD' WHEN 'JP' THEN 'JPY' WHEN 'KR' THEN 'KRW' WHEN 'CN' THEN 'CNY'
+      WHEN 'MX' THEN 'MXN' WHEN 'BR' THEN 'BRL' WHEN 'ZA' THEN 'ZAR' WHEN 'CH' THEN 'CHF'
+      WHEN 'SE' THEN 'SEK' WHEN 'NO' THEN 'NOK' WHEN 'DK' THEN 'DKK' WHEN 'PL' THEN 'PLN'
+      WHEN 'RO' THEN 'RON' WHEN 'CZ' THEN 'CZK' WHEN 'HU' THEN 'HUF' WHEN 'BG' THEN 'BGN'
+      WHEN 'IL' THEN 'ILS' WHEN 'ID' THEN 'IDR' WHEN 'PH' THEN 'PHP' WHEN 'MY' THEN 'MYR'
+      WHEN 'TH' THEN 'THB' WHEN 'TR' THEN 'TRY'
+      ELSE NULL END), 'USD');
+$$;
+GRANT EXECUTE ON FUNCTION currency_for_country(TEXT) TO anon, authenticated;
+
+-- ── Pricing engine ───────────────────────────────────────────────────────────
+-- Binding price quotes. A quote is a 10-minute offer; booking commits it verbatim.
+CREATE TABLE IF NOT EXISTS pricing_quotes (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  service_id        UUID NOT NULL,
+  mentor_id         UUID NOT NULL,
+  customer_country  TEXT,
+  customer_currency TEXT,
+  pricing_version   INT,
+  ppp_version       INT,
+  fx_provider       TEXT,
+  snapshot          JSONB NOT NULL,    -- full BookingPrice record (the contract)
+  pricing_hash      TEXT NOT NULL,     -- SHA-256 of canonical snapshot JSON
+  used              BOOLEAN NOT NULL DEFAULT FALSE,
+  booking_id        UUID,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  expires_at        TIMESTAMPTZ NOT NULL DEFAULT NOW() + INTERVAL '10 minutes'
+);
+CREATE INDEX IF NOT EXISTS pricing_quotes_expires_idx ON pricing_quotes(expires_at);
+
+-- Immutable per-booking pricing snapshot (1:1 with bookings).
+CREATE TABLE IF NOT EXISTS booking_pricing (
+  booking_id         UUID PRIMARY KEY REFERENCES bookings(id) ON DELETE CASCADE,
+  pricing_version    INT NOT NULL,
+  ppp_version        INT,
+  fx_provider        TEXT,
+  mentor_currency    TEXT,
+  customer_currency  TEXT,
+  set_price          NUMERIC,
+  ppp_multiplier     NUMERIC,
+  fx_mentor_customer NUMERIC,
+  fx_customer_inr    NUMERIC,
+  fx_mentor_inr      NUMERIC,
+  gross_customer     NUMERIC,
+  fee_pct            NUMERIC,
+  fee_amount         NUMERIC,
+  net_customer       NUMERIC,
+  net_mentor         NUMERIC,
+  calculated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- The single pricing engine. Returns the canonical BookingPrice as jsonb.
+-- Raises FX_UNAVAILABLE if rates are missing/stale.
+-- NOTE: services.platform_fee is an ABSOLUTE commission amount in the mentor's
+-- currency (e.g. set_price 2500 -> platform_fee 375 = 15%), converted here to a
+-- percentage so it applies to the PPP-adjusted, FX-converted customer gross.
+-- Falls back to the admin global pct (immigroov_commission_pct).
+CREATE OR REPLACE FUNCTION compute_booking_price(p_service_id UUID, p_customer_country TEXT)
+RETURNS JSONB LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_pricing_version CONSTANT INT := 1;
+  v_ppp_version     CONSTANT INT := 1;
+  v_provider        CONSTANT TEXT := 'frankfurter';
+  v_mentor_id UUID; v_set NUMERIC; v_ment_ccy TEXT; v_is_ppp BOOLEAN; v_fee_pct NUMERIC;
+  v_cust_ccy TEXT; v_ppp NUMERIC;
+  v_fx_mc NUMERIC; v_fx_c_inr NUMERIC; v_fx_m_inr NUMERIC;
+  v_gross NUMERIC; v_fee NUMERIC; v_net_cust NUMERIC; v_net_mentor NUMERIC;
+BEGIN
+  SELECT s.mentor_id, s.set_price, COALESCE(s.set_currency, 'USD'), s.is_ppp,
+         COALESCE(
+           CASE WHEN s.set_price > 0 AND NULLIF(s.platform_fee, 0) IS NOT NULL
+                THEN ROUND(s.platform_fee / s.set_price * 100.0, 4) END,
+           (SELECT value::numeric FROM platform_settings WHERE key = 'immigroov_commission_pct'),
+           15)
+    INTO v_mentor_id, v_set, v_ment_ccy, v_is_ppp, v_fee_pct
+  FROM services s WHERE s.id = p_service_id AND s.is_active AND s.status = 'approved';
+  IF v_set IS NULL THEN RAISE EXCEPTION 'Service not available' USING errcode = 'P0001'; END IF;
+
+  v_cust_ccy := currency_for_country(p_customer_country);
+  v_ppp := CASE WHEN v_is_ppp THEN get_ppp_factor(p_customer_country) ELSE 1 END;
+
+  v_fx_mc    := get_fx(v_ment_ccy, v_cust_ccy);   -- customer units per 1 mentor unit
+  v_fx_c_inr := get_fx(v_cust_ccy, 'INR');
+  v_fx_m_inr := get_fx(v_ment_ccy, 'INR');
+
+  v_gross      := ROUND(v_set * v_ppp * v_fx_mc, 2);
+  v_fee        := ROUND(v_gross * v_fee_pct / 100.0, 2);
+  v_net_cust   := ROUND(v_gross - v_fee, 2);
+  v_net_mentor := ROUND(v_net_cust / v_fx_mc, 2);  -- divide: customer-net -> mentor currency
+
+  RETURN jsonb_build_object(
+    'pricing_version', v_pricing_version, 'ppp_version', v_ppp_version, 'fx_provider', v_provider,
+    'service_id', p_service_id, 'mentor_id', v_mentor_id, 'customer_country', UPPER(COALESCE(p_customer_country, '')),
+    'mentor_currency', v_ment_ccy, 'customer_currency', v_cust_ccy,
+    'set_price', v_set, 'ppp_multiplier', v_ppp,
+    'fx_mentor_customer', v_fx_mc, 'fx_customer_inr', v_fx_c_inr, 'fx_mentor_inr', v_fx_m_inr,
+    'gross_customer', v_gross, 'fee_pct', v_fee_pct, 'fee_amount', v_fee,
+    'net_customer', v_net_cust, 'net_mentor', v_net_mentor);
+END; $$;
+GRANT EXECUTE ON FUNCTION compute_booking_price(UUID, TEXT) TO anon, authenticated;
+
+-- Issue a binding 10-minute quote.
+CREATE OR REPLACE FUNCTION get_booking_quote(p_service_id UUID, p_customer_country TEXT)
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_snap JSONB; v_hash TEXT; v_id UUID; v_exp TIMESTAMPTZ;
+BEGIN
+  v_snap := compute_booking_price(p_service_id, p_customer_country);
+  v_hash := encode(extensions.digest(v_snap::text, 'sha256'), 'hex');
+  INSERT INTO pricing_quotes(service_id, mentor_id, customer_country, customer_currency,
+      pricing_version, ppp_version, fx_provider, snapshot, pricing_hash)
+    VALUES (p_service_id, (v_snap->>'mentor_id')::uuid, UPPER(COALESCE(p_customer_country, '')),
+      v_snap->>'customer_currency', (v_snap->>'pricing_version')::int, (v_snap->>'ppp_version')::int,
+      v_snap->>'fx_provider', v_snap, v_hash)
+    RETURNING id, expires_at INTO v_id, v_exp;
+  RETURN v_snap || jsonb_build_object('quote_id', v_id, 'expires_at', v_exp, 'pricing_hash', v_hash);
+END; $$;
+GRANT EXECUTE ON FUNCTION get_booking_quote(UUID, TEXT) TO anon, authenticated;
+
+-- Read-only DISPLAY pricing (soft FX fallback) — for browse/list pages. No quote
+-- row, no fee. If FX is unavailable it shows the mentor-currency price
+-- (fx_ok=false) rather than failing the page.
+-- p_items: [{ "key": "<any>", "amount": <num>, "from": "<ccy>", "is_ppp": <bool> }]
+CREATE OR REPLACE FUNCTION convert_prices(p_customer_country TEXT, p_items JSONB)
+RETURNS TABLE(key TEXT, you NUMERIC, you0 NUMERIC, customer_currency TEXT, fx_ok BOOLEAN)
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+DECLARE it JSONB; v_amt NUMERIC; v_from TEXT; v_ppp_on BOOLEAN; v_cust TEXT; v_ppp NUMERIC; v_rate NUMERIC;
+BEGIN
+  v_cust := currency_for_country(p_customer_country);
+  FOR it IN SELECT * FROM jsonb_array_elements(COALESCE(p_items, '[]'::jsonb)) LOOP
+    v_amt := COALESCE((it->>'amount')::numeric, 0);
+    v_from := COALESCE(it->>'from', 'USD');
+    v_ppp_on := COALESCE((it->>'is_ppp')::boolean, false);
+    v_ppp := CASE WHEN v_ppp_on THEN get_ppp_factor(p_customer_country) ELSE 1 END;
+    v_rate := get_fx_or_null(v_from, v_cust);
+    IF v_rate IS NULL THEN
+      key := it->>'key'; you0 := ROUND(v_amt, 2); you := ROUND(v_amt * v_ppp, 2);
+      customer_currency := UPPER(v_from); fx_ok := false;
+    ELSE
+      key := it->>'key'; you0 := ROUND(v_amt * v_rate, 2); you := ROUND(v_amt * v_ppp * v_rate, 2);
+      customer_currency := v_cust; fx_ok := true;
+    END IF;
+    RETURN NEXT;
+  END LOOP;
+END; $$;
+GRANT EXECUTE ON FUNCTION convert_prices(TEXT, JSONB) TO anon, authenticated;
+
+-- ── Payment tables ───────────────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS customer_payments (
+  id                          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  booking_id                  UUID NOT NULL REFERENCES bookings(id) ON DELETE CASCADE,
+  amount                      NUMERIC NOT NULL,   -- decimal, customer currency, actually charged
+  currency                    TEXT NOT NULL,
+  state                       TEXT NOT NULL DEFAULT 'created'
+                                 CHECK (state IN ('created','authorized','captured','partially_refunded','refunded','failed')),
+  provider                    TEXT DEFAULT 'razorpay',
+  provider_order_id           TEXT,
+  provider_payment_id         TEXT,
+  provider_payload            JSONB,
+  provider_error_code         TEXT,
+  provider_error_description  TEXT,
+  created_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_customer_payments_booking ON customer_payments(booking_id);
+CREATE INDEX IF NOT EXISTS idx_customer_payments_provider_order ON customer_payments(provider_order_id);
+ALTER TABLE customer_payments ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS customer_payments_read ON customer_payments;
+-- Owner-scoped: a signed-in user sees only payments on their own bookings. The
+-- backend uses the service-role key (bypasses RLS) so all server logic is
+-- unaffected; this only closes direct anon/authenticated reads of others' rows.
+CREATE POLICY customer_payments_read ON customer_payments FOR SELECT
+  USING (booking_id IN (SELECT id FROM bookings WHERE candidate_id = auth.uid()));
+
+-- mentor_payouts.amount is LOAD-BEARING: the PRE-FEE mentor-currency payout basis
+-- (set_price x ppp_multiplier), distinct from net_amount_mentor_currency (POST-fee).
+CREATE TABLE IF NOT EXISTS mentor_payouts (
+  id                            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  mentor_id                     UUID NOT NULL REFERENCES mentors(id) ON DELETE CASCADE,
+  booking_id                    UUID NOT NULL UNIQUE REFERENCES bookings(id) ON DELETE CASCADE,
+  amount                        NUMERIC,
+  gross_amount                  NUMERIC,
+  fee_pct                       NUMERIC,
+  platform_fee_amount           NUMERIC,
+  net_amount_customer_currency  NUMERIC,
+  net_amount_mentor_currency    NUMERIC,
+  exchange_rate_used            NUMERIC,
+  customer_currency             TEXT,
+  mentor_currency               TEXT,
+  ppp_multiplier                NUMERIC,
+  method                        TEXT,     -- 'manual' | NULL
+  payout_reference              TEXT,
+  payout_state                  TEXT NOT NULL DEFAULT 'pending'
+                                  CHECK (payout_state IN ('pending','paid','void','blocked')),
+  paid_date                     TIMESTAMPTZ,
+  comments                      TEXT,
+  created_at                    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_mentor_payouts_mentor ON mentor_payouts(mentor_id);
+ALTER TABLE mentor_payouts ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS mentor_payouts_read ON mentor_payouts;
+-- Owner-scoped: a mentor sees only their own payout rows. Service-role bypasses RLS.
+CREATE POLICY mentor_payouts_read ON mentor_payouts FOR SELECT
+  USING (mentor_id IN (SELECT id FROM mentors WHERE profile_id = auth.uid()));
+
+CREATE TABLE IF NOT EXISTS payment_refunds (
+  id                          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  payment_id                  UUID NOT NULL REFERENCES customer_payments(id) ON DELETE CASCADE,
+  booking_id                  UUID NOT NULL REFERENCES bookings(id) ON DELETE CASCADE,
+  provider_refund_id          TEXT UNIQUE,
+  amount_minor                INT NOT NULL,   -- MINOR units (paise/cents), matches Razorpay's refund API
+  currency                    TEXT NOT NULL,
+  status                      TEXT NOT NULL DEFAULT 'created' CHECK (status IN ('created','processed','failed')),
+  provider_payload            JSONB,
+  provider_error_code         TEXT,
+  provider_error_description  TEXT,
+  ledger_version              INT,
+  created_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_payment_refunds_booking ON payment_refunds(booking_id);
+
+-- Razorpay webhook intake log. event_id is the dedup key (Razorpay retries
+-- deliveries; processed_at set means "already handled, no-op on replay").
+CREATE TABLE IF NOT EXISTS payment_events (
+  event_id         TEXT PRIMARY KEY,
+  type             TEXT,
+  payload          JSONB,
+  signature        TEXT,
+  attempt_count    INT NOT NULL DEFAULT 0,
+  last_attempt_at  TIMESTAMPTZ,
+  next_retry_at    TIMESTAMPTZ,
+  processed_at     TIMESTAMPTZ,
+  error            TEXT,
+  received_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS payment_reconciliation_log (
+  id                    BIGSERIAL PRIMARY KEY,
+  kind                  TEXT NOT NULL,   -- 'mismatch' | 'fetch_failed'
+  provider_payment_id   TEXT,
+  booking_id            UUID REFERENCES bookings(id) ON DELETE CASCADE,
+  detail                JSONB,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_payment_reconciliation_log_booking ON payment_reconciliation_log(booking_id);
+
+-- Booking columns the reserve/confirm flow needs.
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS payment_hold_expires_at TIMESTAMPTZ;  -- 10-min reservation hold
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS customer_currency TEXT;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS fx_customer_inr NUMERIC;  -- INR per 1 customer-currency unit
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS fx_mentor_inr   NUMERIC;  -- INR per 1 mentor-currency unit
+
+INSERT INTO platform_settings (key, value, description) VALUES
+  ('payments_enabled', 'false', 'false = mock instant-confirm booking; true = real Razorpay reserve->pay->confirm flow')
+ON CONFLICT (key) DO NOTHING;
+
+-- ── Money journal (read by refund_owed_minor) ────────────────────────────────
+-- Included so refund_owed_minor has a table to read and forward-compat with the
+-- payouts phase. Nothing in THIS migration writes 'refund' rows (cancel-refund
+-- ledger wiring is deferred), so refund_owed_minor returns 0 today and
+-- process_refunds is a safe no-op until then.
+CREATE TABLE IF NOT EXISTS booking_ledger (
+  id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  booking_id             UUID NOT NULL REFERENCES bookings(id) ON DELETE CASCADE,
+  party                  TEXT NOT NULL CHECK (party IN ('customer','mentor','platform')),
+  kind                   TEXT NOT NULL CHECK (kind IN ('penalty','refund','credit','charge')),
+  amount                 NUMERIC(10,2),
+  pct                    INT,
+  currency               TEXT,
+  reason                 TEXT,
+  normalized_inr_amount  NUMERIC,
+  created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_booking_ledger_booking ON booking_ledger(booking_id);
+ALTER TABLE booking_ledger ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS booking_ledger_read ON booking_ledger;
+-- Owner-scoped: the candidate or the mentor on the booking can read its money
+-- journal; no public reads. Service-role bypasses RLS.
+CREATE POLICY booking_ledger_read ON booking_ledger FOR SELECT
+  USING (booking_id IN (
+    SELECT id FROM bookings
+    WHERE candidate_id = auth.uid()
+       OR mentor_id IN (SELECT id FROM mentors WHERE profile_id = auth.uid())
+  ));
+
+CREATE OR REPLACE FUNCTION add_ledger(
+  p_booking UUID, p_party TEXT, p_kind TEXT, p_amount NUMERIC, p_pct INT, p_reason TEXT
+) RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_cust_ccy TEXT; v_ment_ccy TEXT; v_fxc NUMERIC; v_fxm NUMERIC; v_ccy TEXT; v_fx NUMERIC;
+BEGIN
+  SELECT COALESCE(mp.customer_currency, cp.currency, 'INR'),
+         COALESCE(mp.mentor_currency, 'INR'),
+         b.fx_customer_inr, b.fx_mentor_inr
+    INTO v_cust_ccy, v_ment_ccy, v_fxc, v_fxm
+  FROM bookings b
+  LEFT JOIN LATERAL (
+    SELECT customer_currency, mentor_currency FROM mentor_payouts
+    WHERE booking_id = b.id ORDER BY created_at DESC LIMIT 1
+  ) mp ON TRUE
+  LEFT JOIN LATERAL (
+    SELECT currency FROM customer_payments
+    WHERE booking_id = b.id ORDER BY created_at DESC LIMIT 1
+  ) cp ON TRUE
+  WHERE b.id = p_booking;
+
+  IF p_party = 'mentor' THEN v_ccy := v_ment_ccy; v_fx := COALESCE(v_fxm, 1);
+  ELSE                       v_ccy := v_cust_ccy; v_fx := COALESCE(v_fxc, 1); END IF;
+
+  INSERT INTO booking_ledger(booking_id, party, kind, amount, pct, currency, reason, normalized_inr_amount)
+    VALUES (p_booking, p_party, p_kind, ROUND(COALESCE(p_amount, 0), 2), p_pct, v_ccy, p_reason,
+            ROUND(COALESCE(p_amount, 0) * v_fx, 2));
+END;
+$$;
+
+-- ── Payment state machine + payout admin ops ─────────────────────────────────
+-- Legal customer_payments.state transitions. Called by the webhook handler and
+-- confirm_booking_payment — never by anon/authenticated directly.
+CREATE OR REPLACE FUNCTION set_payment_state(p_payment_id UUID, p_new_state TEXT)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_state TEXT;
+BEGIN
+  SELECT state INTO v_state FROM customer_payments WHERE id = p_payment_id FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Payment % not found', p_payment_id; END IF;
+  IF NOT (
+    p_new_state = v_state                                                            -- idempotent
+    OR p_new_state = 'failed'                                                         -- any -> failed
+    OR (v_state = 'created' AND p_new_state IN ('authorized','captured'))
+    OR (v_state = 'authorized' AND p_new_state = 'captured')
+    OR (v_state = 'captured' AND p_new_state IN ('partially_refunded','refunded'))
+    OR (v_state = 'partially_refunded' AND p_new_state IN ('partially_refunded','refunded'))
+  ) THEN
+    RAISE EXCEPTION 'Illegal payment state transition % -> %', v_state, p_new_state;
+  END IF;
+  UPDATE customer_payments SET state = p_new_state WHERE id = p_payment_id;
+END;
+$$;
+REVOKE ALL ON FUNCTION set_payment_state(UUID, TEXT) FROM PUBLIC, anon, authenticated;
+
+CREATE OR REPLACE FUNCTION set_provider_order(p_booking_id UUID, p_order_id TEXT)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  UPDATE customer_payments SET provider = 'razorpay', provider_order_id = p_order_id
+    WHERE booking_id = p_booking_id AND state = 'created';
+END;
+$$;
+REVOKE ALL ON FUNCTION set_provider_order(UUID, TEXT) FROM PUBLIC, anon, authenticated;
+
+-- How much (in MINOR units) is still owed on a booking: ledger 'refund' rows
+-- minus refunds already issued. Never refund twice for the same ledger entry.
+CREATE OR REPLACE FUNCTION refund_owed_minor(p_booking_id UUID)
+RETURNS INT LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_owed NUMERIC; v_issued INT;
+BEGIN
+  SELECT COALESCE(SUM(amount), 0) INTO v_owed
+    FROM booking_ledger WHERE booking_id = p_booking_id AND party = 'customer' AND kind = 'refund';
+  SELECT COALESCE(SUM(amount_minor), 0) INTO v_issued
+    FROM payment_refunds WHERE booking_id = p_booking_id AND status IN ('created','processed');
+  RETURN GREATEST(0, ROUND(v_owed * 100)::int - v_issued);
+END;
+$$;
+REVOKE ALL ON FUNCTION refund_owed_minor(UUID) FROM PUBLIC, anon, authenticated;
+
+-- Admin marks a payout as actually paid (manual transfer). Only a completed
+-- booking's payout, and only if not already void/blocked. (Payouts phase.)
+CREATE OR REPLACE FUNCTION mark_payout_paid(p_booking_id UUID, p_reference TEXT)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_status TEXT;
+BEGIN
+  SELECT status INTO v_status FROM bookings WHERE id = p_booking_id;
+  IF v_status IS DISTINCT FROM 'completed' THEN
+    RAISE EXCEPTION 'Booking % is not completed — cannot mark payout paid', p_booking_id;
+  END IF;
+  UPDATE mentor_payouts SET payout_state = 'paid', paid_date = NOW(), payout_reference = p_reference
+    WHERE booking_id = p_booking_id AND payout_state NOT IN ('void','blocked');
+END;
+$$;
+GRANT EXECUTE ON FUNCTION mark_payout_paid(UUID, TEXT) TO authenticated;
+
+CREATE OR REPLACE FUNCTION set_payout_blocked(p_booking_id UUID, p_reason TEXT)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  UPDATE mentor_payouts
+     SET payout_state = 'blocked',
+         comments = COALESCE(comments || E'\n', '') || COALESCE(p_reason, '')
+   WHERE booking_id = p_booking_id AND payout_state <> 'paid';
+END;
+$$;
+GRANT EXECUTE ON FUNCTION set_payout_blocked(UUID, TEXT) TO authenticated;
+
+-- A cancelled/no-show booking's payout is automatically voided (unless already
+-- paid or blocked). Idempotent: only fires when status actually CHANGES.
+CREATE OR REPLACE FUNCTION trg_void_payout_fn()
+RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF NEW.status IN ('cancelled','no_show') AND NEW.status IS DISTINCT FROM OLD.status THEN
+    UPDATE mentor_payouts SET payout_state = 'void'
+      WHERE booking_id = NEW.id AND payout_state NOT IN ('paid','blocked');
+  END IF;
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS trg_void_payout ON bookings;
+CREATE TRIGGER trg_void_payout AFTER UPDATE OF status ON bookings
+  FOR EACH ROW EXECUTE FUNCTION trg_void_payout_fn();
+
+-- Whitelisted public read of platform_settings — only 'payments_enabled'.
+CREATE OR REPLACE FUNCTION public_setting(p_key TEXT)
+RETURNS TEXT LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF p_key <> 'payments_enabled' THEN
+    RAISE EXCEPTION 'Setting % is not publicly readable', p_key;
+  END IF;
+  RETURN (SELECT value FROM platform_settings WHERE key = p_key);
+END;
+$$;
+GRANT EXECUTE ON FUNCTION public_setting(TEXT) TO anon, authenticated;
+
+-- Cheap read-only status poll for checkout pages (webhook-independent UX).
+CREATE OR REPLACE FUNCTION booking_status(p_booking_id UUID)
+RETURNS TEXT LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT status::text FROM bookings WHERE id = p_booking_id;
+$$;
+GRANT EXECUTE ON FUNCTION booking_status(UUID) TO anon, authenticated;
+
+-- ── Quote-based booking creation (reserve -> pay -> confirm) ──────────────────
+-- REFERRAL-STRIPPED port of immigroov's reserve_booking. Every paid booking
+-- starts 'pending' (a 10-minute payment hold) and only becomes 'confirmed' via
+-- confirm_booking_payment. The existing book_session RPC (direct-to-confirmed)
+-- is left in place for the free/mock path and is unaffected.
+--
+-- Identity: if no candidate_id is given, look up profiles by email but do NOT
+-- create one (profiles is Supabase-Auth-owned). A guest who never signs up has
+-- candidate_id = NULL; their identity lives in candidate_email/candidate_name.
+CREATE OR REPLACE FUNCTION reserve_booking(
+  p_quote_id UUID, p_mentor_id UUID, p_service_id UUID, p_slot_time TIMESTAMPTZ,
+  p_email TEXT, p_name TEXT DEFAULT NULL, p_timezone TEXT DEFAULT 'UTC',
+  p_answers JSONB DEFAULT '[]', p_specific_availability_id UUID DEFAULT NULL,
+  p_candidate_id UUID DEFAULT NULL
+) RETURNS TABLE(booking_id UUID, amount NUMERIC, currency TEXT, hold_expires_at TIMESTAMPTZ)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  q pricing_quotes%ROWTYPE;
+  s JSONB;
+  v_booking_id UUID;
+  v_hold_expires_at TIMESTAMPTZ := NOW() + INTERVAL '10 minutes';
+  v_gross NUMERIC; v_fee_amount NUMERIC; v_net_customer NUMERIC;
+  v_timezone TEXT := CASE WHEN is_valid_timezone(p_timezone) THEN p_timezone ELSE 'UTC' END;
+BEGIN
+  IF p_email IS NULL OR POSITION('@' IN p_email) = 0 THEN
+    RAISE EXCEPTION 'A valid email is required';
+  END IF;
+
+  -- Load & lock the quote; validate it is a fresh, unused, matching offer.
+  SELECT * INTO q FROM pricing_quotes WHERE id = p_quote_id FOR UPDATE;
+  IF q.id IS NULL THEN RAISE EXCEPTION 'QUOTE_EXPIRED: quote not found' USING errcode = 'P0001'; END IF;
+  IF q.used THEN RAISE EXCEPTION 'QUOTE_EXPIRED: quote already used' USING errcode = 'P0001'; END IF;
+  IF q.expires_at < NOW() THEN
+    RAISE EXCEPTION 'QUOTE_EXPIRED: quote has expired — please refresh the price' USING errcode = 'P0001';
+  END IF;
+  IF q.service_id <> p_service_id OR q.mentor_id <> p_mentor_id THEN
+    RAISE EXCEPTION 'QUOTE_EXPIRED: quote does not match this booking' USING errcode = 'P0001';
+  END IF;
+
+  IF NOT is_slot_available(p_mentor_id, p_service_id, p_slot_time) THEN
+    RAISE EXCEPTION 'That time is not available — please choose another slot';
+  END IF;
+
+  IF p_candidate_id IS NULL THEN
+    SELECT id INTO p_candidate_id FROM profiles WHERE LOWER(email) = LOWER(p_email);
+  END IF;
+
+  s := q.snapshot;  -- the binding contract; committed verbatim, no recompute
+  v_gross := (s->>'gross_customer')::numeric;
+  v_fee_amount := (s->>'fee_amount')::numeric;
+  v_net_customer := (s->>'net_customer')::numeric;
+
+  BEGIN
+    INSERT INTO bookings(
+      mentor_id, candidate_id, candidate_email, candidate_name,
+      service_id, slot_time, status, attendee_timezone,
+      specific_availability_id, source,
+      customer_currency, fx_customer_inr, fx_mentor_inr, payment_hold_expires_at
+    ) VALUES (
+      p_mentor_id, p_candidate_id, LOWER(p_email), p_name,
+      p_service_id, p_slot_time, 'pending', v_timezone,
+      p_specific_availability_id, 'direct',
+      s->>'customer_currency', NULLIF((s->>'fx_customer_inr')::numeric, 0), NULLIF((s->>'fx_mentor_inr')::numeric, 0),
+      v_hold_expires_at
+    ) RETURNING id INTO v_booking_id;
+  EXCEPTION WHEN exclusion_violation OR unique_violation THEN
+    RAISE EXCEPTION 'That time was just taken — please choose another slot' USING errcode = 'P0001';
+  END;
+
+  INSERT INTO booking_question_answers(booking_id, question_id, answer_text)
+  SELECT v_booking_id, (a->>'question_id')::UUID, a->>'answer_text'
+  FROM jsonb_array_elements(COALESCE(p_answers, '[]'::JSONB)) a
+  WHERE a ? 'question_id' AND (a->>'answer_text') IS NOT NULL AND (a->>'answer_text') <> '';
+
+  INSERT INTO customer_payments(booking_id, amount, currency, state)
+    VALUES (v_booking_id, v_gross, UPPER(s->>'customer_currency'), 'created');
+
+  INSERT INTO mentor_payouts(
+      mentor_id, booking_id, amount, gross_amount, fee_pct, platform_fee_amount,
+      net_amount_customer_currency, net_amount_mentor_currency, exchange_rate_used,
+      customer_currency, mentor_currency, ppp_multiplier, payout_state
+    ) VALUES (
+      p_mentor_id, v_booking_id,
+      ROUND((s->>'set_price')::numeric * (s->>'ppp_multiplier')::numeric, 2),
+      v_gross, (s->>'fee_pct')::numeric, v_fee_amount,
+      v_net_customer, (s->>'net_mentor')::numeric, (s->>'fx_mentor_customer')::numeric,
+      UPPER(s->>'customer_currency'), s->>'mentor_currency', (s->>'ppp_multiplier')::numeric, 'pending'
+    );
+
+  INSERT INTO booking_pricing(
+      booking_id, pricing_version, ppp_version, fx_provider,
+      mentor_currency, customer_currency, set_price, ppp_multiplier,
+      fx_mentor_customer, fx_customer_inr, fx_mentor_inr,
+      gross_customer, fee_pct, fee_amount, net_customer, net_mentor
+    ) VALUES (
+      v_booking_id, (s->>'pricing_version')::int, (s->>'ppp_version')::int, s->>'fx_provider',
+      s->>'mentor_currency', s->>'customer_currency', (s->>'set_price')::numeric, (s->>'ppp_multiplier')::numeric,
+      (s->>'fx_mentor_customer')::numeric, (s->>'fx_customer_inr')::numeric, (s->>'fx_mentor_inr')::numeric,
+      v_gross, (s->>'fee_pct')::numeric, v_fee_amount, v_net_customer, (s->>'net_mentor')::numeric
+    );
+
+  UPDATE pricing_quotes SET used = TRUE, booking_id = v_booking_id WHERE id = p_quote_id;  -- one-time use
+
+  RETURN QUERY SELECT v_booking_id, v_gross, UPPER(s->>'customer_currency'), v_hold_expires_at;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION reserve_booking(UUID, UUID, UUID, TIMESTAMPTZ, TEXT, TEXT, TEXT, JSONB, UUID, UUID) TO anon, authenticated;
+
+-- Finalize a payment hold into a confirmed booking. Idempotent (a webhook retry
+-- or duplicate confirm is a no-op once confirmed). HOLD_EXPIRED means the caller
+-- must issue a refund (money captured for a slot we can no longer honour), not
+-- retry. Referral attribution is NOT resolved here (referrals out of scope).
+CREATE OR REPLACE FUNCTION confirm_booking_payment(p_booking_id UUID, p_provider_ref TEXT)
+RETURNS TEXT LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE b bookings;
+BEGIN
+  SELECT * INTO b FROM bookings WHERE id = p_booking_id FOR UPDATE;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Booking % not found', p_booking_id; END IF;
+  IF b.status = 'confirmed' THEN RETURN 'already_confirmed'; END IF;
+  IF b.status <> 'pending' OR b.payment_hold_expires_at IS NULL THEN
+    RAISE EXCEPTION 'HOLD_EXPIRED: booking % is no longer awaiting payment (status %)', p_booking_id, b.status
+      USING errcode = 'P0001';
+  END IF;
+
+  UPDATE bookings SET status = 'confirmed', payment_hold_expires_at = NULL WHERE id = p_booking_id;
+  UPDATE customer_payments SET state = 'captured', provider = 'razorpay', provider_payment_id = p_provider_ref
+    WHERE booking_id = p_booking_id AND state = 'created';
+  UPDATE mentor_payouts SET method = COALESCE(method, 'manual'), payout_state = COALESCE(payout_state, 'pending')
+    WHERE booking_id = p_booking_id;
+
+  RETURN 'confirmed';
+END;
+$$;
+REVOKE ALL ON FUNCTION confirm_booking_payment(UUID, TEXT) FROM PUBLIC, anon, authenticated;
+
+-- Janitor for reserve_booking's 10-min hold. Without something calling this, a
+-- 'pending' hold whose payer never completes checkout occupies the slot forever
+-- and the orphaned customer_payments row sits at 'created'. Service-role only.
+CREATE OR REPLACE FUNCTION expire_stale_holds()
+RETURNS INT LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_count INT;
+BEGIN
+  WITH expired AS (
+    UPDATE bookings SET status = 'cancelled', payment_hold_expires_at = NULL
+     WHERE status = 'pending' AND payment_hold_expires_at IS NOT NULL AND payment_hold_expires_at < NOW()
+     RETURNING id
+  )
+  UPDATE customer_payments cp SET state = 'failed'
+   FROM expired e WHERE cp.booking_id = e.id AND cp.state = 'created';
+  GET DIAGNOSTICS v_count = ROW_COUNT;
+  RETURN v_count;
+END;
+$$;
+REVOKE ALL ON FUNCTION expire_stale_holds() FROM PUBLIC, anon, authenticated;
+
+-- ── Dispatcher lease lock + job self-gating (Render Cron Job has no mutex) ────
+-- TTL-based lease row (not pg_advisory_lock — supabase-py's stateless RPC calls
+-- can't hold a session-level lock across two calls). A UNIQUE collision on
+-- INSERT is what actually arbitrates two concurrent acquirers.
+CREATE TABLE IF NOT EXISTS dispatcher_locks (
+  lock_name   TEXT PRIMARY KEY,
+  locked_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  expires_at  TIMESTAMPTZ NOT NULL
+);
+
+CREATE OR REPLACE FUNCTION try_acquire_dispatcher_lock(p_lock_name TEXT, p_ttl_seconds INT)
+RETURNS BOOLEAN LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  UPDATE dispatcher_locks
+    SET locked_at = NOW(), expires_at = NOW() + (p_ttl_seconds || ' seconds')::interval
+    WHERE lock_name = p_lock_name AND expires_at < NOW();
+  IF FOUND THEN RETURN TRUE; END IF;
+  BEGIN
+    INSERT INTO dispatcher_locks(lock_name, locked_at, expires_at)
+      VALUES (p_lock_name, NOW(), NOW() + (p_ttl_seconds || ' seconds')::interval);
+    RETURN TRUE;
+  EXCEPTION WHEN unique_violation THEN
+    RETURN FALSE;
+  END;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION try_acquire_dispatcher_lock(TEXT, INT) TO authenticated;
+
+CREATE OR REPLACE FUNCTION release_dispatcher_lock(p_lock_name TEXT)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  DELETE FROM dispatcher_locks WHERE lock_name = p_lock_name;
+END;
+$$;
+GRANT EXECUTE ON FUNCTION release_dispatcher_lock(TEXT) TO authenticated;
+
+-- Last-run tracker for dispatcher jobs that run less often than every tick
+-- (reconcile_payments: 24h). Read/write directly via supabase-py.
+CREATE TABLE IF NOT EXISTS job_run_history (
+  job_name    TEXT PRIMARY KEY,
+  last_run_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
