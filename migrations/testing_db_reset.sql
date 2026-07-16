@@ -3,8 +3,12 @@
 -- while keeping the dummy/seed mentors intact. Do NOT run on production.
 --
 -- What this DELETES:
---   - ALL bookings + their children (answers, reminders, offers, requests, payments)
+--   - ALL bookings + their children: answers, reminders, offers, requests, and every
+--     payment row (customer_payments, mentor_payouts, booking_pricing, payment_refunds,
+--     booking_ledger) - these all reference bookings ON DELETE CASCADE
 --     - so admin and the respective mentors see a clean slate
+--   - Payment artifacts with no booking FK: pricing_quotes, payment_events,
+--     payment_reconciliation_log (so the same Razorpay test-mode events can be replayed)
 --   - Self-signup mentors (those linked to a real account: profile_id IS NOT NULL)
 --     and their services / availability
 --   - All mentee / guest test accounts
@@ -63,3 +67,21 @@ END $$;
 
 -- 5. Clear the AI observability log.
 TRUNCATE ai_events;
+
+-- 6. Clear payment artifacts NOT tied to a booking FK (guarded: skipped if the
+--    payments schema hasn't been applied). The per-booking payment, payout,
+--    pricing, refund and ledger rows already CASCADE-deleted with the bookings
+--    delete in step 1, so a mentee/mentor can rebook + repay cleanly. These three
+--    have no booking FK to ride on:
+--      - pricing_quotes             : one-time binding price offers
+--      - payment_events             : Razorpay webhook dedup log (clearing lets the
+--                                     same test-mode events be replayed)
+--      - payment_reconciliation_log : mismatch / fetch-failed audit rows
+--    KEPT on purpose: fx_rates, fx_refresh_log and ppp_factors are reference data
+--    (clearing them would break pricing until the dispatcher re-fetches FX);
+--    dispatcher_locks and job_run_history are operational and left as-is.
+DO $$ BEGIN
+  IF to_regclass('public.pricing_quotes') IS NOT NULL THEN
+    TRUNCATE pricing_quotes, payment_events, payment_reconciliation_log;
+  END IF;
+END $$;

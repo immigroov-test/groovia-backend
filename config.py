@@ -64,6 +64,16 @@ RAZORPAY_KEY_ID         = os.getenv("RAZORPAY_KEY_ID", "")
 RAZORPAY_KEY_SECRET     = os.getenv("RAZORPAY_KEY_SECRET", "")
 RAZORPAY_WEBHOOK_SECRET = os.getenv("RAZORPAY_WEBHOOK_SECRET", "")
 
+# Shared secret between the Vercel BFF and this backend for trusting the visitor's
+# geolocated country (used for PPP pricing). The BFF reads the country from Vercel's
+# edge header (x-vercel-ip-country, which the browser cannot forge) and forwards it
+# with this token. When SET, the backend trusts the country ONLY on requests bearing
+# this token (blocking a direct call that fakes ?country= to claim a discount) and
+# falls back to no-country (no PPP discount) otherwise. When EMPTY, geo enforcement
+# is off and the client-supplied country is used as before. Must match the Vercel
+# INTERNAL_GEO_TOKEN env var (server-only, never NEXT_PUBLIC).
+INTERNAL_GEO_TOKEN = os.getenv("INTERNAL_GEO_TOKEN", "")
+
 # Feature flags, default ON. Keep in sync with groovia-frontend/lib/features.ts.
 def _flag(name: str, default: bool = True) -> bool:
     raw = os.getenv(name)

@@ -30,6 +30,10 @@ CREATE TABLE IF NOT EXISTS ppp_factors (
   factor        NUMERIC(5,4) NOT NULL CHECK (factor > 0),
   updated_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW()
 );
+-- Normalize the factor CHECK for older DBs that used factor<=1 (which would reject
+-- above-baseline rows like NO=1.05, CH=1.15). Drop+re-add so the rule is always factor>0.
+ALTER TABLE ppp_factors DROP CONSTRAINT IF EXISTS ppp_factors_factor_check;
+ALTER TABLE ppp_factors ADD  CONSTRAINT ppp_factors_factor_check CHECK (factor > 0);
 
 INSERT INTO ppp_factors (country_code, factor) VALUES
   ('US',1.00),('CA',0.92),('GB',0.94),('IE',0.95),('DE',0.90),('FR',0.92),('NL',0.93),
@@ -301,7 +305,11 @@ CREATE INDEX IF NOT EXISTS idx_customer_payments_booking ON customer_payments(bo
 CREATE INDEX IF NOT EXISTS idx_customer_payments_provider_order ON customer_payments(provider_order_id);
 ALTER TABLE customer_payments ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS customer_payments_read ON customer_payments;
-CREATE POLICY customer_payments_read ON customer_payments FOR SELECT USING (TRUE);
+-- Owner-scoped: a signed-in user sees only payments on their own bookings. The
+-- backend uses the service-role key (bypasses RLS) so all server logic is
+-- unaffected; this only closes direct anon/authenticated reads of others' rows.
+CREATE POLICY customer_payments_read ON customer_payments FOR SELECT
+  USING (booking_id IN (SELECT id FROM bookings WHERE candidate_id = auth.uid()));
 
 -- mentor_payouts.amount is LOAD-BEARING: the PRE-FEE mentor-currency payout basis
 -- (set_price x ppp_multiplier), distinct from net_amount_mentor_currency (POST-fee).
@@ -330,7 +338,9 @@ CREATE TABLE IF NOT EXISTS mentor_payouts (
 CREATE INDEX IF NOT EXISTS idx_mentor_payouts_mentor ON mentor_payouts(mentor_id);
 ALTER TABLE mentor_payouts ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS mentor_payouts_read ON mentor_payouts;
-CREATE POLICY mentor_payouts_read ON mentor_payouts FOR SELECT USING (TRUE);
+-- Owner-scoped: a mentor sees only their own payout rows. Service-role bypasses RLS.
+CREATE POLICY mentor_payouts_read ON mentor_payouts FOR SELECT
+  USING (mentor_id IN (SELECT id FROM mentors WHERE profile_id = auth.uid()));
 
 CREATE TABLE IF NOT EXISTS payment_refunds (
   id                          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -403,7 +413,14 @@ CREATE TABLE IF NOT EXISTS booking_ledger (
 CREATE INDEX IF NOT EXISTS idx_booking_ledger_booking ON booking_ledger(booking_id);
 ALTER TABLE booking_ledger ENABLE ROW LEVEL SECURITY;
 DROP POLICY IF EXISTS booking_ledger_read ON booking_ledger;
-CREATE POLICY booking_ledger_read ON booking_ledger FOR SELECT USING (TRUE);
+-- Owner-scoped: the candidate or the mentor on the booking can read its money
+-- journal; no public reads. Service-role bypasses RLS.
+CREATE POLICY booking_ledger_read ON booking_ledger FOR SELECT
+  USING (booking_id IN (
+    SELECT id FROM bookings
+    WHERE candidate_id = auth.uid()
+       OR mentor_id IN (SELECT id FROM mentors WHERE profile_id = auth.uid())
+  ));
 
 CREATE OR REPLACE FUNCTION add_ledger(
   p_booking UUID, p_party TEXT, p_kind TEXT, p_amount NUMERIC, p_pct INT, p_reason TEXT
