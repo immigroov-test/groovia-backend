@@ -135,6 +135,39 @@ def get_payment_by_booking(booking_id: str) -> Optional[dict[str, Any]]:
     return res.data[0] if res.data else None
 
 
+def get_own_pending_hold(candidate_id: str, mentor_id: str, slot_time: str) -> Optional[dict[str, Any]]:
+    """The caller's own un-expired 'pending' payment hold on this exact slot, if any.
+    Lets a retry after a cancelled/closed Razorpay popup REUSE the same hold instead of
+    hitting 'that time is not available' on their own reservation. Refreshes the 10-min
+    window, and only reuses a hold whose payment is still 'created' (not failed/captured)."""
+    now = datetime.now(timezone.utc)
+    try:
+        res = (
+            _supabase.table("bookings")
+            .select("id")
+            .eq("candidate_id", candidate_id)
+            .eq("mentor_id", mentor_id)
+            .eq("slot_time", slot_time)
+            .eq("status", "pending")
+            .gt("payment_hold_expires_at", now.isoformat())
+            .order("created_at", desc=True)
+            .limit(1)
+            .execute()
+        )
+        if not res.data:
+            return None
+        booking_id = res.data[0]["id"]
+        pay = get_payment_by_booking(booking_id)
+        if not pay or pay.get("state") != "created":
+            return None
+        new_exp = (now + timedelta(minutes=10)).isoformat()
+        _supabase.table("bookings").update({"payment_hold_expires_at": new_exp}).eq("id", booking_id).execute()
+        return {"booking_id": booking_id, "amount": pay["amount"], "currency": pay["currency"], "hold_expires_at": new_exp}
+    except Exception:
+        logger.exception("get_own_pending_hold failed candidate=%s mentor=%s", candidate_id, mentor_id)
+        return None
+
+
 def get_payment_by_provider_order(provider_order_id: str) -> Optional[dict[str, Any]]:
     res = (
         _supabase.table("customer_payments")

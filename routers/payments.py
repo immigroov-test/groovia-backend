@@ -87,6 +87,16 @@ def reserve(body: ReserveBody, user: AuthUser = Depends(get_current_user)):
         if "QUOTE_EXPIRED" in msg:
             raise HTTPException(status_code=409, detail=msg)
         if "not available" in msg.lower() or "just taken" in msg.lower():
+            # The slot may be blocked by the caller's OWN un-paid hold (they cancelled the
+            # popup and are retrying). Reuse it instead of failing, so retry always works;
+            # only a hold held by SOMEONE ELSE actually returns 409.
+            own = db.get_own_pending_hold(candidate_id, body.mentor_id, body.slot_time.isoformat())
+            if own:
+                try:
+                    db.set_booking_phone(own["booking_id"], body.phone)
+                except Exception:
+                    pass
+                return own
             raise HTTPException(status_code=409, detail=msg)
         logger.exception("reserve failed mentor=%s service=%s", body.mentor_id, body.service_id)
         raise HTTPException(status_code=500, detail="Reservation failed — please try again")
