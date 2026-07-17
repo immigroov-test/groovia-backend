@@ -1748,6 +1748,10 @@ INSERT INTO mentors (
   )
 ON CONFLICT (slug) DO NOTHING;
 
+-- Route the seed/dummy mentors' booking-notification emails to the test inbox (they
+-- have no real account, so mentors.email is their contact address). Testing only.
+UPDATE mentors SET email = 'immigroovtst@gmail.com' WHERE profile_id IS NULL;
+
 -- Remap legacy professional_domains to the 20 canonical field names used by the mentor
 -- onboarding form, so browse filters and the field list stay consistent. Runs for both a
 -- fresh setup (the 14 original rows above still hold legacy values) and an already-seeded
