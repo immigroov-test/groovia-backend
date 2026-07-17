@@ -1,6 +1,6 @@
 import logging
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
@@ -14,6 +14,90 @@ from services import mailer
 logger = logging.getLogger("immigroov.routers.booking")
 
 router = APIRouter(prefix="/booking", tags=["booking"])
+
+# Jitsi 1:1 video. The room is revealed only inside [start - 5min, end + 30min], and
+# only to the booking's candidate or mentor. meet.jit.si is the free public server;
+# swapping to a self-hosted/JWT domain later is just these two constants + a token.
+JITSI_DOMAIN = "meet.jit.si"
+MEETING_OPEN_BEFORE = timedelta(minutes=5)
+MEETING_GRACE_AFTER = timedelta(minutes=30)
+
+
+def _parse_ts(ts: Optional[str]) -> Optional[datetime]:
+    if not ts:
+        return None
+    try:
+        dt = datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
+    except Exception:
+        return None
+
+
+def _meeting_party(meeting: dict, user_id: str) -> Optional[str]:
+    """'candidate' | 'mentor' | None - which side of the booking this user is."""
+    if meeting.get("candidate_id") and meeting["candidate_id"] == user_id:
+        return "candidate"
+    if meeting.get("mentor_profile_id") and meeting["mentor_profile_id"] == user_id:
+        return "mentor"
+    return None
+
+
+@router.get("/{booking_id}/room")
+def meeting_room(booking_id: str, user: AuthUser = Depends(get_current_user)):
+    """Reveal the Jitsi room for a session - only to its candidate/mentor, and only
+    within the join window. Returns {open:false, opens_at} before the window so the
+    page can show a countdown without ever exposing the room early."""
+    m = db.get_booking_meeting(booking_id)
+    if not m:
+        raise HTTPException(status_code=404, detail="Session not found")
+    party = _meeting_party(m, user.id)
+    if not party:
+        raise HTTPException(status_code=403, detail="You are not a participant of this session")
+    if m.get("status") in ("cancelled", "no_show"):
+        raise HTTPException(status_code=409, detail="This session is no longer active")
+
+    slot = _parse_ts(m.get("slot_time"))
+    if not slot:
+        raise HTTPException(status_code=409, detail="This session has no scheduled time yet")
+    end = _parse_ts(m.get("slot_end")) or (slot + timedelta(minutes=30))
+    opens_at = slot - MEETING_OPEN_BEFORE
+    closes_at = end + MEETING_GRACE_AFTER
+    now = datetime.now(timezone.utc)
+
+    display_name = (m.get("candidate_name") if party == "candidate" else m.get("mentor_name")) or ""
+    other_name = (m.get("mentor_name") if party == "candidate" else m.get("candidate_name")) or "the other participant"
+    base = {"party": party, "display_name": display_name, "other_name": other_name,
+            "slot_time": m.get("slot_time"), "opens_at": opens_at.isoformat(), "closes_at": closes_at.isoformat()}
+
+    if now < opens_at:
+        return {"open": False, "reason": "early", **base}
+    if now > closes_at:
+        return {"open": False, "reason": "ended", **base}
+
+    room = db.ensure_meeting_room(booking_id)
+    if not room:
+        raise HTTPException(status_code=500, detail="Could not prepare the meeting room")
+    return {"open": True, "domain": JITSI_DOMAIN, "room": room, **base}
+
+
+class AttendanceBody(BaseModel):
+    event: str   # 'joined' | 'left'
+
+
+@router.post("/{booking_id}/attendance")
+def meeting_attendance(booking_id: str, body: AttendanceBody, user: AuthUser = Depends(get_current_user)):
+    """Record that the caller joined/left the call, for no-show detection. Best-effort
+    (client-reported), attributed to the caller's side of the booking."""
+    if body.event not in ("joined", "left"):
+        raise HTTPException(status_code=400, detail="event must be 'joined' or 'left'")
+    m = db.get_booking_meeting(booking_id)
+    if not m:
+        raise HTTPException(status_code=404, detail="Session not found")
+    party = _meeting_party(m, user.id)
+    if not party:
+        raise HTTPException(status_code=403, detail="You are not a participant of this session")
+    db.record_meeting_attendance(booking_id, party, body.event)
+    return {"ok": True}
 
 
 # ── Slot availability ──────────────────────────────────────────────────────────

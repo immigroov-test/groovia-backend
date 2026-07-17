@@ -1,4 +1,6 @@
 import logging
+import secrets
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from supabase import Client, create_client
@@ -582,3 +584,68 @@ def set_profile_phone_if_empty(profile_id: str, phone: str) -> None:
             _supabase.table("profiles").update({"phone": phone.strip()}).eq("id", profile_id).execute()
     except Exception:
         logger.warning("set_profile_phone_if_empty failed for %s", profile_id)
+
+
+# ── Jitsi 1:1 meeting (room + attendance) ───────────────────────────────────────
+
+def get_booking_meeting(booking_id: str) -> Optional[dict[str, Any]]:
+    """Everything the meeting endpoints need: the two parties (candidate id + mentor's
+    profile id), the schedule, status, the stored room, and display names."""
+    try:
+        res = (
+            _supabase.table("bookings")
+            .select("candidate_id, mentor_id, slot_time, slot_end, status, meeting_room, "
+                    "candidate_name, mentors(profile_id, display_name)")
+            .eq("id", booking_id)
+            .single()
+            .execute()
+        )
+        b = res.data
+        if not b:
+            return None
+        mnt = b.get("mentors") or {}
+        return {
+            "candidate_id":      b.get("candidate_id"),
+            "mentor_id":         b.get("mentor_id"),
+            "mentor_profile_id": mnt.get("profile_id") if isinstance(mnt, dict) else None,
+            "mentor_name":       mnt.get("display_name") if isinstance(mnt, dict) else None,
+            "candidate_name":    b.get("candidate_name"),
+            "slot_time":         b.get("slot_time"),
+            "slot_end":          b.get("slot_end"),
+            "status":            b.get("status"),
+            "meeting_room":      b.get("meeting_room"),
+        }
+    except Exception:
+        logger.exception("get_booking_meeting failed booking=%s", booking_id)
+        return None
+
+
+def ensure_meeting_room(booking_id: str) -> Optional[str]:
+    """Return the booking's Jitsi room, generating an unguessable one on first use.
+    The conditional UPDATE (only when meeting_room IS NULL) makes concurrent
+    candidate+mentor requests converge on the same room instead of racing."""
+    room = f"immigroov-{secrets.token_hex(16)}"
+    try:
+        _supabase.table("bookings").update({"meeting_room": room}) \
+            .eq("id", booking_id).is_("meeting_room", "null").execute()
+        res = _supabase.table("bookings").select("meeting_room").eq("id", booking_id).single().execute()
+        return (res.data or {}).get("meeting_room")
+    except Exception:
+        logger.exception("ensure_meeting_room failed booking=%s", booking_id)
+        return None
+
+
+def record_meeting_attendance(booking_id: str, party: str, event: str) -> None:
+    """Stamp when a party (candidate|mentor) joined or left the call. 'joined' is only
+    written once (first join, for no-show detection); 'left' tracks the last exit."""
+    if party not in ("candidate", "mentor") or event not in ("joined", "left"):
+        return
+    col = f"{party}_joined_at" if event == "joined" else f"{party}_left_at"
+    now = datetime.now(timezone.utc).isoformat()
+    try:
+        q = _supabase.table("bookings").update({col: now}).eq("id", booking_id)
+        if event == "joined":
+            q = q.is_(col, "null")   # keep the FIRST join time only
+        q.execute()
+    except Exception:
+        logger.warning("record_meeting_attendance failed booking=%s party=%s event=%s", booking_id, party, event)

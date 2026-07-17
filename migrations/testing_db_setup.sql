@@ -281,6 +281,14 @@ ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS smart_pricing BOOLEAN NOT NULL DEF
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS candidate_phone TEXT;
 ALTER TABLE services ADD COLUMN IF NOT EXISTS tags TEXT[] NOT NULL DEFAULT '{}';
 
+-- Jitsi 1:1 video: an unguessable room name per booking (revealed only in-window),
+-- plus attendance timestamps (first join / last leave per party) for no-show detection.
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS meeting_room        TEXT;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS candidate_joined_at TIMESTAMPTZ;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS mentor_joined_at    TIMESTAMPTZ;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS candidate_left_at   TIMESTAMPTZ;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS mentor_left_at      TIMESTAMPTZ;
+
 -- ============================================================================
 -- mentor_availability (legacy manual fallback system - superseded by weekly_availability)
 -- ============================================================================
