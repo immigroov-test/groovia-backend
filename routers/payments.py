@@ -297,6 +297,21 @@ def payments_config():
     return {"payments_enabled": db.payments_enabled()}
 
 
+@router.post("/run-dispatcher")
+def run_dispatcher(request: Request, background_tasks: BackgroundTasks):
+    """Protected trigger for the money-correctness dispatcher (expire stale holds,
+    verify-sweep dropped webhooks, refresh FX, process refunds, reconcile). Call it on
+    a schedule via Supabase pg_cron + net.http_post (or any external cron) with the
+    DISPATCHER_TOKEN header — no paid Render Cron Job needed. Runs in the background so
+    the trigger returns immediately; the dispatcher's own lease lock prevents overlap."""
+    token = config.DISPATCHER_TOKEN
+    if not token or request.headers.get("x-dispatcher-token") != token:
+        raise HTTPException(status_code=403, detail="Forbidden")
+    from jobs.run_due import run_due
+    background_tasks.add_task(run_due)
+    return {"ok": True, "scheduled": True}
+
+
 class MockConfirmBody(BaseModel):
     booking_id: str
 

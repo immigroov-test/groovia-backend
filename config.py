@@ -74,6 +74,12 @@ RAZORPAY_WEBHOOK_SECRET = os.getenv("RAZORPAY_WEBHOOK_SECRET", "")
 # INTERNAL_GEO_TOKEN env var (server-only, never NEXT_PUBLIC).
 INTERNAL_GEO_TOKEN = os.getenv("INTERNAL_GEO_TOKEN", "")
 
+# Shared secret protecting the /payments/run-dispatcher trigger. Lets a scheduler
+# (Supabase pg_cron via net.http_post, or any external cron) run the money-correctness
+# dispatcher (expire holds, verify sweep, FX refresh, refunds) without a paid Render
+# Cron Job. Empty = the trigger endpoint is disabled (403).
+DISPATCHER_TOKEN = os.getenv("DISPATCHER_TOKEN", "")
+
 # Feature flags, default ON. Keep in sync with groovia-frontend/lib/features.ts.
 def _flag(name: str, default: bool = True) -> bool:
     raw = os.getenv(name)
