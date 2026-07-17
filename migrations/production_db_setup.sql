@@ -287,6 +287,8 @@ ALTER TABLE bookings ADD COLUMN IF NOT EXISTS candidate_joined_at TIMESTAMPTZ;
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS mentor_joined_at    TIMESTAMPTZ;
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS candidate_left_at   TIMESTAMPTZ;
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS mentor_left_at      TIMESTAMPTZ;
+-- Speeds up the periodic finalize scan (active bookings past their end).
+CREATE INDEX IF NOT EXISTS idx_bookings_active_slot_end ON bookings(slot_end) WHERE status IN ('confirmed','rescheduled');
 
 -- ============================================================================
 -- mentor_availability (legacy manual fallback system - superseded by weekly_availability)
@@ -1767,14 +1769,37 @@ BEGIN
 END;
 $$;
 
+-- Finalize past sessions from attendance (the video join/leave stamps). Both parties
+-- joined -> completed; a party that never joined -> no-show on the missing side. A
+-- 15-min grace lets late join events land first. FOR UPDATE SKIP LOCKED + the status
+-- guard make it idempotent and safe under overlapping cron ticks / concurrency. Kept
+-- the name so the existing 'auto-complete' pg_cron job picks up the new logic.
+-- Fault rules are deliberately simple and easy to adjust: mentor-missing strikes the
+-- mentor (mentee protected); neither-joined is left no_show_by=NULL for admin review.
 CREATE OR REPLACE FUNCTION mark_past_bookings_completed()
 RETURNS INT LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
-DECLARE n INT;
+DECLARE n INT := 0; r RECORD;
 BEGIN
-  UPDATE bookings SET status = 'completed'
-   WHERE status IN ('confirmed','rescheduled')
-     AND slot_end IS NOT NULL AND slot_end < NOW();
-  GET DIAGNOSTICS n = ROW_COUNT;
+  FOR r IN
+    SELECT id, mentor_id, candidate_joined_at, mentor_joined_at
+    FROM bookings
+    WHERE status IN ('confirmed','rescheduled')
+      AND slot_end IS NOT NULL
+      AND slot_end < NOW() - INTERVAL '15 minutes'
+    FOR UPDATE SKIP LOCKED
+  LOOP
+    IF r.candidate_joined_at IS NOT NULL AND r.mentor_joined_at IS NOT NULL THEN
+      UPDATE bookings SET status = 'completed' WHERE id = r.id;
+    ELSIF r.candidate_joined_at IS NOT NULL AND r.mentor_joined_at IS NULL THEN
+      UPDATE bookings SET status = 'no_show', no_show_by = 'mentor' WHERE id = r.id;
+      PERFORM apply_mentor_strike(r.mentor_id);
+    ELSIF r.mentor_joined_at IS NOT NULL AND r.candidate_joined_at IS NULL THEN
+      UPDATE bookings SET status = 'no_show', no_show_by = 'user' WHERE id = r.id;
+    ELSE
+      UPDATE bookings SET status = 'no_show', no_show_by = NULL WHERE id = r.id;
+    END IF;
+    n := n + 1;
+  END LOOP;
   RETURN n;
 END;
 $$;
