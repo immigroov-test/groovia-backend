@@ -649,3 +649,102 @@ def record_meeting_attendance(booking_id: str, party: str, event: str) -> None:
         q.execute()
     except Exception:
         logger.warning("record_meeting_attendance failed booking=%s party=%s event=%s", booking_id, party, event)
+
+
+# ── Unified session detail (candidate / mentor / admin) ─────────────────────────
+
+def get_booking_full_detail(booking_id: str) -> Optional[dict[str, Any]]:
+    """One read powering the role-aware session detail page: booking core, both parties
+    (candidate contact + mentor public info), the service, the latest still-open
+    reschedule offer/request, and the customer payment. The ROUTER decides who may see
+    which fields, computes the join window, and derives capability flags - this just
+    gathers the raw data."""
+    try:
+        res = (
+            _supabase.table("bookings")
+            .select(
+                "id, status, slot_time, slot_end, reschedule_count, no_show_by, "
+                "candidate_id, candidate_name, candidate_email, candidate_phone, attendee_timezone, "
+                "mentor_id, service_id, "
+                "mentors(profile_id, display_name, photo_url, app_timezone, slug, country), "
+                "services(title, duration, type)"
+            )
+            .eq("id", booking_id)
+            .single()
+            .execute()
+        )
+        b = res.data
+    except Exception:
+        logger.exception("get_booking_full_detail failed booking=%s", booking_id)
+        return None
+    if not b:
+        return None
+
+    mnt = b.get("mentors") or {}
+    svc = b.get("services") or {}
+    if not isinstance(mnt, dict):
+        mnt = {}
+    if not isinstance(svc, dict):
+        svc = {}
+
+    # Latest still-open reschedule offer (mentor proposal / mentee selection).
+    offer = None
+    try:
+        o = (
+            _supabase.table("reschedule_offers")
+            .select("id, proposed_by, status, offer_date, range_start, range_end, selected_time")
+            .eq("booking_id", booking_id)
+            .in_("status", ["pending", "mentee_selected"])
+            .order("created_at", desc=True).limit(1).execute()
+        )
+        offer = (o.data or [None])[0]
+    except Exception:
+        offer = None
+
+    # Latest open cancel/reschedule request awaiting a decision.
+    req = None
+    try:
+        r = (
+            _supabase.table("booking_requests")
+            .select("id, kind, initiated_by, status, respond_by")
+            .eq("booking_id", booking_id)
+            .in_("status", ["pending", "approved", "auto_approved"])
+            .order("created_at", desc=True).limit(1).execute()
+        )
+        req = (r.data or [None])[0]
+    except Exception:
+        req = None
+
+    from .payments import get_payment_by_booking
+    try:
+        payment = get_payment_by_booking(booking_id)
+    except Exception:
+        payment = None
+
+    return {
+        "id":               b.get("id"),
+        "status":           b.get("status"),
+        "slot_time":        b.get("slot_time"),
+        "slot_end":         b.get("slot_end"),
+        "reschedule_count": b.get("reschedule_count") or 0,
+        "no_show_by":       b.get("no_show_by"),
+        "candidate_id":     b.get("candidate_id"),
+        "candidate_name":   b.get("candidate_name"),
+        "candidate_email":  b.get("candidate_email"),
+        "candidate_phone":  b.get("candidate_phone"),
+        "attendee_tz":      b.get("attendee_timezone") or "UTC",
+        "mentor_id":        b.get("mentor_id"),
+        "service_id":       b.get("service_id"),
+        "mentor_profile_id": mnt.get("profile_id"),
+        "mentor_name":      mnt.get("display_name"),
+        "mentor_photo":     mnt.get("photo_url"),
+        "mentor_slug":      mnt.get("slug"),
+        "mentor_tz":        mnt.get("app_timezone") or "UTC",
+        "mentor_country":   mnt.get("country"),
+        "service_title":    svc.get("title"),
+        "service_duration": svc.get("duration"),
+        "service_type":     svc.get("type"),
+        "offer":            offer,
+        "request":          req,
+        "payment":          payment,
+    }

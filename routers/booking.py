@@ -100,6 +100,108 @@ def meeting_attendance(booking_id: str, body: AttendanceBody, user: AuthUser = D
     return {"ok": True}
 
 
+# ── Unified session detail (candidate / mentor / admin) ─────────────────────────
+
+@router.get("/{booking_id}/detail")
+def booking_detail(booking_id: str, user: AuthUser = Depends(get_current_user)):
+    """Role-aware detail for the session page. Returns the confirmation-style fields plus
+    capability flags and the join window (identical to the /room gate, so the page and the
+    room agree on when 'Join' is live). Candidate/mentor/admin each see only what they should."""
+    d = db.get_booking_full_detail(booking_id)
+    if not d:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    is_candidate = bool(d.get("candidate_id") and d["candidate_id"] == user.id)
+    is_mentor = bool(d.get("mentor_profile_id") and d["mentor_profile_id"] == user.id)
+    is_admin = (not is_candidate and not is_mentor) and db.get_profile_role(user.id) == "admin"
+    if not (is_candidate or is_mentor or is_admin):
+        raise HTTPException(status_code=403, detail="You are not a participant of this session")
+    role = "candidate" if is_candidate else "mentor" if is_mentor else "admin"
+
+    status = d.get("status")
+    active = status in ("confirmed", "rescheduled")
+    unpaid_hold = status == "pending"
+    slot = _parse_ts(d.get("slot_time"))
+    dur = d.get("service_duration") or 30
+    end = _parse_ts(d.get("slot_end")) or (slot + timedelta(minutes=dur) if slot else None)
+    now = datetime.now(timezone.utc)
+    is_past = bool(slot and slot < now)
+
+    # Join window == the /room gate: open only within [slot - 5min, end + 30min].
+    opens_at = (slot - MEETING_OPEN_BEFORE) if slot else None
+    closes_at = (end + MEETING_GRACE_AFTER) if end else None
+    join_open = bool(active and slot and closes_at and opens_at <= now <= closes_at)
+
+    # Deadline state, mirroring reschedule_slots: buffer < 2h, late < 24h, else free.
+    deadline_state = None
+    if slot:
+        hours = (slot - now).total_seconds() / 3600
+        deadline_state = "buffer" if hours < 2 else "late" if hours < 24 else "free"
+
+    can_pay = bool(is_candidate and unpaid_hold and not is_past)
+    can_join = bool((is_candidate or is_mentor) and join_open)
+    can_reschedule = bool((is_candidate or is_mentor) and active and not is_past and deadline_state != "buffer")
+    can_cancel = bool((is_candidate or is_mentor) and active and not is_past)
+    can_report_no_show = bool((is_candidate or is_mentor) and active and slot and now > slot + timedelta(minutes=10))
+
+    out: dict = {
+        "id": d["id"],
+        "role": role,
+        "status": status,
+        "service_title": d.get("service_title") or "Session",
+        "service_duration": d.get("service_duration"),
+        "service_type": d.get("service_type"),
+        "slot_time": d.get("slot_time"),
+        "slot_end": d.get("slot_end"),
+        "is_past": is_past,
+        "paid": active,               # confirmed/rescheduled == paid (or free/mock)
+        "unpaid_hold": unpaid_hold,
+        "reschedule_count": d.get("reschedule_count") or 0,
+        "no_show_by": d.get("no_show_by"),
+        "deadline_state": deadline_state,
+        "opens_at": opens_at.isoformat() if opens_at else None,
+        "join_open": join_open,
+        "offer": d.get("offer"),
+        "request": d.get("request"),
+        "candidate_tz": d.get("attendee_tz"),
+        "mentor_name": d.get("mentor_name"),
+        "mentor_photo": d.get("mentor_photo"),
+        "mentor_slug": d.get("mentor_slug"),
+        "mentor_tz": d.get("mentor_tz"),
+        "mentor_country": d.get("mentor_country"),
+        "can_pay": can_pay,
+        "can_join": can_join,
+        "can_reschedule": can_reschedule,
+        "can_cancel": can_cancel,
+        "can_report_no_show": can_report_no_show,
+    }
+
+    # Candidate's contact details are for the mentor + admin only.
+    if is_mentor or is_admin:
+        out["candidate_name"] = d.get("candidate_name")
+        out["candidate_email"] = d.get("candidate_email")
+        out["candidate_phone"] = d.get("candidate_phone")
+
+    # Payment amount/state: the candidate sees their own; mentor + admin see it too.
+    pay = d.get("payment")
+    if pay:
+        out["payment"] = {
+            "state": pay.get("state"),
+            "amount": pay.get("amount"),
+            "currency": pay.get("currency"),
+        }
+
+    # What the candidate needs to re-enter checkout on an unpaid hold.
+    if can_pay:
+        out["pay_context"] = {
+            "mentor_id": d.get("mentor_id"),
+            "service_id": d.get("service_id"),
+            "mentor_slug": d.get("mentor_slug"),
+            "phone": d.get("candidate_phone") or "",
+        }
+    return out
+
+
 # ── Slot availability ──────────────────────────────────────────────────────────
 
 @router.get("/slots/{mentor_id}/{service_id}")

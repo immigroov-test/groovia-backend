@@ -1965,6 +1965,9 @@ RETURNS TABLE (
   ) rq ON TRUE
   WHERE b.mentor_id = p_mentor_id
     AND b.slot_time IS NOT NULL
+    -- Unpaid payment holds ('pending') are hidden from the mentor: a slot isn't the
+    -- mentor's session until the candidate has actually paid. It appears once confirmed.
+    AND b.status <> 'pending'
   ORDER BY b.slot_time DESC NULLS LAST;
 $$;
 GRANT EXECUTE ON FUNCTION mentor_sessions(UUID) TO authenticated;
