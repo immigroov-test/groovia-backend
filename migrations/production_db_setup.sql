@@ -540,9 +540,15 @@ DROP FUNCTION IF EXISTS question_list(uuid);
 DROP FUNCTION IF EXISTS book_session(uuid, uuid, timestamptz, text, text, text, jsonb, uuid, uuid);
 
 CREATE OR REPLACE FUNCTION email_account_status(p_email text)
-RETURNS TABLE (has_password boolean)
+RETURNS TABLE (has_password boolean, providers text[])
 LANGUAGE sql SECURITY DEFINER SET search_path = public, auth AS $$
-  SELECT (u.encrypted_password IS NOT NULL AND length(u.encrypted_password) > 0)
+  -- has_password lets the popup route real password accounts to the login screen;
+  -- providers (e.g. ['google'], ['email'], ['email','google']) lets it detect an
+  -- OAuth-created account with no password and say "continue with Google" instead of
+  -- wrongly emailing an OTP link + forcing a password.
+  SELECT
+    (u.encrypted_password IS NOT NULL AND length(u.encrypted_password) > 0),
+    COALESCE(ARRAY(SELECT jsonb_array_elements_text(u.raw_app_meta_data -> 'providers')), ARRAY[]::text[])
   FROM auth.users u
   WHERE lower(u.email) = lower(p_email)
   LIMIT 1;
