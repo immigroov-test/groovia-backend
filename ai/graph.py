@@ -359,12 +359,18 @@ async def call_model(state: AgentState):
             else:
                 new_intent = "qna"
 
-    # Resume gate trumps everything.
-    if not raw_resume:
+    # Resume gate is now REPORT-ONLY: a career report analyzes the user's OWN background, so it
+    # needs a resume. Mentor discovery and Q&A run resume-less. Anything that isn't clearly a
+    # report or mentor request (and isn't a bare ack or a [SYSTEM_...] trigger) defaults to
+    # Q&A, so a free-typed question is answered instead of being bounced to "upload a resume".
+    if new_intent in (None, "no_resume", "awaiting_intent"):
+        is_system = last_human_text.strip().startswith("[SYSTEM_")
+        if is_new_turn and last_lower.strip() and not is_system and not _is_ack(last_lower):
+            new_intent = "qna"
+        else:
+            new_intent = "awaiting_intent"
+    if new_intent == "report" and not raw_resume:
         new_intent = "no_resume"
-    elif new_intent == "no_resume":
-        # Resume just arrived; waiting for the user to pick an intent.
-        new_intent = "awaiting_intent"
 
     # Step 2: short-circuit clarification (zero LLM calls).
     short_circuit: Optional[str] = None
@@ -464,7 +470,7 @@ async def call_model(state: AgentState):
         + f"\nINTENT: {new_intent}"
         + f"\nTRACK: {new_track or 'Unknown'}"
         + f"\nTARGET_COUNTRY: {new_target_country or 'Unknown'}"
-        + f"\nRESUME_SUMMARY: {raw_resume}"
+        + f"\nRESUME_SUMMARY: {raw_resume or 'Not provided'}"
         + f"\nFEEDBACK: {critique_to_use or 'None'}"
         + (f"\nMENTOR_INVENTORY:\n{mentor_inventory}" if mentor_inventory else "")
     )

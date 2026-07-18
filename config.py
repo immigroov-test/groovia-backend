@@ -90,7 +90,7 @@ def _flag(name: str, default: bool = True) -> bool:
 MOCK_SERVICES = _flag("MOCK_SERVICES", default=False)        # Intercept Resend + webhook sig checks locally
 
 FEATURE_CHAT_HISTORY    = _flag("FEATURE_CHAT_HISTORY")     # Recent-chats sidebar list
-FEATURE_GUEST_MODE      = _flag("FEATURE_GUEST_MODE")       # Chat works without sign-in until resume upload
+FEATURE_GUEST_MODE      = _flag("FEATURE_GUEST_MODE")       # Inert: /chat now requires auth (Q&A + report are login-gated; find-a-mentor is public via /mentors)
 FEATURE_MENTORS_PUBLIC  = _flag("FEATURE_MENTORS_PUBLIC")   # Anyone can browse /mentors
 FEATURE_WEB_SEARCH_TOOL = _flag("FEATURE_WEB_SEARCH_TOOL")  # Agent can call Tavily + Exa
 FEATURE_MENTOR_TOOL     = _flag("FEATURE_MENTOR_TOOL")      # Agent can call retrieve_matching_mentors

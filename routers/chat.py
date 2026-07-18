@@ -13,9 +13,9 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 import config
 import db
 import ai.graph as backend  # accessed at request-time so we read the lifespan-initialized app
-from core.auth import AuthUser, get_current_user, get_current_user_optional
+from core.auth import AuthUser, get_current_user
 from ai.graph import _text
-from ai.smalltalk import smalltalk_reply, RESUME_GATE_REPLY
+from ai.smalltalk import smalltalk_reply
 from core.rate_limit import limiter
 from schema import ChatResponse
 from ai.tools import parse_docx_to_text, parse_pdf_to_text
@@ -102,9 +102,11 @@ async def chat_handler(
     message: str = Form(...),
     thread_id: str = Form(...),
     file: Optional[UploadFile] = File(None),
-    user: Optional[AuthUser] = Depends(get_current_user_optional),
+    user: AuthUser = Depends(get_current_user),
 ):
-    """Main chat endpoint. Works in guest mode (no JWT) and authenticated mode."""
+    """Main chat endpoint. Requires a signed-in user: Q&A and career reports both go through
+    here, so login is enforced server-side (no tokens on anonymous callers). Find-a-mentor
+    stays public via the /mentors API and never hits this endpoint."""
     try:
         uuid.UUID(thread_id)
     except ValueError:
@@ -141,30 +143,11 @@ async def chat_handler(
 
     await backend.ensure_pg_connected()
 
-    # ── Resume-first gate + generic-term warning (no LLM call) ──────────────────────
-    # System messages (e.g. the resume-upload trigger) are never gated. Otherwise:
-    #   • No resume/profile yet in this thread  -> ask the user to upload one first.
-    #   • Resume present + pure small talk       -> short credits/relevance warning.
-    #   • Resume present + a real question       -> falls through to the agent.
-    # `has_resume` is true if a resume is attached now, one was processed earlier in this
-    # thread (checkpoint), or a logged-in user already has a saved profile summary.
+    # ── Cheap canned reply (no LLM call) ────────────────────────────────────────────
+    # Small talk / bare greetings get a canned reply so the model is never invoked. The
+    # resume requirement is now enforced PER-INTENT inside the agent (a career report needs
+    # a resume; mentor discovery + Q&A do not), so there's no blanket resume wall here.
     if not message.strip().startswith("[SYSTEM_"):
-        has_resume = resume_text is not None
-        if not has_resume and user:
-            # Cheap single-row lookup first: a logged-in user who uploaded before is done.
-            has_resume = bool(await asyncio.to_thread(db.get_profile_summary, user.id))
-        if not has_resume:
-            # Fall back to the thread checkpoint (covers guests + first-thread uploads).
-            try:
-                snap = await backend.app.aget_state(session_config)
-                vals = (snap.values if snap else {}) or {}
-                has_resume = bool(vals.get("resume_processed") or vals.get("resume_text"))
-            except Exception:
-                pass
-
-        if not has_resume:
-            return {"status": "success", "response": RESUME_GATE_REPLY, "thread_id": thread_id}
-
         canned = smalltalk_reply(message)
         if canned:
             return {"status": "success", "response": canned, "thread_id": thread_id}
