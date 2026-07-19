@@ -1463,6 +1463,9 @@ BEGIN
     UPDATE bookings SET status = 'cancelled' WHERE id = p_booking_id RETURNING * INTO b;
     UPDATE reschedule_offers SET status = 'superseded'
       WHERE booking_id = p_booking_id AND status IN ('pending','mentee_selected');
+    -- Mentor cancel: customer always refunded 100%; a late cancel also penalizes the mentor 25%.
+    PERFORM settle_booking(p_booking_id, 'Mentor cancelled', p_cust_refund_pct => 100,
+                           p_mentor_penalty_pct => CASE WHEN v_state = 'late' THEN 25 ELSE 0 END);
     IF v_state = 'late' THEN PERFORM bump_mentor_cancellation(b.mentor_id); END IF;
     PERFORM notify_booking_event(p_booking_id, 'cancelled');
     RETURN b;
@@ -1472,6 +1475,7 @@ BEGIN
     UPDATE bookings SET status = 'cancelled' WHERE id = p_booking_id RETURNING * INTO b;
     UPDATE reschedule_offers SET status = 'superseded'
       WHERE booking_id = p_booking_id AND status IN ('pending','mentee_selected');
+    PERFORM settle_booking(p_booking_id, 'Customer cancelled (free)', p_cust_refund_pct => 100);
     PERFORM notify_booking_event(p_booking_id, 'cancelled');
     RETURN b;
   ELSE
@@ -1497,14 +1501,19 @@ BEGIN
   IF NOT FOUND OR r.status <> 'pending' THEN RAISE EXCEPTION 'This request is no longer open'; END IF;
 
   IF r.kind = 'cancel' THEN
-    -- A late cancel resolves to cancelled either way (accept = goodwill, reject =
-    -- 50% fee would apply once payments exist). State is identical without money.
+    -- A late cancel resolves to cancelled either way. Accept (or cron auto-approve) = goodwill,
+    -- full refund. Reject = platform keeps 50%, customer refunded the other 50%.
     UPDATE bookings SET status = 'cancelled' WHERE id = r.booking_id;
     UPDATE booking_requests
        SET status = CASE WHEN p_accept THEN 'approved' ELSE 'rejected' END, resolved_at = NOW()
      WHERE id = p_request_id;
     UPDATE reschedule_offers SET status = 'superseded'
       WHERE booking_id = r.booking_id AND status IN ('pending','mentee_selected');
+    IF p_accept THEN
+      PERFORM settle_booking(r.booking_id, 'Late cancel approved', p_cust_refund_pct => 100);
+    ELSE
+      PERFORM settle_booking(r.booking_id, 'Late cancel rejected', p_cust_refund_pct => 50, p_cust_charge_pct => 50);
+    END IF;
     PERFORM notify_booking_event(r.booking_id, 'cancelled');
   ELSIF r.kind = 'reschedule' THEN
     IF p_accept THEN
@@ -1526,6 +1535,13 @@ BEGIN
   UPDATE bookings SET status = 'cancelled' WHERE id = p_booking_id;
   UPDATE reschedule_offers SET status = 'superseded'
     WHERE booking_id = p_booking_id AND status IN ('pending','mentee_selected');
+  -- 3rd reschedule attempt: 100% penalty on the initiator. Customer-initiated -> they forfeit
+  -- (net 0 back). Mentor-initiated -> customer fully refunded + mentor penalized 100%.
+  IF p_initiator = 'mentor' THEN
+    PERFORM settle_booking(p_booking_id, '3rd reschedule (mentor)', p_cust_refund_pct => 100, p_mentor_penalty_pct => 100);
+  ELSE
+    PERFORM settle_booking(p_booking_id, '3rd reschedule (customer)', p_cust_charge_pct => 100);
+  END IF;
   PERFORM notify_booking_event(p_booking_id, 'cancelled');
 END;
 $$;
@@ -1581,6 +1597,8 @@ BEGIN
                       reschedule_count = reschedule_count + 1
     WHERE id = o.booking_id RETURNING * INTO b;
   DELETE FROM booking_reminders WHERE booking_id = o.booking_id;
+  -- A reschedule the mentor proposed late (was_late) penalizes the mentor 25%; no customer charge.
+  IF o.was_late THEN PERFORM settle_booking(o.booking_id, 'Late reschedule accepted', p_mentor_penalty_pct => 25); END IF;
   PERFORM notify_booking_event(o.booking_id, 'rescheduled');
   RETURN b;
 END;
@@ -1597,6 +1615,13 @@ BEGIN
   END IF;
   UPDATE reschedule_offers SET status = 'rejected' WHERE id = p_offer_id;
   UPDATE bookings SET status = 'cancelled' WHERE id = o.booking_id RETURNING * INTO b;
+  -- Rejecting the mentor's proposal cancels the booking. Late proposal -> full cash refund +
+  -- 25% mentor penalty; within-deadline -> wallet credit only (no cash back).
+  IF o.was_late THEN
+    PERFORM settle_booking(o.booking_id, 'Reschedule rejected (late)', p_cust_refund_pct => 100, p_mentor_penalty_pct => 25);
+  ELSE
+    PERFORM settle_booking(o.booking_id, 'Reschedule rejected (within)', p_cust_credit_pct => 100);
+  END IF;
   PERFORM notify_booking_event(o.booking_id, 'cancelled');
   RETURN b;
 END;
@@ -1715,17 +1740,24 @@ $$;
 -- Mentor no-showed → the user picks one of three outcomes.
 CREATE OR REPLACE FUNCTION resolve_mentor_no_show(p_booking_id UUID, p_choice TEXT)
 RETURNS bookings LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
-DECLARE b bookings;
+DECLARE b bookings; v_strikes INT;
 BEGIN
   SELECT * INTO b FROM bookings WHERE id = p_booking_id;
   IF b.no_show_by IS DISTINCT FROM 'mentor' OR b.status <> 'no_show' THEN
     RAISE EXCEPTION 'Not a mentor no-show awaiting resolution';
   END IF;
   IF p_choice = 'rebook_same' THEN
+    -- Forgiven: no strike, no penalty, session reinstated.
     UPDATE bookings SET status = 'confirmed', no_show_by = NULL WHERE id = p_booking_id RETURNING * INTO b;
   ELSIF p_choice IN ('rebook_different','refund') THEN
-    PERFORM apply_mentor_strike(b.mentor_id);
-    -- status stays 'no_show'; (credit/refund would post to the ledger in Phase 2)
+    -- Strike the mentor here (once, at resolution). 25% payout penalty from the 3rd strike on.
+    v_strikes := apply_mentor_strike(b.mentor_id);
+    PERFORM settle_booking(p_booking_id,
+      CASE WHEN p_choice = 'refund' THEN 'Mentor no-show - refund' ELSE 'Mentor no-show - rebook different' END,
+      p_cust_refund_pct   => CASE WHEN p_choice = 'refund'          THEN 100 ELSE 0 END,
+      p_cust_credit_pct   => CASE WHEN p_choice = 'rebook_different' THEN 100 ELSE 0 END,
+      p_mentor_penalty_pct => CASE WHEN v_strikes >= 3 THEN 25 ELSE 0 END);
+    -- status stays 'no_show'
   ELSE
     RAISE EXCEPTION 'Unknown choice %', p_choice;
   END IF;
@@ -1746,6 +1778,8 @@ BEGIN
     UPDATE bookings SET status = 'confirmed', no_show_by = NULL WHERE id = p_booking_id RETURNING * INTO b;
   ELSIF p_choice = 'reject' THEN
     UPDATE bookings SET status = 'completed' WHERE id = p_booking_id RETURNING * INTO b;
+    -- Customer no-showed and the mentor closes it: mentor is paid in full (credit 100%).
+    PERFORM settle_booking(p_booking_id, 'Customer no-show - closed', p_mentor_credit_pct => 100);
   ELSE
     RAISE EXCEPTION 'Unknown choice %', p_choice;
   END IF;
@@ -1798,7 +1832,8 @@ BEGIN
       UPDATE bookings SET status = 'completed' WHERE id = r.id;
     ELSIF r.candidate_joined_at IS NOT NULL AND r.mentor_joined_at IS NULL THEN
       UPDATE bookings SET status = 'no_show', no_show_by = 'mentor' WHERE id = r.id;
-      PERFORM apply_mentor_strike(r.mentor_id);
+      -- Strike + 25% penalty are applied at RESOLUTION (resolve_mentor_no_show) so "rebook same"
+      -- waives them and the mentor is never struck twice for one no-show.
     ELSIF r.mentor_joined_at IS NOT NULL AND r.candidate_joined_at IS NULL THEN
       UPDATE bookings SET status = 'no_show', no_show_by = 'user' WHERE id = r.id;
     ELSE
@@ -2464,6 +2499,37 @@ BEGIN
             ROUND(COALESCE(p_amount, 0) * v_fx, 2));
 END;
 $$;
+
+-- One settlement per terminal outcome. Posts the customer's NET cash refund plus any kept
+-- charge / wallet credit, and the mentor's penalty / credit, all as booking_ledger rows.
+-- Amounts derive from the ACTUALLY-charged customer payment and the mentor payout basis, so a
+-- free/mock session (no captured payment) posts nothing. Only 'refund' rows drive real cash
+-- (refund_owed_minor -> process_refunds); 'charge' / 'credit' / 'penalty' are records for the
+-- payouts + wallet phases. Percentages come from the booking-workflow spec.
+CREATE OR REPLACE FUNCTION settle_booking(
+  p_booking UUID, p_reason TEXT,
+  p_cust_refund_pct INT DEFAULT 0, p_cust_charge_pct INT DEFAULT 0, p_cust_credit_pct INT DEFAULT 0,
+  p_mentor_penalty_pct INT DEFAULT 0, p_mentor_credit_pct INT DEFAULT 0
+) RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_cust NUMERIC; v_ment NUMERIC;
+BEGIN
+  SELECT amount INTO v_cust FROM customer_payments
+    WHERE booking_id = p_booking AND state IN ('captured','partially_refunded','refunded')
+    ORDER BY created_at DESC LIMIT 1;
+  SELECT amount INTO v_ment FROM mentor_payouts WHERE booking_id = p_booking LIMIT 1;
+  v_cust := COALESCE(v_cust, 0); v_ment := COALESCE(v_ment, 0);
+  IF v_cust > 0 THEN
+    IF p_cust_refund_pct > 0 THEN PERFORM add_ledger(p_booking,'customer','refund', ROUND(v_cust*p_cust_refund_pct/100.0,2), p_cust_refund_pct, p_reason); END IF;
+    IF p_cust_charge_pct > 0 THEN PERFORM add_ledger(p_booking,'customer','charge', ROUND(v_cust*p_cust_charge_pct/100.0,2), p_cust_charge_pct, p_reason); END IF;
+    IF p_cust_credit_pct > 0 THEN PERFORM add_ledger(p_booking,'customer','credit', ROUND(v_cust*p_cust_credit_pct/100.0,2), p_cust_credit_pct, p_reason); END IF;
+  END IF;
+  IF v_ment > 0 THEN
+    IF p_mentor_penalty_pct > 0 THEN PERFORM add_ledger(p_booking,'mentor','penalty', ROUND(v_ment*p_mentor_penalty_pct/100.0,2), p_mentor_penalty_pct, p_reason); END IF;
+    IF p_mentor_credit_pct > 0 THEN PERFORM add_ledger(p_booking,'mentor','credit', ROUND(v_ment*p_mentor_credit_pct/100.0,2), p_mentor_credit_pct, p_reason); END IF;
+  END IF;
+END;
+$$;
+REVOKE ALL ON FUNCTION settle_booking(UUID, TEXT, INT, INT, INT, INT, INT) FROM PUBLIC, anon, authenticated;
 
 -- ── Payment state machine + payout admin ops ─────────────────────────────────
 -- Legal customer_payments.state transitions. Called by the webhook handler and
