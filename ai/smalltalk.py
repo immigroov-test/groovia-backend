@@ -47,15 +47,6 @@ _CAPABILITIES = {
 _NUDGE = ("Quick note: every message uses AI credits, so please use Groovia for your "
           "career, job, and immigration questions, and ask them directly.")
 
-# Shown when someone types before uploading a resume/profile: asks them to upload first,
-# and carries the same credits + relevance reminder as the generic-term warning.
-RESUME_GATE_REPLY = (
-    "To give you advice that truly fits your situation, please upload your resume or "
-    "profile using the button below first. Once I can see your background, I'll help with "
-    "your career, job, and immigration questions. Every message uses AI credits, so please "
-    "keep your questions relevant to careers, jobs, and immigration."
-)
-
 _REPLIES: dict[str, str] = {
     "greeting": (f"Hi! 👋 What would you like help with today? {_NUDGE}"),
     "farewell": ("Take care! 👋 Come back anytime with your career, job or immigration questions."),
