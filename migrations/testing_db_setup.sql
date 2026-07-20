@@ -3463,31 +3463,20 @@ BEGIN
   END IF;
 END $$;
 
--- Tick the money + notifications dispatcher (jobs/run_due.py) every 5 min via the protected
--- POST /payments/run-dispatcher trigger. This is what SENDS the 24h/1h session reminders and the
--- T-60 mentor attendance nudge, and runs the FX / refund / verify-sweep money jobs. Guarded so
--- setup still succeeds where pg_cron/pg_net aren't enabled.
---   Requires (run once, then re-run this block):
---     CREATE EXTENSION IF NOT EXISTS pg_net;
---     ALTER DATABASE postgres SET app.backend_url      = 'https://groovia-4bet.onrender.com';
---     ALTER DATABASE postgres SET app.dispatcher_token = '<your DISPATCHER_TOKEN>';
-DO $$
-BEGIN
-  IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron')
-     AND EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_net') THEN
-    IF EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'run-dispatcher') THEN
-      PERFORM cron.unschedule('run-dispatcher');
-    END IF;
-    PERFORM cron.schedule('run-dispatcher', '*/5 * * * *', $cron$
-      SELECT net.http_post(
-        url     := current_setting('app.backend_url', true) || '/payments/run-dispatcher',
-        headers := jsonb_build_object(
-                     'Content-Type', 'application/json',
-                     'X-Dispatcher-Token', current_setting('app.dispatcher_token', true)),
-        body    := '{}'::jsonb
-      );
-    $cron$);
-  ELSE
-    RAISE NOTICE 'pg_cron/pg_net not enabled - skipping run-dispatcher schedule. Enable both, set app.backend_url + app.dispatcher_token, then re-run this block.';
-  END IF;
-END $$;
+-- Dispatcher schedule (24h/1h reminders + T-60 mentor nudge + FX/refund/verify money jobs) is
+-- scheduled MANUALLY, not here: Supabase forbids ALTER DATABASE SET, so the URL + token must be
+-- pasted inline. This is intentionally NOT auto-run so a re-run never clobbers a working job.
+-- One-time setup:
+--   1. Enable pg_cron + pg_net (Dashboard -> Database -> Extensions).
+--   2. Set DISPATCHER_TOKEN on the backend (Render env var).
+--   3. Run once (swap in your backend URL + the same token):
+--        do $$ begin
+--          if exists (select 1 from cron.job where jobname='run-dispatcher') then
+--            perform cron.unschedule('run-dispatcher'); end if;
+--          perform cron.schedule('run-dispatcher','*/5 * * * *', $cron$
+--            select net.http_post(
+--              url     := 'https://groovia-4bet.onrender.com/payments/run-dispatcher',
+--              headers := jsonb_build_object('Content-Type','application/json',
+--                           'X-Dispatcher-Token','<your DISPATCHER_TOKEN>'),
+--              body    := '{}'::jsonb);
+--          $cron$); end $$;
