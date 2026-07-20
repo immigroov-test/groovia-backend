@@ -9,7 +9,7 @@ from pydantic import BaseModel, field_validator
 
 import config
 import db
-from core.auth import AuthUser, get_current_user
+from core.auth import AuthUser, get_current_user, get_current_user_optional
 
 logger = logging.getLogger("immigroov.routers.payments")
 
@@ -54,14 +54,15 @@ class ReserveBody(BaseModel):
 
 
 @router.post("/reserve")
-def reserve(body: ReserveBody, user: AuthUser = Depends(get_current_user)):
-    """Consume a binding price quote into a 10-minute payment-hold booking.
-    BUG-025: requires a real account - guest booking was removed, so every booking
-    is attached to a candidate_id from here on. The caller must follow up with
-    /payments/razorpay/create-order (or, when payments are disabled,
-    /payments/confirm-mock) before the hold expires."""
+def reserve(body: ReserveBody, user: Optional[AuthUser] = Depends(get_current_user_optional)):
+    """Consume a binding price quote into a 10-minute payment-hold booking. Guest-allowed
+    (flight-style checkout): a signed-in caller attaches candidate_id; a guest books with
+    candidate_id NULL and their identity lives in candidate_email/name/phone, to be claimed
+    when they later sign up with that email. The caller must follow up with
+    /payments/razorpay/create-order (or, when payments are disabled, /payments/confirm-mock)
+    before the hold expires."""
     answers_json = [a.model_dump() for a in body.answers]
-    candidate_id = user.id
+    candidate_id = user.id if user else None
     try:
         result = db.reserve_booking(
             quote_id=body.quote_id,
@@ -89,8 +90,9 @@ def reserve(body: ReserveBody, user: AuthUser = Depends(get_current_user)):
         if "not available" in msg.lower() or "just taken" in msg.lower():
             # The slot may be blocked by the caller's OWN un-paid hold (they cancelled the
             # popup and are retrying). Reuse it instead of failing, so retry always works;
-            # only a hold held by SOMEONE ELSE actually returns 409.
-            own = db.get_own_pending_hold(candidate_id, body.mentor_id, body.slot_time.isoformat())
+            # only a hold held by SOMEONE ELSE actually returns 409. Guests are matched by email.
+            own = db.get_own_pending_hold(candidate_id, body.mentor_id, body.slot_time.isoformat(),
+                                          candidate_email=body.email)
             if own:
                 try:
                     db.set_booking_phone(own["booking_id"], body.phone)

@@ -2,13 +2,14 @@ import logging
 import re
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, EmailStr, field_validator
 
 import config
 import db
-from core.auth import AuthUser, get_current_user
+from core.auth import AuthUser, get_current_user, get_current_user_optional
 from services import mailer
 
 logger = logging.getLogger("immigroov.routers.booking")
@@ -329,12 +330,12 @@ class BookSessionBody(BaseModel):
 def book_session(
     body: BookSessionBody,
     background_tasks: BackgroundTasks,
-    user: AuthUser = Depends(get_current_user),
+    user: Optional[AuthUser] = Depends(get_current_user_optional),
 ):
-    """Book a direct session slot. BUG-025: requires a real account - this legacy
-    endpoint (superseded by the quote/reserve/confirm flow in routers/payments.py,
-    but still reachable directly) previously allowed guest bookings via
-    get_current_user_optional; closed to keep the no-guest-checkout rule airtight."""
+    """Book a direct session slot (free / mock-confirm path). Guest-allowed (flight-style):
+    a signed-in caller attaches candidate_id; a guest books with candidate_id NULL and their
+    identity lives in candidate_email/name/phone, claimed when they later sign up with that
+    email. The quote/reserve/confirm flow in routers/payments.py is the paid equivalent."""
     # Idempotency: a retried/duplicated request (e.g. after a dropped network response)
     # returns the original booking instead of creating a second one.
     if body.idempotency_key:
@@ -343,7 +344,7 @@ def book_session(
             return {"booking_id": existing["id"], "status": existing.get("status", "confirmed")}
 
     answers_json = [a.model_dump() for a in body.answers]
-    candidate_id = user.id
+    candidate_id = user.id if user else None
     try:
         result = db.book_session(
             mentor_id=body.mentor_id,
@@ -778,6 +779,11 @@ def _send_booking_confirmation(
         candidate_time = _fmt("customer_local", "customer_tz")
         mentor_time = _fmt("mentor_local", "mentor_tz")
 
+        # Guest booking (candidate_id NULL): tell them to create an account with THIS email to
+        # join + manage (that signup auto-links the booking + payment via /auth/sync).
+        is_guest = not info.get("candidate_id")
+        signup_url = f"{config.FRONTEND_URL}/home?auth=open&email={quote(candidate_email or '')}"
+
         mailer.send_transactional(
             candidate_email,
             "booking_confirmed_candidate",
@@ -789,6 +795,8 @@ def _send_booking_confirmation(
                 "candidate_time": candidate_time,
                 "mentor_time": mentor_time,
                 "meeting_url": meeting_url,
+                "is_guest": is_guest,
+                "signup_url": signup_url,
             },
         )
 

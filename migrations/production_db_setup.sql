@@ -1914,7 +1914,10 @@ RETURNS TABLE (
   req_kind         TEXT,
   req_initiated_by TEXT,
   req_status       TEXT,
-  req_respond_by   TIMESTAMPTZ
+  req_respond_by   TIMESTAMPTZ,
+  pay_amount       NUMERIC,       -- what the candidate was charged (their currency)
+  pay_currency     TEXT,
+  pay_state        TEXT           -- created|captured|refunded|... (NULL for free/mock)
 ) LANGUAGE sql SECURITY DEFINER SET search_path = public AS $$
   SELECT
     b.id, b.status::TEXT, b.slot_time, b.slot_end, b.meeting_url,
@@ -1925,7 +1928,8 @@ RETURNS TABLE (
     b.reschedule_count, b.no_show_by, booking_deadline_state(b.slot_time),
     ro.id, ro.proposed_by, ro.status, ro.offer_date, ro.range_start, ro.range_end,
     ro.selected_time, ro.requested_date,
-    rq.id, rq.kind, rq.initiated_by, rq.status, rq.respond_by
+    rq.id, rq.kind, rq.initiated_by, rq.status, rq.respond_by,
+    cp.amount, cp.currency, cp.state
   FROM bookings b
   JOIN  mentors  m ON m.id = b.mentor_id
   LEFT JOIN services s ON s.id = b.service_id
@@ -1940,6 +1944,10 @@ RETURNS TABLE (
     WHERE booking_id = b.id AND status IN ('pending','approved','auto_approved')
     ORDER BY created_at DESC LIMIT 1
   ) rq ON TRUE
+  LEFT JOIN LATERAL (
+    SELECT amount, currency, state FROM customer_payments
+    WHERE booking_id = b.id ORDER BY created_at DESC LIMIT 1
+  ) cp ON TRUE
   WHERE b.candidate_id = p_candidate_id
   ORDER BY b.slot_time DESC NULLS LAST;
 $$;
@@ -1976,7 +1984,10 @@ RETURNS TABLE (
   req_kind            TEXT,
   req_initiated_by    TEXT,
   req_status          TEXT,
-  req_respond_by      TIMESTAMPTZ
+  req_respond_by      TIMESTAMPTZ,
+  payout_amount       NUMERIC,      -- mentor's net earning for this session (mentor currency)
+  payout_currency     TEXT,
+  payout_state        TEXT          -- pending|paid|void|blocked (NULL for free/mock)
 ) LANGUAGE sql SECURITY DEFINER SET search_path = public AS $$
   SELECT
     b.id, b.status::TEXT, b.slot_time, b.slot_end, b.meeting_url,
@@ -1989,7 +2000,8 @@ RETURNS TABLE (
     booking_deadline_state(b.slot_time),
     ro.id, ro.proposed_by, ro.status, ro.offer_date, ro.range_start, ro.range_end,
     ro.selected_time, ro.requested_date,
-    rq.id, rq.kind, rq.initiated_by, rq.status, rq.respond_by
+    rq.id, rq.kind, rq.initiated_by, rq.status, rq.respond_by,
+    COALESCE(mp.net_amount_mentor_currency, mp.amount), mp.mentor_currency, mp.payout_state
   FROM bookings b
   JOIN  mentors  m ON m.id = b.mentor_id
   LEFT JOIN services s ON s.id = b.service_id
@@ -2004,6 +2016,10 @@ RETURNS TABLE (
     WHERE booking_id = b.id AND status IN ('pending','approved','auto_approved')
     ORDER BY created_at DESC LIMIT 1
   ) rq ON TRUE
+  LEFT JOIN LATERAL (
+    SELECT amount, net_amount_mentor_currency, mentor_currency, payout_state FROM mentor_payouts
+    WHERE booking_id = b.id ORDER BY created_at DESC LIMIT 1
+  ) mp ON TRUE
   WHERE b.mentor_id = p_mentor_id
     AND b.slot_time IS NOT NULL
     -- Unpaid payment holds ('pending') are hidden from the mentor: a slot isn't the

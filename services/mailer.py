@@ -255,6 +255,16 @@ def _booking_confirmed_candidate(d: dict) -> tuple[str, str]:
     photo = d.get("mentor_photo", "")
     service = d.get("service_title", "1-on-1 session")
     url = d.get("meeting_url", "")
+    is_guest = d.get("is_guest")
+    signup_url = d.get("signup_url", "")
+    guest_block = (
+        '<div style="margin:20px 0 0;padding:14px 16px;background:#fff7ed;border:1px solid #fed7aa;border-radius:12px">'
+        '<p style="margin:0;font-size:14px;color:#7c2d12;line-height:1.6">'
+        'You booked as a <strong>guest</strong>. Create a free account with <strong>this email</strong> '
+        'to join your session and manage it (reschedule or cancel).</p>'
+        + (_btn(signup_url, "Create your free account") if signup_url else "")
+        + '</div>'
+    )
     body = (
         '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Your session is confirmed ✓</h1>'
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {candidate},</p>'
@@ -270,10 +280,12 @@ def _booking_confirmed_candidate(d: dict) -> tuple[str, str]:
         + '<p style="margin:0;font-size:15px;color:#444;line-height:1.6">'
         "You'll receive a reminder 24 hours and 1 hour before the session."
         "</p>"
-        + (_btn(url, "Join meeting") if url else "")
-        + '<p style="margin:20px 0 0;font-size:14px;color:#444;line-height:1.6">'
-        f'Need to change it? <a href="{config.FRONTEND_URL}/account/sessions" style="color:#6b7fff">Reschedule or cancel</a>'
-        " anytime from your account.</p>"
+        + (guest_block if is_guest else (
+            (_btn(url, "Join meeting") if url else "")
+            + '<p style="margin:20px 0 0;font-size:14px;color:#444;line-height:1.6">'
+            f'Need to change it? <a href="{config.FRONTEND_URL}/account/sessions" style="color:#6b7fff">Reschedule or cancel</a>'
+            " anytime from your account.</p>"
+        ))
     )
     return f"Confirmed: your session with {mentor}", _base(body)
 

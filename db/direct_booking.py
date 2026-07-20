@@ -152,6 +152,7 @@ def get_booking_notify_info(booking_id: str) -> Optional[dict[str, Any]]:
             "mentor_name":     mentor_name,
             "mentor_email":    mentor_email,
             "mentor_photo":    mnt.get("photo_url") if isinstance(mnt, dict) else None,
+            "candidate_id":    b.get("candidate_id"),   # NULL => guest booking
             "candidate_name":  cand_name,
             "candidate_email": cand_email,
             "service_title":   svc.get("title") if isinstance(svc, dict) else None,

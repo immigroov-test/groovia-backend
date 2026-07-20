@@ -135,25 +135,31 @@ def get_payment_by_booking(booking_id: str) -> Optional[dict[str, Any]]:
     return res.data[0] if res.data else None
 
 
-def get_own_pending_hold(candidate_id: str, mentor_id: str, slot_time: str) -> Optional[dict[str, Any]]:
+def get_own_pending_hold(candidate_id: Optional[str], mentor_id: str, slot_time: str,
+                         candidate_email: Optional[str] = None) -> Optional[dict[str, Any]]:
     """The caller's own un-expired 'pending' payment hold on this exact slot, if any.
     Lets a retry after a cancelled/closed Razorpay popup REUSE the same hold instead of
     hitting 'that time is not available' on their own reservation. Refreshes the 10-min
-    window, and only reuses a hold whose payment is still 'created' (not failed/captured)."""
+    window, and only reuses a hold whose payment is still 'created' (not failed/captured).
+    A signed-in caller is matched by candidate_id; a guest (candidate_id NULL) by the email
+    they booked with, so guest retries work too."""
     now = datetime.now(timezone.utc)
     try:
-        res = (
+        q = (
             _supabase.table("bookings")
             .select("id")
-            .eq("candidate_id", candidate_id)
             .eq("mentor_id", mentor_id)
             .eq("slot_time", slot_time)
             .eq("status", "pending")
             .gt("payment_hold_expires_at", now.isoformat())
-            .order("created_at", desc=True)
-            .limit(1)
-            .execute()
         )
+        if candidate_id:
+            q = q.eq("candidate_id", candidate_id)
+        elif candidate_email:
+            q = q.is_("candidate_id", "null").eq("candidate_email", candidate_email.strip().lower())
+        else:
+            return None
+        res = q.order("created_at", desc=True).limit(1).execute()
         if not res.data:
             return None
         booking_id = res.data[0]["id"]
