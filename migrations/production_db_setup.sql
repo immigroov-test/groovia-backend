@@ -3,6 +3,11 @@
 -- Run this ONCE in Supabase SQL Editor on a new project.
 -- For existing databases, run migrations 001-015 sequentially instead.
 
+-- Validate function bodies at RUNTIME, not at CREATE time (what pg_dump emits). This makes the
+-- script order-independent: e.g. the my_bookings / mentor_sessions read RPCs reference
+-- customer_payments / mentor_payouts, which are created later in this file.
+SET check_function_bodies = off;
+
 -- ============================================================================
 -- Extensions
 -- ============================================================================

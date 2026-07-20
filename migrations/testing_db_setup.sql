@@ -3,6 +3,11 @@
 -- Run this ONCE on a fresh test project. Use testing_db_reset.sql to clear test data between runs.
 -- Do NOT run on the production database.
 
+-- Validate function bodies at RUNTIME, not at CREATE time (what pg_dump emits). This makes the
+-- script order-independent: e.g. the my_bookings / mentor_sessions read RPCs reference
+-- customer_payments / mentor_payouts, which are created later in this file.
+SET check_function_bodies = off;
+
 -- ============================================================================
 -- Extensions
 -- ============================================================================
@@ -1764,9 +1769,9 @@ INSERT INTO mentors (
   )
 ON CONFLICT (slug) DO NOTHING;
 
--- Route the seed/dummy mentors' booking-notification emails to the test inbox (they
--- have no real account, so mentors.email is their contact address). Testing only.
-UPDATE mentors SET email = 'immigroovtst@gmail.com' WHERE profile_id IS NULL;
+-- Route ALL mentors' booking-notification emails to the test inbox so every mentor mail
+-- lands where you can see it (mentors.email is the notification contact). Testing only.
+UPDATE mentors SET email = 'immigroovtst@gmail.com';
 
 -- Remap legacy professional_domains to the 20 canonical field names used by the mentor
 -- onboarding form, so browse filters and the field list stay consistent. Runs for both a
@@ -1785,13 +1790,6 @@ UPDATE mentors SET professional_domains = ARRAY(
   FROM unnest(professional_domains) AS elem
 )
 WHERE professional_domains && ARRAY['IT', 'Engineering', 'AI/ML', 'Product', 'Finance', 'Startups'];
-
--- Give seed mentors a contact email so booking-confirmation emails to mentors work in
--- testing. Uses Gmail plus-addressing so all mail still lands in your inbox, but the
--- address never collides with a real signup of yokeshd1999@gmail.com. (The plain
--- address made a fresh signup get auto-linked to a seed mentor like "Maya Singh".)
--- Idempotent: only fills blanks.
-UPDATE mentors SET email = 'yokeshd1999+seed@gmail.com' WHERE profile_id IS NULL AND email IS NULL;
 
 -- Backfill demo profile details for seed mentors (photo, phone, location, socials,
 -- public notes) so the admin "View details" panel shows a complete profile instead
