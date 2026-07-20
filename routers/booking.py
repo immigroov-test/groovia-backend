@@ -11,6 +11,7 @@ import config
 import db
 from core.auth import AuthUser, get_current_user, get_current_user_optional
 from services import mailer
+from services.ics import build_ics
 
 logger = logging.getLogger("immigroov.routers.booking")
 
@@ -784,6 +785,23 @@ def _send_booking_confirmation(
         is_guest = not info.get("candidate_id")
         signup_url = f"{config.FRONTEND_URL}/home?auth=open&email={quote(candidate_email or '')}"
 
+        # Calendar (.ics) so both parties can one-tap add the session to their calendar.
+        ics_att = None
+        try:
+            m = db.get_booking_meeting(booking_id) or {}
+            start = _parse_ts(m.get("slot_time"))
+            end = _parse_ts(m.get("slot_end")) or (start + timedelta(minutes=30) if start else None)
+            if start and end:
+                ics = build_ics(
+                    uid=booking_id, start=start, end=end,
+                    summary=f"Immigroov: {service_title}",
+                    description=f"Your 1-on-1 with {mentor_name or 'your mentor'}. Join here: {meeting_url}",
+                    location=meeting_url,
+                )
+                ics_att = [{"filename": "session.ics", "content": ics}]
+        except Exception:
+            ics_att = None
+
         mailer.send_transactional(
             candidate_email,
             "booking_confirmed_candidate",
@@ -798,6 +816,7 @@ def _send_booking_confirmation(
                 "is_guest": is_guest,
                 "signup_url": signup_url,
             },
+            attachments=ics_att,
         )
 
         if mentor_email:
@@ -814,6 +833,7 @@ def _send_booking_confirmation(
                     "notes": notes or "",
                     "meeting_url": meeting_url,
                 },
+                attachments=ics_att,
             )
 
         for admin_email in db.admin_notify_emails():

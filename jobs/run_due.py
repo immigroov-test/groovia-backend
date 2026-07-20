@@ -2,9 +2,10 @@
 external scheduler (Render Cron Job in production; run directly for local/manual
 testing).
 
-Payment-only scope: this dispatcher runs the money-correctness jobs that keep the
-Razorpay flow robust to crashes/missed webhooks. It intentionally does NOT run
-the wider reminder/webinar/review jobs from the source fork (out of scope here).
+Scope: the money-correctness jobs that keep the Razorpay flow robust to crashes/missed
+webhooks, plus the scheduled booking notifications (24h/1h session reminders and the
+T-60 mentor attendance nudge). Each notification is claimed atomically before sending
+(booking_reminders UNIQUE constraint), so overlapping ticks never double-send.
 
 - ONE Render Cron Job, not one per task.
 - Every job here is already safe under overlap (deterministic idempotency keys,
@@ -23,6 +24,7 @@ import logging
 from datetime import timedelta
 
 import db
+from services import notifications
 from services.dispatcher_lock import LockNotAcquired, dispatcher_lock
 
 logger = logging.getLogger("immigroov.jobs.run_due")
@@ -61,6 +63,8 @@ _JOBS = [
     ("sweep_verify_payments", db.sweep_verify_payments),
     ("process_refunds", db.process_refunds),
     ("reconcile_payments", _reconcile_payments_if_due),
+    ("session_reminders", notifications.send_session_reminders),
+    ("attendance_checks", notifications.send_attendance_checks),
 ]
 
 

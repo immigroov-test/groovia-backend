@@ -1,3 +1,4 @@
+import base64
 import html as _html
 import json
 import logging
@@ -352,6 +353,23 @@ def _session_reminder_1h(d: dict) -> tuple[str, str]:
     return f"Your session with {other} starts in 1 hour", _base(body)
 
 
+def _mentor_attendance_check(d: dict) -> tuple[str, str]:
+    mentor = _e(d.get("mentor_name", ""))
+    candidate = d.get("candidate_name", "your attendee")
+    url = config.FRONTEND_URL + "/account/sessions"
+    when = d.get("session_time", "")
+    body = (
+        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Your session is in about 1 hour</h1>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {mentor},</p>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
+        f"Your session with <strong>{_e(candidate)}</strong> is coming up soon. Please confirm you'll be "
+        "there so your attendee knows to expect you.</p>"
+        + (_info_row("When", when) if when else "")
+        + _btn(url, "View & confirm")
+    )
+    return f"Are you available for your session with {candidate}?", _base(body)
+
+
 def _review_request(d: dict) -> tuple[str, str]:
     candidate = _e(d.get("candidate_name", ""))
     mentor = d.get("mentor_name", "your mentor")
@@ -596,6 +614,7 @@ _TEMPLATES = {
     "booking_confirmed_mentor": _booking_confirmed_mentor,
     "session_reminder_24h": _session_reminder_24h,
     "session_reminder_1h": _session_reminder_1h,
+    "mentor_attendance_check": _mentor_attendance_check,
     "review_request": _review_request,
     "welcome_candidate": _welcome_candidate,
     "welcome_mentor": _welcome_mentor,
@@ -613,10 +632,13 @@ def send_transactional(
     template: str,
     data: dict,
     scheduled_at: Optional[datetime] = None,
+    attachments: Optional[list[dict]] = None,
 ) -> None:
     """Send one transactional email via Resend. Raises on network error or non-2xx.
     Dispatch via FastAPI BackgroundTasks so the request path is never blocked.
-    When MOCK_SERVICES=true, writes to _dev_emails.jsonl instead of calling Resend."""
+    When MOCK_SERVICES=true, writes to _dev_emails.jsonl instead of calling Resend.
+    `attachments` is a list of {"filename": str, "content": str} (raw text, e.g. an .ics);
+    the content is base64-encoded here for Resend."""
     fn = _TEMPLATES.get(template)
     if fn is None:
         logger.error("Unknown email template %r", template)
@@ -646,6 +668,12 @@ def send_transactional(
     }
     if scheduled_at:
         payload["scheduled_at"] = scheduled_at.isoformat()
+    if attachments:
+        payload["attachments"] = [
+            {"filename": a["filename"],
+             "content": base64.b64encode(a["content"].encode("utf-8")).decode("ascii")}
+            for a in attachments
+        ]
     try:
         resp = httpx.post(
             _RESEND_URL,

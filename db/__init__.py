@@ -5,6 +5,7 @@ from .direct_booking import *
 from .pricing import *
 from .payments import *
 from .jobs import *
+from .notifications import *
 
 
 def client():
