@@ -13,7 +13,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 import config
 import db
 import ai.graph as backend  # accessed at request-time so we read the lifespan-initialized app
-from core.auth import AuthUser, get_current_user
+from core.auth import AuthUser, get_current_user, get_current_user_optional
 from ai.graph import _text
 from ai.smalltalk import smalltalk_reply
 from core.rate_limit import limiter
@@ -102,11 +102,11 @@ async def chat_handler(
     message: str = Form(...),
     thread_id: str = Form(...),
     file: Optional[UploadFile] = File(None),
-    user: AuthUser = Depends(get_current_user),
+    user: Optional[AuthUser] = Depends(get_current_user_optional),
 ):
-    """Main chat endpoint. Requires a signed-in user: Q&A and career reports both go through
-    here, so login is enforced server-side (no tokens on anonymous callers). Find-a-mentor
-    stays public via the /mentors API and never hits this endpoint."""
+    """Main chat endpoint. Guests get a couple of free, short questions (the frontend counts them
+    and shows the in-chat sign-in nudge after); signed-in users are unlimited. Career reports
+    still need login + a resume (enforced in the agent). Find-a-mentor stays public via /mentors."""
     try:
         uuid.UUID(thread_id)
     except ValueError:
@@ -151,6 +151,16 @@ async def chat_handler(
         canned = smalltalk_reply(message)
         if canned:
             return {"status": "success", "response": canned, "thread_id": thread_id}
+
+    # Guest free-tier cost backstop: cap the question length so a direct (non-UI) call can't
+    # spend on a huge prompt. The UI caps the COUNT of free questions; this guards the size.
+    if user is None and not message.strip().startswith("[SYSTEM_") and len(message.split()) > 60:
+        return {
+            "status": "success",
+            "response": "Free questions need to be short. Please sign in or create a free "
+                        "account to ask longer questions.",
+            "thread_id": thread_id,
+        }
 
     t_start = time.monotonic()
     try:
