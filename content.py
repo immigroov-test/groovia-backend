@@ -2,7 +2,7 @@ from config import FRONTEND_URL
 
 # Exact phrases the agent echoes verbatim (no LLM call) at clarification gates.
 MSG_ASK_FOR_RESUME       = "Please attach your resume or profile to begin."
-MSG_RESUME_UPLOADED      = "Your profile has been successfully uploaded. Please select an option below to proceed."
+MSG_RESUME_UPLOADED      = "Your resume is in. Give me a moment while I get started."
 MSG_ASK_TRACK_AND_PREFS  = "To generate your personalized report, are you looking for **Work** or **Study** opportunities? And do you have any specific preferences (e.g., climate, salary expectations, company size)?"
 MSG_ASK_TARGET_COUNTRY   = "Which country are you looking to find a mentor in?"
 MSG_ASK_FOR_QUESTION     = "Sure - what would you like to know?"
