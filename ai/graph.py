@@ -376,7 +376,12 @@ async def call_model(state: AgentState):
     short_circuit: Optional[str] = None
     reset_country = False  # If true, clear target_country in returned state.
     if not is_after_tools:
-        if new_intent == "no_resume":
+        # Bare acknowledgements ("ok", "thanks") get a canned reply FIRST, so a plain "ok" can
+        # never trip the resume/intent prompts (the bug where "ok" replied "your profile was
+        # uploaded"). Not treated as an ack if it answers a clarifying question we just asked.
+        if is_new_turn and _is_ack(last_lower) and not _last_ai_is_clarifying(messages):
+            short_circuit = MSG_ACK
+        elif new_intent == "no_resume":
             short_circuit = MSG_ASK_FOR_RESUME
         elif new_intent in (None, "awaiting_intent"):
             short_circuit = MSG_RESUME_UPLOADED
@@ -384,8 +389,6 @@ async def call_model(state: AgentState):
         elif new_intent == "qna" and last_lower.strip() == INTENT_QNA_PHRASE:
             # User clicked the "Ask a Question" chip - no real question yet.
             short_circuit = MSG_ASK_FOR_QUESTION
-        elif is_new_turn and _is_ack(last_lower) and not _last_ai_is_clarifying(messages):
-            short_circuit = MSG_ACK
         elif new_intent == "mentor" and not new_target_country:
             short_circuit = MSG_ASK_TARGET_COUNTRY
         elif new_intent == "mentor" and new_target_country:
