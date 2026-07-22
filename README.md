@@ -40,8 +40,8 @@ Google Meet links · analytics (GA4 / PostHog / GTM) · cookie consent & GDPR ex
 Conversations are phase-driven: **no_resume → awaiting_intent → report | mentor | qna**.
 
 Within `report` and `mentor`, a **reflection loop** reviews the LLM draft with a reviewer
-model (Llama-3.1-8b) and revises up to `MAX_REVISION` times. Tools: `general_search`
-(Tavily), `precise_search` (Exa), `retrieve_matching_mentors` (Supabase). All mentor
+model (Llama-3.1-8b) and revises up to `MAX_REVISION` times. Tools: `web_search`
+(Tavily, advanced depth), `retrieve_matching_mentors` (Supabase). All mentor
 links in AI responses use the Groovia platform URL (`/mentors/{slug}`).
 
 Short-circuit gates fire *before* any LLM call for: missing resume, bare acks, ambiguous
@@ -62,7 +62,7 @@ groovia-backend/            # ← this folder is the repo root
 ├── ai/
 │   ├── graph.py            # LangGraph StateGraph: nodes, edges, PostgreSQL checkpointer
 │   ├── prompts.py          # System prompts (report, mentor, qna, reviewer, compression)
-│   └── tools.py            # Tools: Tavily, Exa, mentor DB lookup, PDF/DOCX parsers
+│   └── tools.py            # Tools: Tavily web search, mentor DB lookup, PDF/DOCX parsers
 ├── db/
 │   ├── mentors.py          # Mentor + profile queries (list, create, update, approve)
 │   ├── bookings.py         # Booking queries
@@ -107,7 +107,7 @@ Run tests with `pip install -r requirements-dev.txt && pytest` (no Postgres need
 | `SUPABASE_SERVICE_ROLE_KEY` | Yes | Bypasses RLS - backend only, never expose to client |
 | `SUPABASE_JWT_SECRET` | Yes | Verifies user JWTs locally |
 | `DATABASE_URL` | Yes | Postgres URL for LangGraph - **Session pooler, port 5432** (not 6543) |
-| `GROQ_API_KEY` / `TAVILY_API_KEY` / `EXA_API_KEY` | Yes | LLM + search tools |
+| `GROQ_API_KEY` / `TAVILY_API_KEY` | Yes | LLM + web search |
 | `FRONTEND_URL` | Yes | CORS + LLM-generated mentor links |
 | `CORS_ORIGINS` | Yes (deploy) | Comma-separated allowed origins, no trailing slash |
 | `RESEND_API_KEY` / `EMAIL_FROM` | No | Transactional email; booking works without it |

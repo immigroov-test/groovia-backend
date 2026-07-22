@@ -8,7 +8,6 @@ load_dotenv(override=True)
 # Secrets (from .env)
 GROQ_API_KEY              = os.getenv("GROQ_API_KEY")
 TAVILY_API_KEY            = os.getenv("TAVILY_API_KEY")
-EXA_API_KEY               = os.getenv("EXA_API_KEY")
 SUPABASE_URL              = os.getenv("SUPABASE_URL")
 SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY")  # backend writes bypass RLS with this
 SUPABASE_JWT_SECRET       = os.getenv("SUPABASE_JWT_SECRET")        # verify user JWTs locally (no network)
@@ -39,8 +38,6 @@ RATE_LIMIT     = "20/minute"       # per-IP /chat rate limit
 
 # Search tools
 TAVILY_MAX_RESULTS       = 5
-EXA_NUM_RESULTS          = 3
-EXA_HIGHLIGHT_MAX_CHARS  = 1000
 
 # Resend transactional email.
 # NOTE: EMAIL_FROM must be a Resend-verified sender - either "onboarding@resend.dev"
@@ -92,7 +89,7 @@ MOCK_SERVICES = _flag("MOCK_SERVICES", default=False)        # Intercept Resend 
 FEATURE_CHAT_HISTORY    = _flag("FEATURE_CHAT_HISTORY")     # Recent-chats sidebar list
 FEATURE_GUEST_MODE      = _flag("FEATURE_GUEST_MODE")       # Inert: /chat now requires auth (Q&A + report are login-gated; find-a-mentor is public via /mentors)
 FEATURE_MENTORS_PUBLIC  = _flag("FEATURE_MENTORS_PUBLIC")   # Anyone can browse /mentors
-FEATURE_WEB_SEARCH_TOOL = _flag("FEATURE_WEB_SEARCH_TOOL")  # Agent can call Tavily + Exa
+FEATURE_WEB_SEARCH_TOOL = _flag("FEATURE_WEB_SEARCH_TOOL")  # Agent can call the Tavily web_search tool
 FEATURE_MENTOR_TOOL     = _flag("FEATURE_MENTOR_TOOL")      # Agent can call retrieve_matching_mentors
 FEATURE_RESUME_UPLOAD   = _flag("FEATURE_RESUME_UPLOAD")    # Upload control on chat composer
 FEATURE_GOOGLE_OAUTH    = _flag("FEATURE_GOOGLE_OAUTH")     # Show "Continue with Google" button
@@ -104,7 +101,6 @@ DRAW_GRAPH = os.getenv("DRAW_GRAPH", "false").lower() == "true"
 _missing = [k for k, v in {
     "GROQ_API_KEY": GROQ_API_KEY,
     "TAVILY_API_KEY": TAVILY_API_KEY,
-    "EXA_API_KEY": EXA_API_KEY,
     "SUPABASE_URL": SUPABASE_URL,
     "SUPABASE_SERVICE_ROLE_KEY": SUPABASE_SERVICE_ROLE_KEY,
     "SUPABASE_JWT_SECRET": SUPABASE_JWT_SECRET,

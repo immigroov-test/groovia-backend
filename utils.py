@@ -1,5 +1,5 @@
 # Test-compatibility shim: maps `import utils` to `ai.tools` so that
-# patch("utils._tavily") and patch("utils.exa.search") target the real objects.
+# patch("utils._tavily") targets the real object.
 import sys
 import ai.tools
 

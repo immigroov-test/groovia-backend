@@ -53,8 +53,6 @@ services:
         sync: false
       - key: TAVILY_API_KEY
         sync: false
-      - key: EXA_API_KEY
-        sync: false
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
@@ -114,8 +112,6 @@ services:
       - key: GROQ_API_KEY
         sync: false
       - key: TAVILY_API_KEY
-        sync: false
-      - key: EXA_API_KEY
         sync: false
       - key: SUPABASE_URL
         sync: false           # staging Supabase project URL

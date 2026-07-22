@@ -7,21 +7,19 @@ import docx2txt
 from pypdf import PdfReader
 from langchain_core.tools import tool
 from langchain_tavily import TavilySearch
-from exa_py import Exa
 from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception_type
 
 import db
-from config import (
-    EXA_API_KEY, FRONTEND_URL,
-    TAVILY_MAX_RESULTS, EXA_NUM_RESULTS, EXA_HIGHLIGHT_MAX_CHARS,
-)
+from config import FRONTEND_URL, TAVILY_MAX_RESULTS
 
 logger = logging.getLogger("immigroov.tools")
 
-exa = Exa(api_key=EXA_API_KEY)
-_tavily = TavilySearch(max_results=TAVILY_MAX_RESULTS)
+# One web-search tool (Tavily, advanced depth) for richer, more relevant results + source URLs.
+# (Exa/precise_search was removed - it was rarely used and Tavily covers both factual and
+# contextual queries; advanced depth improves the factual results.)
+_tavily = TavilySearch(max_results=TAVILY_MAX_RESULTS, search_depth="advanced")
 
-# Transient 5xx/network blips from search providers are common. Retry twice with backoff.
+# Transient 5xx/network blips from the search provider are common. Retry twice with backoff.
 _retry = retry(
     stop=stop_after_attempt(3),
     wait=wait_exponential(multiplier=0.5, min=0.5, max=4),
@@ -35,16 +33,6 @@ def _tavily_invoke(query: str):
     return _tavily.invoke({"query": query})
 
 
-@_retry
-def _exa_search(query: str):
-    return exa.search(
-        query,
-        type="neural",
-        num_results=EXA_NUM_RESULTS,
-        contents={"highlights": {"max_characters": EXA_HIGHLIGHT_MAX_CHARS}},
-    )
-
-
 def parse_pdf_to_text(file_bytes: bytes) -> str:
     reader = PdfReader(io.BytesIO(file_bytes))
     return "\n".join([page.extract_text() for page in reader.pages if page.extract_text()])
@@ -55,34 +43,18 @@ def parse_docx_to_text(file_bytes: bytes) -> str:
 
 
 @tool
-def general_search(query: str) -> str:
-    """Broad web search for context: culture, cost of living, lifestyle, market trends, pros/cons.
-    Examples: 'tech scene in Germany', 'cost of living in Amsterdam', 'expat life in the USA'.
-    Not for visa rules, salary figures, or official policy - use precise_search for those.
+def web_search(query: str) -> str:
+    """Search the web for current, factual information WITH source URLs. Use it before stating any
+    concrete fact: visa names and rules, salary and job-market data, official government policy,
+    university programmes, costs, plus market and lifestyle context. For anything time-sensitive
+    (rules, salaries, thresholds, news), include the current year in the query so you get the
+    latest. Cite the URLs it returns.
     """
-    logger.info("tool=general_search (Tavily) query=%r", query)
+    logger.info("tool=web_search (Tavily) query=%r", query)
     try:
         return str(_tavily_invoke(query))
     except Exception as e:
-        return f"[SEARCH_ERROR] general_search failed: {e}"
-
-
-@tool
-def precise_search(query: str) -> str:
-    """Precise search for facts, with source URLs: exact visa names, salary/tuition figures,
-    immigration rules, official government policy, university programmes.
-    Argument: query - a specific question about a visa, rule, salary, or policy.
-    """
-    logger.info("tool=precise_search (Exa) query=%r", query)
-    try:
-        response = _exa_search(query)
-        results = [
-            {"url": r.url, "summary": r.highlights[0] if getattr(r, "highlights", None) else "N/A"}
-            for r in response.results
-        ]
-        return json.dumps(results, ensure_ascii=False)
-    except Exception as e:
-        return f"[SEARCH_ERROR] precise_search failed: {e}"
+        return f"[SEARCH_ERROR] web_search failed: {e}"
 
 
 # Topic labels/synonyms -> the expertise_categories code stored on mentors, so the agent

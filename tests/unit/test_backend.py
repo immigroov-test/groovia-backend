@@ -77,7 +77,7 @@ def test_extract_track():
 
 def test_sanitize_strips_leaked_tool_tags():
     from backend import _sanitize_response
-    dirty = 'Visa: Express Entry <function=precise_search>{"query": "x"} </function>. Done.'
+    dirty = 'Visa: Express Entry <function=web_search>{"query": "x"} </function>. Done.'
     cleaned = _sanitize_response(dirty)
     assert "<function" not in cleaned
     assert "Express Entry" in cleaned and "Done." in cleaned
@@ -106,7 +106,7 @@ def _state(messages, intent="qna", **kw):
 
 def test_should_continue_tool_calls_route_to_tools():
     from backend import should_continue
-    msg = AIMessage(content="", tool_calls=[{"name": "general_search", "args": {}, "id": "1", "type": "tool_call"}])
+    msg = AIMessage(content="", tool_calls=[{"name": "web_search", "args": {}, "id": "1", "type": "tool_call"}])
     assert should_continue(_state([msg])) == "tools"
 
 
@@ -161,8 +161,13 @@ def no_llm():
         yield
 
 
-def test_gate_no_resume(no_llm):
-    out = _run_call_model(_state([HumanMessage(content="hello")], intent=None, resume_text=None, resume_processed=False))
+def test_gate_report_without_resume(no_llm):
+    # Resume gate is REPORT-ONLY now: a career report needs a resume, so asking for one without
+    # a resume is gated (no LLM). A general question without a resume goes to Q&A instead.
+    out = _run_call_model(_state(
+        [HumanMessage(content="I want to generate a career report.")],
+        intent=None, resume_text=None, resume_processed=False,
+    ))
     assert out["messages"][0].content == MSG_ASK_FOR_RESUME
     assert out["user_intent"] == "no_resume"
 

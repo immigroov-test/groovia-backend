@@ -43,7 +43,6 @@ with Diagram(
 
     groq = Internet("Groq Cloud")
     tavily = Internet("Tavily\n(web search)")
-    exa = Internet("Exa\n(neural search)")
 
     # User → Frontend
     user >> Edge(color="#1D4ED8") >> frontend
@@ -68,4 +67,3 @@ with Diagram(
 
     # Agent tools
     agent_llm >> Edge(color="#059669") >> tavily
-    agent_llm >> Edge(color="#059669") >> exa

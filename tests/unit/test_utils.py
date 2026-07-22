@@ -20,48 +20,22 @@ def test_parse_docx_calls_docx2txt():
         assert result == "Parsed resume text"
 
 
-def test_general_search_returns_error_string_on_exception():
-    from utils import general_search
+def test_web_search_returns_error_string_on_exception():
+    from utils import web_search
     mock_tavily = MagicMock()
     mock_tavily.invoke.side_effect = RuntimeError("network error")
     with patch("utils._tavily", mock_tavily):
-        result = general_search.invoke({"query": "tech jobs in Germany"})
+        result = web_search.invoke({"query": "tech jobs in Germany"})
     assert "[SEARCH_ERROR]" in result
-    assert "general_search" in result
+    assert "web_search" in result
 
 
-def test_precise_search_returns_error_string_on_exception():
-    from utils import precise_search
-    with patch("utils.exa.search", side_effect=RuntimeError("timeout")):
-        result = precise_search.invoke({"query": "Germany skilled worker visa requirements"})
-    assert "[SEARCH_ERROR]" in result
-    assert "precise_search" in result
-
-
-def test_general_search_returns_string_on_success():
-    from utils import general_search
+def test_web_search_returns_string_on_success():
+    from utils import web_search
     mock_result = [{"title": "Tech scene in Germany", "url": "https://example.com", "content": "Germany has a booming tech sector."}]
     mock_tavily = MagicMock()
     mock_tavily.invoke.return_value = mock_result
     with patch("utils._tavily", mock_tavily):
-        result = general_search.invoke({"query": "tech scene Germany"})
+        result = web_search.invoke({"query": "tech scene Germany"})
     assert isinstance(result, str)
     assert len(result) > 0
-
-
-def test_precise_search_returns_json_on_success():
-    import json
-    from utils import precise_search
-
-    mock_result = MagicMock()
-    mock_hit = MagicMock()
-    mock_hit.url = "https://gov.de/visa"
-    mock_hit.highlights = ["Skilled Worker Visa requires salary above €45,300."]
-    mock_result.results = [mock_hit]
-
-    with patch("utils.exa.search", return_value=mock_result):
-        result = precise_search.invoke({"query": "Germany skilled worker visa salary threshold"})
-
-    parsed = json.loads(result)
-    assert isinstance(parsed, list)
-    assert parsed[0]["url"] == "https://gov.de/visa"

@@ -10,7 +10,6 @@ from langchain_core.messages import AIMessage
 # Required env vars - real .env wins locally; these cover bare environments (CI).
 os.environ.setdefault("GROQ_API_KEY", "test-key")
 os.environ.setdefault("TAVILY_API_KEY", "test-key")
-os.environ.setdefault("EXA_API_KEY", "test-key")
 os.environ.setdefault("SUPABASE_URL", "https://fake.supabase.co")
 os.environ.setdefault("SUPABASE_SERVICE_ROLE_KEY", "fake-service-role")
 os.environ.setdefault("SUPABASE_JWT_SECRET", "fake-jwt-secret")

@@ -2,6 +2,7 @@
 import logging
 import re
 import sys
+from datetime import datetime, timezone
 from typing import Annotated, Optional, TypedDict
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
@@ -29,7 +30,7 @@ from .prompts import (
     BASE_DIRECTIVES, COMPRESSION_PROMPT, MENTOR_PROMPT, MENTOR_REVIEWER_PROMPT,
     QA_PROMPT, QA_REVIEWER_PROMPT, REPORT_PROMPT, REPORT_REVIEWER_PROMPT,
 )
-from .tools import general_search, precise_search, retrieve_matching_mentors
+from .tools import web_search, retrieve_matching_mentors
 
 logger = logging.getLogger("immigroov.agent")
 
@@ -470,6 +471,7 @@ async def call_model(state: AgentState):
         BASE_DIRECTIVES + "\n\n"
         + _INTENT_PROMPTS.get(new_intent, QA_PROMPT)
         + "\n\n[LOCKED_CONTEXT]"
+        + f"\nTODAY: {datetime.now(timezone.utc).date().isoformat()}"
         + f"\nINTENT: {new_intent}"
         + f"\nTRACK: {new_track or 'Unknown'}"
         + f"\nTARGET_COUNTRY: {new_target_country or 'Unknown'}"
@@ -627,7 +629,7 @@ def should_revise(state: AgentState) -> str:
 
 _active_tools = []
 if config.FEATURE_WEB_SEARCH_TOOL:
-    _active_tools.extend([general_search, precise_search])
+    _active_tools.append(web_search)
 if config.FEATURE_MENTOR_TOOL:
     _active_tools.append(retrieve_matching_mentors)
 
