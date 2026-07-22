@@ -53,10 +53,11 @@ def test_chat_pdf_magic_mismatch(client):
     assert resp.status_code == 415
 
 
-def test_chat_without_resume_hits_gate(client, mock_llm):
-    """A message with no resume must get the deterministic resume-ask, zero LLM calls."""
+def test_chat_report_without_resume_hits_gate(client, mock_llm):
+    """The resume gate is report-only: asking for a career report with no resume must get the
+    deterministic resume-ask with zero LLM calls. (A general question would go to Q&A instead.)"""
     thread = str(uuid.uuid4())
-    resp = client.post("/chat", data={"message": "hello", "thread_id": thread})
+    resp = client.post("/chat", data={"message": "I want to generate a career report.", "thread_id": thread})
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "success"
