@@ -65,6 +65,8 @@ services:
         sync: false           # transactional email; optional
       - key: ADMIN_EMAIL
         sync: false           # ops inbox copied on booking/reschedule/cancel (e.g. yokeshmd99@gmail.com)
+      - key: BANK_ENC_KEY
+        sync: false           # Fernet key encrypting mentor payout bank details at rest (see .env.example)
 
   # ── Staging (tracks `staging` branch) ────────────────────────────────────────
   # Point ALL Supabase secrets below at the SEPARATE staging Supabase project,
@@ -125,5 +127,7 @@ services:
         sync: false           # optional - leave unset to skip real emails
       - key: ADMIN_EMAIL
         sync: false           # ops inbox copied on booking/reschedule/cancel (e.g. yokeshmd99@gmail.com)
+      - key: BANK_ENC_KEY
+        sync: false           # Fernet key encrypting mentor payout bank details at rest (see .env.example)
       - key: MOCK_SERVICES
         value: "false"        # set "true" to mock Resend/webhooks on staging instead

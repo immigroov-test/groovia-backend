@@ -130,6 +130,25 @@ CREATE INDEX IF NOT EXISTS idx_mentors_countries     ON mentors USING GIN (exper
 CREATE INDEX IF NOT EXISTS idx_mentors_categories    ON mentors USING GIN (expertise_categories);
 
 -- ============================================================================
+-- mentor_bank_accounts  (payout details; the founder pays mentors manually, outside Razorpay)
+-- The sensitive numbers (account number / IBAN / routing / sort code / IFSC / SWIFT) live ONLY
+-- inside details_enc, a Fernet ciphertext produced by the backend (services/bank_crypto.py) - the
+-- DB never stores them in clear. The cleartext columns are display-safe metadata only: holder
+-- name, bank name, country, scheme, and the last 4 digits for masked display.
+-- ============================================================================
+CREATE TABLE IF NOT EXISTS mentor_bank_accounts (
+  mentor_id            UUID PRIMARY KEY REFERENCES mentors(id) ON DELETE CASCADE,
+  country_code         CHAR(2) NOT NULL,
+  scheme               TEXT NOT NULL,          -- iban | india | us | uk | swift
+  account_holder_name  TEXT NOT NULL,
+  bank_name            TEXT,
+  account_last4        TEXT,
+  details_enc          TEXT NOT NULL,          -- Fernet-encrypted JSON of the secret numbers
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- ============================================================================
 -- chat_threads
 -- ============================================================================
 CREATE TABLE IF NOT EXISTS chat_threads (
@@ -484,6 +503,11 @@ CREATE TRIGGER trg_profiles_updated_at
 DROP TRIGGER IF EXISTS trg_mentors_updated_at ON mentors;
 CREATE TRIGGER trg_mentors_updated_at
   BEFORE UPDATE ON mentors
+  FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+
+DROP TRIGGER IF EXISTS trg_mentor_bank_accounts_updated_at ON mentor_bank_accounts;
+CREATE TRIGGER trg_mentor_bank_accounts_updated_at
+  BEFORE UPDATE ON mentor_bank_accounts
   FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 DROP TRIGGER IF EXISTS trg_chat_threads_updated_at ON chat_threads;
@@ -1256,6 +1280,10 @@ CREATE POLICY "Mentor reads own row"
 DROP POLICY IF EXISTS "Mentor updates own row" ON mentors;
 CREATE POLICY "Mentor updates own row"
   ON mentors FOR UPDATE USING (auth.uid() = profile_id);
+
+-- mentor_bank_accounts: sensitive payout data. RLS ON with NO policies = deny-all to anon and
+-- authenticated; only the backend's service-role key (which bypasses RLS) may read or write it.
+ALTER TABLE mentor_bank_accounts ENABLE ROW LEVEL SECURITY;
 
 -- chat_threads
 ALTER TABLE chat_threads ENABLE ROW LEVEL SECURITY;

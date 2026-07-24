@@ -96,7 +96,24 @@ def get_mentor_detail(mentor_id: str, user: AuthUser = Depends(require_admin)):
     mentor = db.get_mentor_full_details(mentor_id)
     if not mentor:
         raise HTTPException(status_code=404, detail="Mentor not found")
+    # Masked payout details (holder, bank, country, last 4). Full numbers only via the reveal route.
+    mentor["bank"] = db.get_mentor_bank_masked(mentor_id) or {"has_details": False}
     return mentor
+
+
+@router.post("/mentors/{mentor_id}/bank/reveal")
+def reveal_mentor_bank(mentor_id: str, user: AuthUser = Depends(require_admin)):
+    """Decrypt and return a mentor's full payout details for the founder to pay them. A deliberate
+    admin action (POST, not part of the detail payload) so full numbers aren't shown by default."""
+    try:
+        revealed = db.get_mentor_bank_revealed(mentor_id)
+    except RuntimeError as e:
+        logger.error("Bank reveal failed for mentor %s: %s", mentor_id, e)
+        raise HTTPException(status_code=503, detail="Could not decrypt bank details (check BANK_ENC_KEY).")
+    if not revealed:
+        raise HTTPException(status_code=404, detail="No bank details on file for this mentor")
+    logger.info("admin %s revealed bank details for mentor %s", user.id, mentor_id)
+    return revealed
 
 
 @router.post("/mentors/{mentor_id}/approve")

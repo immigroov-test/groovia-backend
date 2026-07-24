@@ -53,6 +53,12 @@ ADMIN_EMAIL    = os.getenv("ADMIN_EMAIL", "")
 # mentee/admin. Set it to the Resend account owner's email so sandbox delivers. Empty = live.
 EMAIL_TEST_REDIRECT = os.getenv("EMAIL_TEST_REDIRECT", "").strip()
 
+# Mentor bank details are encrypted at rest with this key (Fernet). Generate one with:
+#   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+# Optional at startup (mentors just can't submit/view bank details until it's set); may hold
+# several comma-separated keys for rotation (first encrypts, all decrypt). Never commit it.
+BANK_ENC_KEY = os.getenv("BANK_ENC_KEY", "").strip()
+
 # Razorpay (customer payments). Optional at startup - MOCK_SERVICES=true lets booking/
 # payment flows work locally without real credentials (mirrors how RESEND_API_KEY is
 # optional). RAZORPAY_WEBHOOK_SECRET is a SEPARATE secret from RAZORPAY_KEY_SECRET - it

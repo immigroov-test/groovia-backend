@@ -8,7 +8,7 @@ from pydantic import BaseModel, field_validator, model_validator
 
 import config
 import db
-from services import mailer
+from services import mailer, bank_validation, bank_crypto
 from core.auth import AuthUser, get_current_user
 from core.permissions import require_mentor
 
@@ -117,6 +117,22 @@ class DateOverrideDraft(BaseModel):
     end_time: Optional[str] = None
 
 
+class BankDetailsBody(BaseModel):
+    # Country-driven payout details. Which fields matter is decided by country_code; the backend
+    # validates + normalizes in services/bank_validation. Sensitive numbers are encrypted at rest.
+    country_code: str
+    account_holder_name: str
+    bank_name: Optional[str] = None
+    account_number: Optional[str] = None
+    iban: Optional[str] = None
+    routing_number: Optional[str] = None
+    account_type: Optional[str] = None      # us: checking | savings
+    sort_code: Optional[str] = None         # uk
+    ifsc: Optional[str] = None              # india
+    swift_bic: Optional[str] = None         # iban (optional) / swift
+    bank_address: Optional[str] = None      # swift (optional)
+
+
 class MentorSignupBody(BaseModel):
     display_name: str
     headline: Optional[str] = None
@@ -141,6 +157,7 @@ class MentorSignupBody(BaseModel):
     services: list[ServiceDraft] = []
     booking_rules: Optional[BookingRules] = None
     date_overrides: list[DateOverrideDraft] = []
+    bank: Optional[BankDetailsBody] = None
 
     @field_validator("city")
     @classmethod
@@ -178,6 +195,17 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
         raise HTTPException(status_code=400, detail="Select at least one language")
     if body.years_lived_experience is None:
         raise HTTPException(status_code=400, detail="Years of lived experience is required")
+    # Bank details are mandatory. Validate them BEFORE creating the mentor row so a missing/invalid
+    # payout method never leaves a half-created mentor (which would 409 any retry).
+    if body.bank is None:
+        raise HTTPException(status_code=400, detail="Bank details are required to receive payouts")
+    if not bank_crypto.is_configured():
+        logger.error("Mentor signup blocked: BANK_ENC_KEY is not configured")
+        raise HTTPException(status_code=503, detail="Bank details can't be saved right now. Please try again shortly.")
+    try:
+        validated_bank = bank_validation.validate_bank_details(body.bank.country_code, body.bank.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     result = db.create_mentor_signup(
         user.id,
         display_name=display_name,
@@ -246,6 +274,12 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
         except Exception:
             logger.exception("Date override save failed during signup for mentor %s", mentor_id)
             warnings.append(f"Could not save your date override for {ov.slot_date}. Please re-add it from your dashboard.")
+    # Payout bank details were validated up-front; persist them now (encrypted at rest).
+    try:
+        db.upsert_mentor_bank(mentor_id, validated_bank)
+    except Exception:
+        logger.exception("Bank details save failed post-create for mentor %s", mentor_id)
+        warnings.append("We couldn't save your bank details. Please add them from your Mentor Hub - Payments tab.")
     if warnings:
         result["warnings"] = warnings
     _, mentor_email = db.get_mentor_email(mentor_id)
@@ -273,6 +307,28 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
             },
         )
     return result
+
+
+# ── Payout bank details ──────────────────────────────────────────────────────────
+
+@router.get("/bank")
+def get_my_bank(mentor: dict = Depends(require_mentor)):
+    """Masked payout details for the logged-in mentor. Never returns full account numbers."""
+    return db.get_mentor_bank_masked(mentor["id"]) or {"has_details": False}
+
+
+@router.post("/bank")
+def save_my_bank(body: BankDetailsBody, mentor: dict = Depends(require_mentor)):
+    """Add or replace the mentor's payout bank details (country-driven, validated, encrypted)."""
+    try:
+        validated = bank_validation.validate_bank_details(body.country_code, body.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    try:
+        return db.upsert_mentor_bank(mentor["id"], validated)
+    except RuntimeError as e:
+        logger.error("Bank details save blocked: %s", e)
+        raise HTTPException(status_code=503, detail="Saving bank details is temporarily unavailable. Please try again later.")
 
 
 # ── Profile editing ────────────────────────────────────────────────────────────

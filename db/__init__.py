@@ -6,6 +6,7 @@ from .pricing import *
 from .payments import *
 from .jobs import *
 from .notifications import *
+from .bank import *
 
 
 def client():
