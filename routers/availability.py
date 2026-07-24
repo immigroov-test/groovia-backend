@@ -34,15 +34,22 @@ class BookingRulesBody(BaseModel):
     @field_validator("days_ahead")
     @classmethod
     def validate_days(cls, v: int) -> int:
-        if v < 1 or v > 365:
-            raise ValueError("days_ahead must be between 1 and 365")
+        if v < 1 or v > 90:
+            raise ValueError("Mentees can book between 1 and 90 days ahead")
         return v
 
     @field_validator("min_notice_hours")
     @classmethod
     def validate_notice(cls, v: float) -> float:
-        if v < 0 or v > 168:
-            raise ValueError("min_notice_hours must be between 0 and 168")
+        if v < 0 or v > 24:
+            raise ValueError("Minimum booking notice must be between 0 and 24 hours")
+        return v
+
+    @field_validator("cancel_hours")
+    @classmethod
+    def validate_cancel(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and not (2 <= v <= 48):
+            raise ValueError("Cancellation/rescheduling notice must be between 2 and 48 hours")
         return v
 
 

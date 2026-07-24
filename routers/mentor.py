@@ -109,6 +109,27 @@ class BookingRules(BaseModel):
     min_notice_hours: float = 2
     cancel_hours: int = 24
 
+    @field_validator("days_ahead")
+    @classmethod
+    def _cap_days_ahead(cls, v: int) -> int:
+        if not (1 <= v <= 90):
+            raise ValueError("Mentees can book between 1 and 90 days ahead")
+        return v
+
+    @field_validator("min_notice_hours")
+    @classmethod
+    def _cap_min_notice(cls, v: float) -> float:
+        if not (0 <= v <= 24):
+            raise ValueError("Minimum booking notice must be between 0 and 24 hours")
+        return v
+
+    @field_validator("cancel_hours")
+    @classmethod
+    def _cap_cancel_hours(cls, v: int) -> int:
+        if not (2 <= v <= 48):
+            raise ValueError("Cancellation/rescheduling notice must be between 2 and 48 hours")
+        return v
+
 
 class DateOverrideDraft(BaseModel):
     slot_date: str                      # YYYY-MM-DD
@@ -140,6 +161,7 @@ class MentorSignupBody(BaseModel):
     phone: Optional[str] = None
     bio: Optional[str] = None
     country: Optional[str] = None
+    home_country_code: Optional[str] = None
     city: Optional[str] = None
     timezone: str = "UTC"
     languages: list[str] = []
@@ -148,6 +170,7 @@ class MentorSignupBody(BaseModel):
     expertise_country_codes: list[str] = []
     expertise_categories: list[str] = []
     years_lived_experience: Optional[int] = None
+    years_professional_experience: Optional[int] = None
     professional_domains: list[str] = []
     agreed_to_mentor_terms: bool = False
     hourly_rate: Optional[float] = None
@@ -164,11 +187,11 @@ class MentorSignupBody(BaseModel):
     def validate_city(cls, v: Optional[str]) -> Optional[str]:
         return _validate_city(v)
 
-    @field_validator("years_lived_experience")
+    @field_validator("years_lived_experience", "years_professional_experience")
     @classmethod
     def validate_years(cls, v: Optional[int]) -> Optional[int]:
         if v is not None and (v < 0 or v > 60):
-            raise ValueError("years_lived_experience must be between 0 and 60")
+            raise ValueError("Years must be between 0 and 60")
         return v
 
     @field_validator("expertise_country_codes")
@@ -193,8 +216,10 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
         raise HTTPException(status_code=400, detail="Select at least one country of expertise")
     if not body.languages:
         raise HTTPException(status_code=400, detail="Select at least one language")
-    if body.years_lived_experience is None:
-        raise HTTPException(status_code=400, detail="Years of lived experience is required")
+    if not (body.home_country_code or "").strip():
+        raise HTTPException(status_code=400, detail="Select your home country")
+    if body.years_professional_experience is None:
+        raise HTTPException(status_code=400, detail="Years of professional experience is required")
     # Bank details are mandatory. Validate them BEFORE creating the mentor row so a missing/invalid
     # payout method never leaves a half-created mentor (which would 409 any retry).
     if body.bank is None:
@@ -214,6 +239,7 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
         phone=(body.phone or "").strip() or None,
         bio=(body.bio or "").strip() or None,
         country=(body.country or "").strip() or None,
+        home_country_code=(body.home_country_code or "").strip() or None,
         city=(body.city or "").strip() or None,
         timezone_name=body.timezone,
         languages=body.languages,
@@ -222,6 +248,7 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
         expertise_country_codes=body.expertise_country_codes,
         expertise_categories=body.expertise_categories,
         years_lived_experience=body.years_lived_experience,
+        years_professional_experience=body.years_professional_experience,
         professional_domains=body.professional_domains,
         hourly_rate=body.hourly_rate,
         currency=body.currency,
@@ -340,6 +367,7 @@ class ProfileUpdateBody(BaseModel):
     phone: Optional[str] = None
     bio: Optional[str] = None
     country: Optional[str] = None
+    home_country_code: Optional[str] = None
     city: Optional[str] = None
     timezone: Optional[str] = None
     languages: Optional[list[str]] = None
@@ -348,6 +376,7 @@ class ProfileUpdateBody(BaseModel):
     expertise_country_codes: Optional[list[str]] = None
     expertise_categories: Optional[list[str]] = None
     years_lived_experience: Optional[int] = None
+    years_professional_experience: Optional[int] = None
     professional_domains: Optional[list[str]] = None
     hourly_rate: Optional[float] = None
     currency: Optional[str] = None
@@ -357,11 +386,11 @@ class ProfileUpdateBody(BaseModel):
     def validate_city(cls, v: Optional[str]) -> Optional[str]:
         return _validate_city(v)
 
-    @field_validator("years_lived_experience")
+    @field_validator("years_lived_experience", "years_professional_experience")
     @classmethod
     def validate_years(cls, v: Optional[int]) -> Optional[int]:
         if v is not None and (v < 0 or v > 60):
-            raise ValueError("years_lived_experience must be between 0 and 60")
+            raise ValueError("Years must be between 0 and 60")
         return v
 
     @field_validator("hourly_rate")
@@ -394,6 +423,8 @@ def update_profile(body: ProfileUpdateBody, user: AuthUser = Depends(get_current
         fields["bio"] = body.bio.strip() or None
     if body.country is not None:
         fields["country"] = body.country.strip() or None
+    if body.home_country_code is not None:
+        fields["home_country_code"] = (body.home_country_code.strip().upper() or None)
     if body.city is not None:
         fields["city"] = body.city.strip() or None
     if body.timezone is not None:
@@ -412,6 +443,8 @@ def update_profile(body: ProfileUpdateBody, user: AuthUser = Depends(get_current
         fields["expertise_categories"] = body.expertise_categories
     if body.years_lived_experience is not None:
         fields["years_lived_experience"] = body.years_lived_experience
+    if body.years_professional_experience is not None:
+        fields["years_professional_experience"] = body.years_professional_experience
     if body.professional_domains is not None:
         fields["professional_domains"] = body.professional_domains
     if body.hourly_rate is not None:

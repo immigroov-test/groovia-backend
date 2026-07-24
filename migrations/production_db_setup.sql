@@ -95,11 +95,13 @@ CREATE TABLE IF NOT EXISTS mentors (
   expertise_categories    TEXT[]    NOT NULL DEFAULT '{}',
   languages               TEXT[]    NOT NULL DEFAULT '{}',
   professional_domains    TEXT[]    NOT NULL DEFAULT '{}',
-  years_lived_experience  INTEGER,
+  years_lived_experience  INTEGER,               -- years lived abroad (optional; 0/NULL for locals)
+  years_professional_experience INTEGER,         -- years of professional experience (required at signup)
   social_links            JSONB NOT NULL DEFAULT '[]',
   phone                   TEXT,
   city                    TEXT,
-  country                 TEXT,
+  country                 TEXT,                  -- current country of residence (location display)
+  home_country_code       CHAR(2),               -- home / origin country (shown to users as "from X")
   public_notes            TEXT,
   booking_url             TEXT,
   email                   TEXT,  -- contact email for pre-approved / seed mentors with no linked account yet
@@ -1081,10 +1083,12 @@ CREATE OR REPLACE FUNCTION avail_set_rules(
   p_cancel_hours     INTEGER DEFAULT NULL
 ) RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 BEGIN
+  -- Caps enforced here (single write path): book-ahead <= 90 days, min notice <= 24h,
+  -- cancel/reschedule notice 2-48h (>= the 2h buffer so a 'late' window always exists).
   UPDATE mentors SET
-    app_booking_window = MAKE_INTERVAL(days => GREATEST(p_days_ahead, 1)),
-    app_minimum_notice = MAKE_INTERVAL(mins => ROUND(GREATEST(p_min_notice_hours, 0) * 60)::INTEGER),
-    cancel_notice_hours = COALESCE(p_cancel_hours, cancel_notice_hours)
+    app_booking_window = MAKE_INTERVAL(days => LEAST(GREATEST(p_days_ahead, 1), 90)),
+    app_minimum_notice = MAKE_INTERVAL(mins => ROUND(LEAST(GREATEST(p_min_notice_hours, 0), 24) * 60)::INTEGER),
+    cancel_notice_hours = LEAST(GREATEST(COALESCE(p_cancel_hours, cancel_notice_hours), 2), 48)
   WHERE id = p_mentor_id;
 END;
 $$;
@@ -1456,12 +1460,16 @@ RETURNS VOID LANGUAGE sql SECURITY DEFINER SET search_path = public AS $$
 $$;
 
 -- ── 4. Deadline helpers ───────────────────────────────────────────────────────
-CREATE OR REPLACE FUNCTION booking_deadline_state(p_slot TIMESTAMPTZ)
+-- The free/late boundary is the mentor's cancellation-and-reschedule notice (p_free_hours,
+-- default 24h), so changing it in the availability rules changes when penalties apply. The 2h
+-- buffer (too close to touch) stays a fixed platform safety rail, so p_free_hours is floored at 2.
+DROP FUNCTION IF EXISTS booking_deadline_state(TIMESTAMPTZ);
+CREATE OR REPLACE FUNCTION booking_deadline_state(p_slot TIMESTAMPTZ, p_free_hours NUMERIC DEFAULT 24)
 RETURNS TEXT LANGUAGE sql STABLE AS $$
   SELECT CASE
     WHEN p_slot IS NULL                        THEN 'free'
     WHEN p_slot - NOW() < INTERVAL '2 hours'   THEN 'buffer'
-    WHEN p_slot - NOW() < INTERVAL '24 hours'  THEN 'late'
+    WHEN p_slot - NOW() < MAKE_INTERVAL(mins => (GREATEST(p_free_hours, 2) * 60)::INTEGER) THEN 'late'
     ELSE 'free'
   END;
 $$;
@@ -1470,7 +1478,7 @@ CREATE OR REPLACE FUNCTION response_window(p_slot TIMESTAMPTZ)
 RETURNS TIMESTAMPTZ LANGUAGE sql STABLE AS $$
   SELECT LEAST(NOW() + INTERVAL '48 hours', p_slot - INTERVAL '2 hours');
 $$;
-GRANT EXECUTE ON FUNCTION booking_deadline_state(TIMESTAMPTZ) TO anon, authenticated;
+GRANT EXECUTE ON FUNCTION booking_deadline_state(TIMESTAMPTZ, NUMERIC) TO anon, authenticated;
 GRANT EXECUTE ON FUNCTION response_window(TIMESTAMPTZ) TO anon, authenticated;
 
 -- ── 5. Cancel flow (REPLACES the old block-on-late cancel_booking) ────────────
@@ -1479,7 +1487,7 @@ GRANT EXECUTE ON FUNCTION response_window(TIMESTAMPTZ) TO anon, authenticated;
 -- >=24h, bumps the cancellation counter when late. Auth is enforced in FastAPI.
 CREATE OR REPLACE FUNCTION cancel_booking(p_booking_id UUID, p_cancelled_by TEXT DEFAULT 'user')
 RETURNS bookings LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
-DECLARE b bookings; v_state TEXT;
+DECLARE b bookings; v_state TEXT; v_free_hours INTEGER;
 BEGIN
   SELECT * INTO b FROM bookings WHERE id = p_booking_id;
   IF NOT FOUND THEN RAISE EXCEPTION 'Booking % not found', p_booking_id; END IF;
@@ -1487,7 +1495,8 @@ BEGIN
     RAISE EXCEPTION 'Booking % is already %', p_booking_id, b.status;
   END IF;
 
-  v_state := booking_deadline_state(b.slot_time);
+  SELECT cancel_notice_hours INTO v_free_hours FROM mentors WHERE id = b.mentor_id;
+  v_state := booking_deadline_state(b.slot_time, COALESCE(v_free_hours, 24));
   IF v_state = 'buffer' THEN
     RAISE EXCEPTION 'Within 2 hours of the session - it can no longer be cancelled here. Please contact the other party.';
   END IF;
@@ -1601,7 +1610,8 @@ BEGIN
   INSERT INTO reschedule_offers(booking_id, proposed_by, offer_date, range_start, range_end,
                                 status, was_late, respond_by)
     VALUES (p_booking_id, 'mentor', p_date, p_start, p_end, 'pending',
-            booking_deadline_state(b.slot_time) = 'late', response_window(b.slot_time))
+            booking_deadline_state(b.slot_time, COALESCE((SELECT cancel_notice_hours FROM mentors WHERE id = b.mentor_id), 24)) = 'late',
+            response_window(b.slot_time))
     RETURNING id INTO v_id;
   PERFORM notify_booking_event(p_booking_id, 'proposed');
   RETURN v_id;
@@ -1674,7 +1684,7 @@ BEGIN
     PERFORM force_autocancel(p_booking_id, 'user');
     RETURN 'autocancelled';
   END IF;
-  v_state := booking_deadline_state(b.slot_time);
+  v_state := booking_deadline_state(b.slot_time, COALESCE((SELECT cancel_notice_hours FROM mentors WHERE id = b.mentor_id), 24));
   IF v_state = 'buffer' THEN RAISE EXCEPTION 'Within 2 hours of the session - cannot reschedule.'; END IF;
   v_approved := EXISTS (SELECT 1 FROM booking_requests
                         WHERE booking_id = p_booking_id AND kind = 'reschedule'
@@ -1958,7 +1968,7 @@ RETURNS TABLE (
     m.display_name, m.slug,
     COALESCE(m.app_timezone, 'UTC'),
     COALESCE(b.attendee_timezone, p.timezone, 'UTC'),
-    b.reschedule_count, b.no_show_by, booking_deadline_state(b.slot_time),
+    b.reschedule_count, b.no_show_by, booking_deadline_state(b.slot_time, COALESCE(m.cancel_notice_hours, 24)),
     ro.id, ro.proposed_by, ro.status, ro.offer_date, ro.range_start, ro.range_end,
     ro.selected_time, ro.requested_date,
     rq.id, rq.kind, rq.initiated_by, rq.status, rq.respond_by,
@@ -2030,7 +2040,7 @@ RETURNS TABLE (
     COALESCE(m.app_timezone, 'UTC'),
     COALESCE(b.attendee_timezone, p.timezone, 'UTC'),
     b.mentor_confirmed_at, b.reschedule_count, b.no_show_by,
-    booking_deadline_state(b.slot_time),
+    booking_deadline_state(b.slot_time, COALESCE(m.cancel_notice_hours, 24)),
     ro.id, ro.proposed_by, ro.status, ro.offer_date, ro.range_start, ro.range_end,
     ro.selected_time, ro.requested_date,
     rq.id, rq.kind, rq.initiated_by, rq.status, rq.respond_by,

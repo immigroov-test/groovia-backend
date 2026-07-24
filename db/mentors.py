@@ -52,6 +52,7 @@ def list_active_mentors(
     base_cols = ("id, slug, display_name, headline, bio, photo_url, "
                  "expertise_country_codes, expertise_categories, languages, "
                  "professional_domains, booking_url, years_lived_experience, "
+                 "years_professional_experience, home_country_code, "
                  "avg_rating, review_count, currency, city, country, smart_pricing, ")
 
     def build(svc_cols: str):
@@ -214,9 +215,10 @@ def get_mentor_by_profile_id(profile_id: str) -> Optional[dict[str, Any]]:
     res = (
         _supabase.table("mentors")
         .select("id, slug, display_name, status, session_duration_minutes, rejection_reason, "
-                "headline, bio, photo_url, phone, country, city, timezone, languages, social_links, "
+                "headline, bio, photo_url, phone, country, home_country_code, city, timezone, languages, social_links, "
                 "expertise_country_codes, expertise_categories, professional_domains, "
-                "years_lived_experience, public_notes, submission_count, hourly_rate, currency, smart_pricing, "
+                "years_lived_experience, years_professional_experience, public_notes, submission_count, "
+                "hourly_rate, currency, smart_pricing, "
                 "pending_changes, pending_submitted_at")
         .eq("profile_id", profile_id)
         .limit(1)
@@ -350,11 +352,13 @@ def create_mentor_signup(
     languages: list[str] | None = None,
     professional_domains: list[str] | None = None,
     years_lived_experience: Optional[int] = None,
+    years_professional_experience: Optional[int] = None,
     bio: Optional[str] = None,
     photo_url: Optional[str] = None,
     phone: Optional[str] = None,
     city: Optional[str] = None,
     country: Optional[str] = None,
+    home_country_code: Optional[str] = None,
     social_links: list[dict[str, str]] | None = None,
     public_notes: Optional[str] = None,
     hourly_rate: Optional[float] = None,
@@ -384,11 +388,13 @@ def create_mentor_signup(
         "languages": languages or [],
         "professional_domains": professional_domains or [],
         "years_lived_experience": years_lived_experience,
+        "years_professional_experience": years_professional_experience,
         "bio": bio,
         "photo_url": photo_url,
         "phone": phone,
         "city": city,
         "country": country,
+        "home_country_code": (home_country_code or "").upper() or None,
         "social_links": social_links or [],
         "public_notes": public_notes,
         "hourly_rate": hourly_rate,
@@ -423,13 +429,13 @@ def create_mentor_signup(
 # Non-critical: presentation-only fields - no re-approval needed.
 _NON_CRITICAL_MENTOR_FIELDS = {
     "display_name", "headline", "bio", "photo_url",
-    "phone", "city", "country", "social_links", "public_notes",
+    "phone", "city", "country", "home_country_code", "social_links", "public_notes",
     "languages", "timezone", "session_duration_minutes",
 }
 
 # Critical: expertise claims - changes flip status back to pending_review.
 _CRITICAL_MENTOR_FIELDS = {
-    "expertise_country_codes", "years_lived_experience", "professional_domains",
+    "expertise_country_codes", "years_lived_experience", "years_professional_experience", "professional_domains",
 }
 
 # Every profile field a mentor may edit from the dashboard (Phase 2 unified model).
@@ -437,8 +443,9 @@ _CRITICAL_MENTOR_FIELDS = {
 # need re-approval; they are intentionally not here.
 _EDITABLE_PROFILE_FIELDS = {
     "display_name", "headline", "bio", "photo_url",
-    "phone", "city", "country", "social_links", "public_notes", "languages", "timezone",
-    "expertise_country_codes", "expertise_categories", "years_lived_experience", "professional_domains",
+    "phone", "city", "country", "home_country_code", "social_links", "public_notes", "languages", "timezone",
+    "expertise_country_codes", "expertise_categories", "years_lived_experience",
+    "years_professional_experience", "professional_domains",
     "hourly_rate", "currency",
 }
 

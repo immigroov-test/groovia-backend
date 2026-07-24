@@ -667,7 +667,7 @@ def get_booking_full_detail(booking_id: str) -> Optional[dict[str, Any]]:
                 "id, status, slot_time, slot_end, reschedule_count, no_show_by, "
                 "candidate_id, candidate_name, candidate_email, candidate_phone, attendee_timezone, "
                 "mentor_id, service_id, "
-                "mentors(profile_id, display_name, photo_url, app_timezone, slug, country), "
+                "mentors(profile_id, display_name, photo_url, app_timezone, slug, country, cancel_notice_hours), "
                 "services(title, duration, type)"
             )
             .eq("id", booking_id)
@@ -742,6 +742,7 @@ def get_booking_full_detail(booking_id: str) -> Optional[dict[str, Any]]:
         "mentor_slug":      mnt.get("slug"),
         "mentor_tz":        mnt.get("app_timezone") or "UTC",
         "mentor_country":   mnt.get("country"),
+        "cancel_notice_hours": mnt.get("cancel_notice_hours") or 24,
         "service_title":    svc.get("title"),
         "service_duration": svc.get("duration"),
         "service_type":     svc.get("type"),

@@ -134,11 +134,13 @@ def booking_detail(booking_id: str, user: AuthUser = Depends(get_current_user)):
     closes_at = (end + MEETING_GRACE_AFTER) if end else None
     join_open = bool(active and slot and closes_at and opens_at <= now <= closes_at)
 
-    # Deadline state, mirroring reschedule_slots: buffer < 2h, late < 24h, else free.
+    # Deadline state: buffer < 2h, then 'late' until the mentor's cancel/reschedule notice, else
+    # 'free'. Mirrors booking_deadline_state() in SQL so the page and the DB agree on penalties.
     deadline_state = None
     if slot:
         hours = (slot - now).total_seconds() / 3600
-        deadline_state = "buffer" if hours < 2 else "late" if hours < 24 else "free"
+        free_hours = max(float(d.get("cancel_notice_hours") or 24), 2)
+        deadline_state = "buffer" if hours < 2 else "late" if hours < free_hours else "free"
 
     can_pay = bool(is_candidate and unpaid_hold and not is_past)
     can_join = bool((is_candidate or is_mentor) and join_open)
