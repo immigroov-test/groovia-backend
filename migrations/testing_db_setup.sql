@@ -1817,9 +1817,14 @@ INSERT INTO mentors (
   )
 ON CONFLICT (slug) DO NOTHING;
 
--- Route ALL mentors' booking-notification emails to the test inbox so every mentor mail
--- lands where you can see it (mentors.email is the notification contact). Testing only.
-UPDATE mentors SET email = 'immigroovtst@gmail.com';
+-- Point ONLY the dummy seed mentors' notification email at the test inbox. Scope is critical:
+-- migrated mentors (legacy_id set) and already-onboarded mentors (profile_id set) MUST keep their
+-- real email, or (a) a pre-approved mentor can never link to their own account on first login and
+-- (b) many mentors sharing one email would let a login attach to the wrong mentor. Outbound mail is
+-- already funnelled to one inbox by EMAIL_TEST_REDIRECT (services/mailer.py), so this is only about
+-- giving the fake seed rows a sane contact, never about mail routing. Testing only.
+UPDATE mentors SET email = 'immigroovtst@gmail.com'
+  WHERE legacy_id IS NULL AND profile_id IS NULL;
 
 -- Remap legacy professional_domains to the 20 canonical field names used by the mentor
 -- onboarding form, so browse filters and the field list stay consistent. Runs for both a

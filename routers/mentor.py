@@ -204,6 +204,14 @@ class MentorSignupBody(BaseModel):
         return v
 
 
+def _derive_expertise(country: Optional[str], home_country: Optional[str]) -> list[str]:
+    """The countries a mentee can browse a mentor by = the two they actually know: their
+    current country (destination) and home country (origin). Deduped, order-preserving.
+    We derive this instead of asking for it, so it can never drift from home/current."""
+    codes = [(country or "").strip().upper(), (home_country or "").strip().upper()]
+    return list(dict.fromkeys(c for c in codes if c))
+
+
 @router.post("/signup")
 def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, user: AuthUser = Depends(get_current_user)):
     """Self-service mentor signup: creates a new mentor row, pending admin review."""
@@ -214,12 +222,12 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
         raise HTTPException(status_code=400, detail="Display name is required")
     if not body.agreed_to_mentor_terms:
         raise HTTPException(status_code=400, detail="You must accept the mentor agreement")
-    if not body.expertise_country_codes:
-        raise HTTPException(status_code=400, detail="Select at least one country of expertise")
     if not body.languages:
         raise HTTPException(status_code=400, detail="Select at least one language")
     if not (body.home_country_code or "").strip():
         raise HTTPException(status_code=400, detail="Select your home country")
+    if not (body.country or "").strip():
+        raise HTTPException(status_code=400, detail="Select your current country")
     if body.years_professional_experience is None:
         raise HTTPException(status_code=400, detail="Years of professional experience is required")
     # Bank details are mandatory. Validate them BEFORE creating the mentor row so a missing/invalid
@@ -251,7 +259,7 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
         languages=body.languages,
         social_links=[s.model_dump() for s in body.social_links],
         public_notes=(body.public_notes or "").strip() or None,
-        expertise_country_codes=body.expertise_country_codes,
+        expertise_country_codes=_derive_expertise(body.country, body.home_country_code),
         expertise_categories=body.expertise_categories,
         years_lived_experience=body.years_lived_experience,
         years_professional_experience=body.years_professional_experience,
@@ -435,6 +443,14 @@ def update_profile(body: ProfileUpdateBody, user: AuthUser = Depends(get_current
         fields["country"] = body.country.strip() or None
     if body.home_country_code is not None:
         fields["home_country_code"] = (body.home_country_code.strip().upper() or None)
+    # Expertise (browse) countries are always derived from home + current, never sent by the
+    # client. Re-derive whenever either changes, using the incoming value or the existing row.
+    if body.country is not None or body.home_country_code is not None:
+        new_country = fields["country"] if "country" in fields else mentor.get("country")
+        new_home = fields["home_country_code"] if "home_country_code" in fields else mentor.get("home_country_code")
+        derived = _derive_expertise(new_country, new_home)
+        if derived:
+            fields["expertise_country_codes"] = derived
     if body.city is not None:
         fields["city"] = body.city.strip() or None
     if body.timezone is not None:
@@ -445,10 +461,7 @@ def update_profile(body: ProfileUpdateBody, user: AuthUser = Depends(get_current
         fields["social_links"] = [s.model_dump() for s in body.social_links]
     if body.public_notes is not None:
         fields["public_notes"] = body.public_notes.strip() or None
-    if body.expertise_country_codes is not None:
-        if not body.expertise_country_codes:
-            raise HTTPException(status_code=400, detail="Select at least one country of expertise")
-        fields["expertise_country_codes"] = body.expertise_country_codes
+    # (expertise_country_codes is derived from home + current above; any client value is ignored)
     if body.expertise_categories is not None:
         fields["expertise_categories"] = body.expertise_categories
     if body.years_lived_experience is not None:
