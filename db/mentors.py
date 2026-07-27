@@ -903,19 +903,30 @@ def get_mentor_full_details(mentor_id: str) -> Optional[dict[str, Any]]:
 
 
 def get_admin_stats() -> dict[str, int]:
-    """Return platform-level counters for the admin overview card."""
+    """Platform-level counters for the admin overview.
+    'active' = mentors a user/guest can actually see AND book (approved + is_active + at least one
+    bookable service) - i.e. exactly what the browse list returns. 'hidden' = approved mentors that
+    are inactive or have no bookable service (still kept + visible to the admin, just not to users).
+    Previously the 'Active mentors' card showed the count of ALL approved rows, which wrongly
+    included the hidden/serviceless ones (the "68 is not true" bug)."""
     try:
-        pending = _supabase.table("mentors").select("id", count="exact").eq("status", "pending_review").execute()
-        approved = _supabase.table("mentors").select("id", count="exact").eq("status", "approved").execute()
-        bookings = _supabase.table("bookings").select("id", count="exact").execute()
+        pending = _supabase.table("mentors").select("id", count="exact").eq("status", "pending_review").execute().count or 0
+        approved = _supabase.table("mentors").select("id", count="exact").eq("status", "approved").execute().count or 0
+        bookings = _supabase.table("bookings").select("id", count="exact").execute().count or 0
+        # Reuse the exact browse filter so the number matches what users see. Small roster, so
+        # fetching all and counting is fine (revisit with a SQL count if it ever grows huge).
+        active = len(list_active_mentors(limit=1000))
         return {
-            "pending_mentor_count": pending.count or 0,
-            "approved_mentor_count": approved.count or 0,
-            "total_bookings": bookings.count or 0,
+            "pending_mentor_count": pending,
+            "approved_mentor_count": approved,                 # all approved (= admin Mentors-tab size)
+            "active_mentor_count": active,                     # what users/guests actually see
+            "hidden_mentor_count": max(approved - active, 0),  # inactive or no bookable service
+            "total_bookings": bookings,
         }
     except Exception:
         logger.exception("Failed to fetch admin stats")
-        return {"pending_mentor_count": 0, "approved_mentor_count": 0, "total_bookings": 0}
+        return {"pending_mentor_count": 0, "approved_mentor_count": 0,
+                "active_mentor_count": 0, "hidden_mentor_count": 0, "total_bookings": 0}
 
 
 # ── Admin: booking oversight + no-show ops ──────────────────────────────────

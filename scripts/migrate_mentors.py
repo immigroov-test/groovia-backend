@@ -297,15 +297,28 @@ def copy_photo(sb, legacy_id: str, src_url: str) -> Optional[str]:
     try:
         r = requests.get(src_url, timeout=30)
         r.raise_for_status()
-        ext = os.path.splitext(src_url.split("?")[0])[1] or mimetypes.guess_extension(r.headers.get("Content-Type", "")) or ".jpg"
+        if not r.content:
+            log.warning("photo empty for %s (%s)", legacy_id, src_url)
+            return None
+        # The legacy API serves photos as application/octet-stream. Store them with a real image
+        # content-type so the public URL renders in an <img> (an octet-stream file can download
+        # instead of display) and Supabase Storage doesn't reject the upload.
+        ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if not ctype.startswith("image/"):
+            ctype = "image/jpeg"
+        ext = os.path.splitext(src_url.split("?")[0])[1].lower()
+        if not ext or len(ext) > 5:
+            ext = mimetypes.guess_extension(ctype) or ".jpg"
         path = f"legacy/{legacy_id}{ext}"
         sb.storage.from_(PHOTO_BUCKET).upload(
             path, r.content,
-            {"content-type": r.headers.get("Content-Type", "image/jpeg"), "upsert": "true"},
+            {"content-type": ctype, "upsert": "true"},
         )
-        return sb.storage.from_(PHOTO_BUCKET).get_public_url(path)
+        url = sb.storage.from_(PHOTO_BUCKET).get_public_url(path)
+        log.info("photo copied for %s -> %s (%s bytes)", legacy_id, path, len(r.content))
+        return url
     except Exception as e:
-        log.warning("photo copy failed for %s: %s", legacy_id, e)
+        log.warning("photo copy FAILED for %s (%s): %s", legacy_id, src_url, e)
         return None
 
 def load_one(sb, rec: dict) -> None:
