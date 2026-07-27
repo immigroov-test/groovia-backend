@@ -236,8 +236,7 @@ def transform_mentor(raw: dict, services: list[dict], weekly: list[dict]) -> dic
     mentor = {
         "legacy_id": raw.get("id"),
         "email": email,
-        "display_name": name or email or "Mentor",
-        "full_name": name or None,
+        "display_name": name or email or "Mentor",   # mentors has no full_name column; the name lives here
         "headline": clean_text(raw.get("title")) or None,
         "bio": (raw.get("about_me") or None) if not is_blank(raw.get("about_me")) else None,
         "public_notes": clean_text(raw.get("disclaimer")) or None,
