@@ -1419,8 +1419,15 @@ GRANT EXECUTE ON FUNCTION is_valid_timezone(TEXT) TO anon, authenticated;
 -- ============================================================================
 
 -- ============================================================================
--- Seed mentor data (testing only)
+-- Seed mentor data (testing only) - DISABLED.
+-- These fake mentors were useful before the real (API-migrated) mentors existed. They are now
+-- commented out so ONLY the migrated mentors + Yokesh appear anywhere in the system. Uncomment the
+-- whole /* ... */ block below to bring them back for isolated UI testing.
+-- Bonus reason to keep them off: every block inside matched "WHERE profile_id IS NULL", which now
+-- ALSO matches migrated mentors (they're unlinked until first login) - so a re-run used to overwrite
+-- migrated rates/smart_pricing and add stray seed services to them. Disabling stops that.
 -- ============================================================================
+/*  ===== BEGIN disabled dummy-mentor seed =====
 INSERT INTO mentors (
   slug, display_name, headline, bio,
   expertise_country_codes, expertise_categories, languages, professional_domains,
@@ -2008,65 +2015,75 @@ BEGIN
       WHERE mentor_id = m.id AND (tags IS NULL OR array_length(tags, 1) IS NULL);
   END LOOP;
 END $$;
+    ===== END disabled dummy-mentor seed ===== */
 
--- One dummy mentor for multi-currency + payment-flow testing: rename a seed mentor to
--- "Yokesh Dhanabal": a test mentor shaped like a MIGRATED mentor (legacy_id set, profile_id NULL,
--- a real email) so you can exercise the full post-migration lifecycle end to end: first-time login
--- linking (log in as dhanabalyokesh99@gmail.com -> link_mentor_by_email attaches this row), test
--- booking, payments, and profile edits. Primary INR with explicit EUR + USD prices + a 30-min offer,
--- so checkout exercises every v2 path:
---   INR customer -> primary INR, as-is           EUR / US customer -> explicit EUR / USD, as-is
---   30-min INR service -> discounted offer_price  GBP/other customer -> fallback: convert + PPP
--- The legacy_id keeps it out of the dummy email-wipe + "(dummy)" tag below, so it stays live and
--- keeps its real email. Reuses a seed dummy's availability + services so it's immediately bookable.
+-- Standalone "Yokesh Dhanabal" test mentor - self-contained (does NOT reuse a dummy row, which no
+-- longer exists). Shaped like a MIGRATED mentor (legacy_id set, profile_id NULL, real email) so you
+-- can test the full post-migration lifecycle: first-login linking (log in as dhanabalyokesh99@gmail.com
+-- -> link_mentor_by_email attaches this row), booking, payments, profile edits. Primary INR with
+-- explicit EUR + USD prices so checkout exercises the multi-currency paths. Idempotent.
 DO $$
 DECLARE m_id UUID;
 BEGIN
-  -- Idempotent: reuse the existing Yokesh on a re-run (else the slug UNIQUE clashes); else pick a
-  -- DUMMY seed row only (legacy_id IS NULL), never a migrated mentor (which is also profile_id NULL).
   SELECT id INTO m_id FROM mentors WHERE slug = 'yokesh-dhanabal' LIMIT 1;
   IF m_id IS NULL THEN
-    SELECT id INTO m_id FROM mentors
-      WHERE profile_id IS NULL AND legacy_id IS NULL AND slug <> 'yokesh-dhanabal'
-      ORDER BY created_at LIMIT 1;
+    INSERT INTO mentors (slug, display_name, email, legacy_id, is_active, status, country,
+                         home_country_code, expertise_country_codes, expertise_categories, languages,
+                         headline, bio, currency, smart_pricing, booking_url, timezone)
+    VALUES ('yokesh-dhanabal', 'Yokesh Dhanabal', 'dhanabalyokesh99@gmail.com', 'seed-yokesh-dhanabal',
+            TRUE, 'approved', 'NL', 'IN', ARRAY['NL','IN']::CHAR(2)[], ARRAY['job_career'],
+            ARRAY['en','ta'],
+            'AI Engineer | Helping you land AI & software roles abroad',
+            '<p>I am Yokesh, an AI/ML engineer. I help people break into AI, data and software roles abroad, from CV and portfolio to interviews and relocation.</p>',
+            'INR', TRUE, 'yokesh-dhanabal', 'Europe/Amsterdam')
+    RETURNING id INTO m_id;
+  ELSE
+    UPDATE mentors SET
+      display_name = 'Yokesh Dhanabal', email = 'dhanabalyokesh99@gmail.com',
+      legacy_id = 'seed-yokesh-dhanabal', profile_id = NULL, is_active = TRUE, status = 'approved',
+      country = 'NL', home_country_code = 'IN', expertise_country_codes = ARRAY['NL','IN']::CHAR(2)[],
+      headline = 'AI Engineer | Helping you land AI & software roles abroad',
+      currency = 'INR', smart_pricing = TRUE, expertise_categories = ARRAY['job_career']
+    WHERE id = m_id;
   END IF;
-  IF m_id IS NULL THEN RETURN; END IF;
-  UPDATE mentors SET
-    display_name = 'Yokesh Dhanabal',
-    slug = 'yokesh-dhanabal',
-    email = 'dhanabalyokesh99@gmail.com',   -- first login with this email links the account
-    legacy_id = 'seed-yokesh-dhanabal',     -- marks it synthetic-migrated (survives wipe + disable)
-    profile_id = NULL,                       -- unlinked, so link_mentor_by_email can attach it
-    is_active = TRUE,
-    status = 'approved',
-    country = 'NL', home_country_code = 'IN', expertise_country_codes = ARRAY['NL','IN']::CHAR(2)[],
-    headline = 'AI Engineer | Helping you land AI & software roles abroad',
-    bio = '<p>I am Yokesh, an AI/ML engineer. I help people break into AI, data and software roles abroad, from CV and portfolio to interviews and relocation.</p>',
-    currency = 'INR', smart_pricing = TRUE, expertise_categories = ARRAY['job_career']
-  WHERE id = m_id;
-  -- All SET expressions read the OLD row, so the EUR figure below is the original seed price.
-  UPDATE services s SET
-    set_currency = 'INR',
-    set_price = ROUND(s.set_price * 90, 0),
-    currency_prices = jsonb_build_array(
-      jsonb_build_object('currency', 'EUR', 'base_price', s.set_price),
-      jsonb_build_object('currency', 'USD', 'base_price', ROUND(s.set_price * 1.08, 2)))
-    WHERE s.mentor_id = m_id;
-  UPDATE services s SET set_offer_price = ROUND(s.set_price * 0.7, 0)
-    WHERE s.mentor_id = m_id AND s.duration = 30;
+  -- Services (only when none yet, so a re-run never disturbs bookings/FKs): INR primary + explicit
+  -- EUR/USD prices; the 30-min one carries a discounted offer price.
+  IF NOT EXISTS (SELECT 1 FROM services WHERE mentor_id = m_id) THEN
+    INSERT INTO services (mentor_id, title, description, type, duration, category, set_price,
+                          set_currency, set_offer_price, currency_prices, is_active, is_ppp, status)
+    VALUES
+      (m_id, 'Free intro call',
+       '<p>A quick 15-minute chat to see how I can help with your move into AI/software roles abroad.</p>',
+       'video', 15, 'job_career', 0, 'INR', NULL, '[]'::jsonb, TRUE, TRUE, 'approved'),
+      (m_id, 'CV & portfolio review',
+       '<p>A focused 30-minute review of your CV and portfolio, tailored to AI/software hiring abroad.</p>',
+       'video', 30, 'job_career', 1499, 'INR', 999,
+       jsonb_build_array(jsonb_build_object('currency','EUR','base_price',18),
+                         jsonb_build_object('currency','USD','base_price',20)), TRUE, TRUE, 'approved'),
+      (m_id, 'Mock interview',
+       '<p>A realistic 45-minute mock interview for AI/ML and software roles, with direct feedback.</p>',
+       'video', 45, 'job_career', 2499, 'INR', NULL,
+       jsonb_build_array(jsonb_build_object('currency','EUR','base_price',30),
+                         jsonb_build_object('currency','USD','base_price',33)), TRUE, TRUE, 'approved');
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM weekly_availability WHERE mentor_id = m_id) THEN
+    INSERT INTO weekly_availability (mentor_id, weekday, start_time, end_time, timezone, is_active)
+    SELECT m_id, d, TIME '10:00', TIME '17:00', 'Europe/Amsterdam', TRUE
+    FROM unnest(ARRAY['Monday','Wednesday','Friday','Saturday']) AS d;
+  END IF;
 END $$;
 
--- Hide the dummy seed mentors from the public site now that real migrated data is loaded
--- (is_active = FALSE keeps them out of browse), and tag their name "(dummy)" so they're still
--- obvious to admins, who see inactive mentors too. Scope is tight ON PURPOSE: dummies only
--- (legacy_id IS NULL AND profile_id IS NULL). Migrated mentors (legacy_id set), onboarded mentors
--- (profile_id set) and Yokesh (legacy_id 'seed-yokesh-dhanabal') are never touched. Idempotent:
--- the CASE keeps a re-run from appending "(dummy)" twice.
-UPDATE mentors SET
-  is_active = FALSE,
-  display_name = CASE WHEN display_name LIKE '%(dummy)%' THEN display_name
-                      ELSE display_name || ' (dummy)' END
-  WHERE legacy_id IS NULL AND profile_id IS NULL AND slug <> 'yokesh-dhanabal';
+-- Remove any leftover dummy seed mentors from a previous run, so ONLY the migrated mentors + Yokesh
+-- remain (this is the count the admin sees). Scope: dummies only - legacy_id IS NULL AND profile_id
+-- IS NULL (migrated have legacy_id, onboarded have profile_id, Yokesh has legacy_id 'seed-...').
+-- Their bookings are cleared first (bookings.mentor_id is ON DELETE RESTRICT); services + weekly
+-- availability cascade with the mentor. Idempotent no-op once none remain.
+DELETE FROM reschedule_offers WHERE booking_id IN (
+  SELECT b.id FROM bookings b JOIN mentors m ON m.id = b.mentor_id
+  WHERE m.legacy_id IS NULL AND m.profile_id IS NULL AND m.slug <> 'yokesh-dhanabal');
+DELETE FROM bookings WHERE mentor_id IN (
+  SELECT id FROM mentors WHERE legacy_id IS NULL AND profile_id IS NULL AND slug <> 'yokesh-dhanabal');
+DELETE FROM mentors WHERE legacy_id IS NULL AND profile_id IS NULL AND slug <> 'yokesh-dhanabal';
 
 -- Migrated mentors carried PPP per service in the legacy data, but our charge (compute_booking_price)
 -- and the browse card both key off the mentor-level smart_pricing toggle, which defaults FALSE. Turn
