@@ -230,6 +230,23 @@ def _mentor_suspended(d: dict) -> tuple[str, str]:
     return "Your Immigroov mentor account has been suspended", _base(body)
 
 
+def _admin_mentor_suspended(d: dict) -> tuple[str, str]:
+    """Ops/admin copy confirming a mentor was suspended, so the team has a record."""
+    name = _e(d.get("display_name", ""))
+    email = _e(d.get("mentor_email", ""))
+    by = _e(d.get("suspended_by", "an admin"))
+    review_url = d.get("review_url", config.FRONTEND_URL + "/admin")
+    body = (
+        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Mentor suspended</h1>'
+        '<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
+        f"<strong>{name}</strong>{f' ({email})' if email else ''} has been suspended by {by}. "
+        "Their profile is now hidden from candidates and they can take no new bookings."
+        "</p>"
+        + _btn(review_url, "Open admin panel")
+    )
+    return f"[Immigroov] Mentor suspended: {name}", _base(body)
+
+
 def _mentor_row(name: str, photo: str, subtitle: str = "") -> str:
     """A small mentor avatar + name block for booking emails."""
     photo = (photo or "").strip()
@@ -609,6 +626,7 @@ _TEMPLATES = {
     "mentor_rejected": _mentor_rejected,
     "mentor_changes_requested": _mentor_changes_requested,
     "mentor_suspended": _mentor_suspended,
+    "admin_mentor_suspended": _admin_mentor_suspended,
     "mentor_reinstated": _mentor_reinstated,
     "booking_confirmed_candidate": _booking_confirmed_candidate,
     "booking_confirmed_mentor": _booking_confirmed_mentor,

@@ -630,8 +630,10 @@ def set_mentor_availability(
     return inserted
 
 
-def list_mentors_by_status(status: str, limit: int = 100) -> list[dict[str, Any]]:
-    """Return mentor rows with the given status, enriched with profile email/full_name."""
+def list_mentors_by_status(status: str, limit: int = 500) -> list[dict[str, Any]]:
+    """Return mentor rows with the given status, enriched with profile email/full_name.
+    Limit is generous so the admin always sees EVERY mentor of a status; with 66 migrated
+    mentors + seeds the old cap of 100 was close, and it must never silently truncate."""
     rows = (
         _supabase.table("mentors")
         .select("id, slug, display_name, headline, photo_url, timezone, status, submission_count, created_at, profile_id, pending_submitted_at")

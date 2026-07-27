@@ -2056,13 +2056,14 @@ BEGIN
     WHERE s.mentor_id = m_id AND s.duration = 30;
 END $$;
 
--- Tag the dummy seed mentors with "(dummy)" so they're obvious in the list alongside the real
--- migrated data (kept visible, not hidden). Scope is tight ON PURPOSE: dummies only (legacy_id IS
--- NULL AND profile_id IS NULL). Migrated mentors (legacy_id set), onboarded mentors (profile_id
--- set) and Yokesh (legacy_id 'seed-yokesh-dhanabal') are never touched. Idempotent: the CASE keeps
--- a re-run from appending "(dummy)" twice.
+-- Hide the dummy seed mentors from the public site now that real migrated data is loaded
+-- (is_active = FALSE keeps them out of browse), and tag their name "(dummy)" so they're still
+-- obvious to admins, who see inactive mentors too. Scope is tight ON PURPOSE: dummies only
+-- (legacy_id IS NULL AND profile_id IS NULL). Migrated mentors (legacy_id set), onboarded mentors
+-- (profile_id set) and Yokesh (legacy_id 'seed-yokesh-dhanabal') are never touched. Idempotent:
+-- the CASE keeps a re-run from appending "(dummy)" twice.
 UPDATE mentors SET
-  is_active = TRUE,
+  is_active = FALSE,
   display_name = CASE WHEN display_name LIKE '%(dummy)%' THEN display_name
                       ELSE display_name || ' (dummy)' END
   WHERE legacy_id IS NULL AND profile_id IS NULL AND slug <> 'yokesh-dhanabal';

@@ -192,6 +192,19 @@ def suspend_mentor(mentor_id: str, background_tasks: BackgroundTasks, user: Auth
             "mentor_suspended",
             {"display_name": display_name or ""},
         )
+    # Notify the admin team too, so the action is recorded for whoever didn't click the button.
+    for admin_email in db.admin_notify_emails():
+        background_tasks.add_task(
+            mailer.send_transactional,
+            admin_email,
+            "admin_mentor_suspended",
+            {
+                "display_name": display_name or "",
+                "mentor_email": mentor_email or "",
+                "suspended_by": user.email or "an admin",
+                "review_url": config.FRONTEND_URL + "/admin",
+            },
+        )
     return result
 
 
