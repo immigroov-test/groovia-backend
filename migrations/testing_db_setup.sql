@@ -2010,23 +2010,36 @@ BEGIN
 END $$;
 
 -- One dummy mentor for multi-currency + payment-flow testing: rename a seed mentor to
--- "Yokesh Dhanabal" (an AI/software profile), primary INR, with explicit EUR + USD prices and a
--- 30-min service on offer. Reuses its seeded availability + services so it's immediately bookable.
--- Checkout then exercises every v2 path:
+-- "Yokesh Dhanabal": a test mentor shaped like a MIGRATED mentor (legacy_id set, profile_id NULL,
+-- a real email) so you can exercise the full post-migration lifecycle end to end: first-time login
+-- linking (log in as dhanabalyokesh99@gmail.com -> link_mentor_by_email attaches this row), test
+-- booking, payments, and profile edits. Primary INR with explicit EUR + USD prices + a 30-min offer,
+-- so checkout exercises every v2 path:
 --   INR customer -> primary INR, as-is           EUR / US customer -> explicit EUR / USD, as-is
 --   30-min INR service -> discounted offer_price  GBP/other customer -> fallback: convert + PPP
+-- The legacy_id keeps it out of the dummy email-wipe + dummy-disable below, so it stays live and
+-- keeps its real email. Reuses a seed dummy's availability + services so it's immediately bookable.
 DO $$
 DECLARE m_id UUID;
 BEGIN
-  -- Idempotent: reuse the existing Yokesh on a re-run (else the slug UNIQUE clashes); else pick a seed mentor.
+  -- Idempotent: reuse the existing Yokesh on a re-run (else the slug UNIQUE clashes); else pick a
+  -- DUMMY seed row only (legacy_id IS NULL), never a migrated mentor (which is also profile_id NULL).
   SELECT id INTO m_id FROM mentors WHERE slug = 'yokesh-dhanabal' LIMIT 1;
   IF m_id IS NULL THEN
-    SELECT id INTO m_id FROM mentors WHERE profile_id IS NULL AND slug <> 'yokesh-dhanabal' ORDER BY created_at LIMIT 1;
+    SELECT id INTO m_id FROM mentors
+      WHERE profile_id IS NULL AND legacy_id IS NULL AND slug <> 'yokesh-dhanabal'
+      ORDER BY created_at LIMIT 1;
   END IF;
   IF m_id IS NULL THEN RETURN; END IF;
   UPDATE mentors SET
     display_name = 'Yokesh Dhanabal',
     slug = 'yokesh-dhanabal',
+    email = 'dhanabalyokesh99@gmail.com',   -- first login with this email links the account
+    legacy_id = 'seed-yokesh-dhanabal',     -- marks it synthetic-migrated (survives wipe + disable)
+    profile_id = NULL,                       -- unlinked, so link_mentor_by_email can attach it
+    is_active = TRUE,
+    status = 'approved',
+    country = 'NL', home_country_code = 'IN', expertise_country_codes = ARRAY['NL','IN']::CHAR(2)[],
     headline = 'AI Engineer | Helping you land AI & software roles abroad',
     bio = '<p>I am Yokesh, an AI/ML engineer. I help people break into AI, data and software roles abroad, from CV and portfolio to interviews and relocation.</p>',
     currency = 'INR', smart_pricing = TRUE, expertise_categories = ARRAY['job_career']
@@ -2042,6 +2055,13 @@ BEGIN
   UPDATE services s SET set_offer_price = ROUND(s.set_price * 0.7, 0)
     WHERE s.mentor_id = m_id AND s.duration = 30;
 END $$;
+
+-- Hide the remaining dummy seed mentors now that real migrated data is loaded: they clutter the
+-- browse list and shouldn't be mistaken for real mentors. Scope = dummies only (legacy_id IS NULL,
+-- profile_id IS NULL); migrated mentors (legacy_id set) and Yokesh (legacy_id 'seed-...') are kept.
+-- Non-destructive (rows stay in the DB); flip is_active back to TRUE to show one again.
+UPDATE mentors SET is_active = FALSE
+  WHERE legacy_id IS NULL AND profile_id IS NULL AND slug <> 'yokesh-dhanabal';
 
 
 -- ###########################################################################
@@ -2842,6 +2862,33 @@ CREATE TABLE IF NOT EXISTS fx_refresh_log (
 INSERT INTO platform_settings (key, value, description) VALUES
   ('fx_max_age_minutes', '1440', 'Max age (minutes) of an FX rate before bookings fail with FX_UNAVAILABLE (default 24h)')
 ON CONFLICT (key) DO NOTHING;
+
+-- Bootstrap FX so a fresh DB can localize prices immediately (else convert_prices has no rate and
+-- every price falls back to the mentor's own currency, e.g. an INR mentor shows INR to an EU visitor).
+-- Approximate EUR-based rates (quote units per 1 EUR); the FX dispatcher overwrites them with live
+-- ECB rates on its schedule. DO UPDATE refreshes fetched_at so a re-run keeps them from going stale.
+INSERT INTO fx_rates (base, quote, rate, as_of, fetched_at) VALUES
+  ('EUR','USD',1.08,CURRENT_DATE,NOW()), ('EUR','GBP',0.85,CURRENT_DATE,NOW()),
+  ('EUR','INR',90.0,CURRENT_DATE,NOW()), ('EUR','AUD',1.63,CURRENT_DATE,NOW()),
+  ('EUR','CAD',1.47,CURRENT_DATE,NOW()), ('EUR','SGD',1.45,CURRENT_DATE,NOW()),
+  ('EUR','AED',3.97,CURRENT_DATE,NOW()), ('EUR','JPY',162.0,CURRENT_DATE,NOW()),
+  ('EUR','CHF',0.96,CURRENT_DATE,NOW()), ('EUR','CNY',7.8,CURRENT_DATE,NOW()),
+  ('EUR','ZAR',19.8,CURRENT_DATE,NOW()), ('EUR','BRL',5.9,CURRENT_DATE,NOW()),
+  ('EUR','NZD',1.78,CURRENT_DATE,NOW()), ('EUR','SEK',11.4,CURRENT_DATE,NOW()),
+  ('EUR','NOK',11.6,CURRENT_DATE,NOW()), ('EUR','DKK',7.46,CURRENT_DATE,NOW()),
+  ('EUR','PLN',4.3,CURRENT_DATE,NOW()), ('EUR','HKD',8.42,CURRENT_DATE,NOW()),
+  ('EUR','MXN',19.5,CURRENT_DATE,NOW()), ('EUR','THB',39.5,CURRENT_DATE,NOW()),
+  ('EUR','MYR',5.05,CURRENT_DATE,NOW()), ('EUR','IDR',17200.0,CURRENT_DATE,NOW()),
+  ('EUR','PHP',61.0,CURRENT_DATE,NOW()), ('EUR','VND',27200.0,CURRENT_DATE,NOW()),
+  ('EUR','KRW',1480.0,CURRENT_DATE,NOW()), ('EUR','TRY',35.0,CURRENT_DATE,NOW()),
+  ('EUR','SAR',4.05,CURRENT_DATE,NOW()), ('EUR','BDT',118.0,CURRENT_DATE,NOW()),
+  ('EUR','PKR',300.0,CURRENT_DATE,NOW()), ('EUR','LKR',325.0,CURRENT_DATE,NOW()),
+  ('EUR','NPR',144.0,CURRENT_DATE,NOW()), ('EUR','NGN',1700.0,CURRENT_DATE,NOW()),
+  ('EUR','KES',140.0,CURRENT_DATE,NOW()), ('EUR','EGP',53.0,CURRENT_DATE,NOW()),
+  ('EUR','TWD',35.0,CURRENT_DATE,NOW()), ('EUR','ILS',4.0,CURRENT_DATE,NOW()),
+  ('EUR','RON',4.97,CURRENT_DATE,NOW()), ('EUR','CZK',25.2,CURRENT_DATE,NOW()),
+  ('EUR','HUF',395.0,CURRENT_DATE,NOW())
+ON CONFLICT (base, quote) DO UPDATE SET rate = EXCLUDED.rate, as_of = EXCLUDED.as_of, fetched_at = NOW();
 
 -- Cross-rate via the EUR pivot. NULL if either leg is missing or stale.
 CREATE OR REPLACE FUNCTION get_fx_or_null(p_from TEXT, p_to TEXT)

@@ -85,19 +85,22 @@ def list_active_mentors(
 
     # Collapse the mentor's bookable services into a single "starting from" price for the
     # card (cheapest active, admin-approved when status exists), then drop the raw list.
+    # A mentor with no bookable service is a dead-end profile (nothing a mentee can book),
+    # so hide them from browse - this is what the legacy portal did, and it drops the
+    # migrated-but-serviceless mentors (Jasna, etc.) rather than showing empty profiles.
+    out: list[dict[str, Any]] = []
     for r in rows:
         svcs = [s for s in (r.pop("services", None) or [])
                 if s.get("is_active")
                 and (not has_status or s.get("status") == "approved")
                 and s.get("set_price") is not None]
-        if svcs:
-            cheapest = min(svcs, key=lambda s: float(s["set_price"]))
-            r["min_price"] = float(cheapest["set_price"])
-            r["price_currency"] = cheapest.get("set_currency") or r.get("currency") or "USD"
-        else:
-            r["min_price"] = None
-            r["price_currency"] = None
-    return rows
+        if not svcs:
+            continue
+        cheapest = min(svcs, key=lambda s: float(s["set_price"]))
+        r["min_price"] = float(cheapest["set_price"])
+        r["price_currency"] = cheapest.get("set_currency") or r.get("currency") or "USD"
+        out.append(r)
+    return out
 
 
 def list_mentors_grouped_by_country(limit_per_country: int = 2) -> dict[str, list[dict[str, Any]]]:
