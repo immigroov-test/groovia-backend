@@ -415,6 +415,9 @@ def create_service(
     is_active: bool = True,
     is_ppp: bool = False,
     tags: Optional[list[str]] = None,
+    set_currency: Optional[str] = None,
+    set_offer_price: Optional[float] = None,
+    currency_prices: Optional[list[dict]] = None,
 ) -> str:
     res = _supabase.rpc("service_create", {
         "p_mentor_id":   mentor_id,
@@ -428,19 +431,28 @@ def create_service(
         "p_ppp":         is_ppp,
     }).execute()
     service_id = res.data
-    # tags live on the services row directly (not a service_create param, to keep that
-    # RPC's signature stable). Store the deduped, capped keyword list.
-    if tags and service_id:
+    # tags + multi-currency pricing live on the services row directly (kept out of the
+    # service_create RPC so its signature stays stable). One follow-up update for all of them.
+    extras: dict = {}
+    if set_currency:
+        extras["set_currency"] = set_currency.strip().upper()
+    if set_offer_price is not None:
+        extras["set_offer_price"] = set_offer_price
+    if currency_prices is not None:
+        extras["currency_prices"] = currency_prices
+    if tags:
         clean: list[str] = []
         for t in tags:
             t = (t or "").strip()
             if t and t.lower() not in {c.lower() for c in clean}:
                 clean.append(t)
         if clean:
-            try:
-                _supabase.table("services").update({"tags": clean[:MAX_SERVICE_TAGS]}).eq("id", service_id).execute()
-            except Exception:
-                logger.warning("create_service: could not save tags (column not migrated yet?)")
+            extras["tags"] = clean[:MAX_SERVICE_TAGS]
+    if extras and service_id:
+        try:
+            _supabase.table("services").update(extras).eq("id", service_id).execute()
+        except Exception:
+            logger.warning("create_service: could not save extras (columns not migrated yet?)")
     return service_id
 
 

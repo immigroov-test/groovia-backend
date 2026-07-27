@@ -6,6 +6,7 @@ from pydantic import BaseModel, field_validator
 
 import db
 from core.permissions import require_mentor
+from services import pricing_input
 
 logger = logging.getLogger("immigroov.routers.services")
 
@@ -21,6 +22,8 @@ class ServiceCreateBody(BaseModel):
     duration: int = 30
     category: Optional[str] = None
     set_price: float = 0
+    set_offer_price: Optional[float] = None
+    currency_prices: list[dict] = []     # explicit per-currency prices [{currency, base_price, offer_price?}]
     is_active: bool = True
     is_ppp: bool = False
     tags: list[str] = []
@@ -72,6 +75,11 @@ def list_services(mentor: dict = Depends(require_mentor)):
 @router.post("")
 def create_service(body: ServiceCreateBody, mentor: dict = Depends(require_mentor)):
     mentor_id = mentor["id"]
+    primary_ccy = (mentor.get("currency") or "USD").upper()
+    try:
+        currency_prices = pricing_input.validate_currency_prices(primary_ccy, body.currency_prices)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     try:
         service_id = db.create_service(
             mentor_id=mentor_id,
@@ -84,6 +92,8 @@ def create_service(body: ServiceCreateBody, mentor: dict = Depends(require_mento
             is_active=body.is_active,
             is_ppp=body.is_ppp,
             tags=body.tags,
+            set_offer_price=body.set_offer_price,
+            currency_prices=currency_prices,
         )
         return {"id": service_id}
     except Exception:

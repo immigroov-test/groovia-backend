@@ -196,44 +196,73 @@ CREATE TABLE IF NOT EXISTS booking_pricing (
 -- currency (e.g. set_price 2500 -> platform_fee 375 = 15%), converted here to a
 -- percentage so it applies to the PPP-adjusted, FX-converted customer gross.
 -- Falls back to the admin global pct (immigroov_commission_pct).
+-- Multi-currency columns (v2) - added here too so this migration is safe to run standalone.
+ALTER TABLE services ADD COLUMN IF NOT EXISTS set_offer_price NUMERIC(10,2);
+ALTER TABLE services ADD COLUMN IF NOT EXISTS currency_prices JSONB NOT NULL DEFAULT '[]';
 CREATE OR REPLACE FUNCTION compute_booking_price(p_service_id UUID, p_customer_country TEXT)
 RETURNS JSONB LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
 DECLARE
-  v_pricing_version CONSTANT INT := 1;
+  v_pricing_version CONSTANT INT := 2;   -- v2: explicit per-currency prices + offer price
   v_ppp_version     CONSTANT INT := 1;
   v_provider        CONSTANT TEXT := 'frankfurter';
-  v_mentor_id UUID; v_set NUMERIC; v_ment_ccy TEXT; v_is_ppp BOOLEAN; v_fee_pct NUMERIC;
-  v_cust_ccy TEXT; v_ppp NUMERIC;
+  v_mentor_id UUID; v_set NUMERIC; v_set_offer NUMERIC; v_ment_ccy TEXT; v_is_ppp BOOLEAN; v_fee_pct NUMERIC;
+  v_prices JSONB;
+  v_cust_ccy TEXT; v_ppp NUMERIC := 1; v_source TEXT; v_explicit NUMERIC; v_base NUMERIC;
   v_fx_mc NUMERIC; v_fx_c_inr NUMERIC; v_fx_m_inr NUMERIC;
   v_gross NUMERIC; v_fee NUMERIC; v_net_cust NUMERIC; v_net_mentor NUMERIC;
 BEGIN
-  SELECT s.mentor_id, s.set_price, COALESCE(s.set_currency, 'USD'), s.is_ppp,
+  SELECT s.mentor_id, s.set_price, s.set_offer_price, COALESCE(s.set_currency, 'USD'), s.is_ppp,
+         COALESCE(s.currency_prices, '[]'::jsonb),
          COALESCE(
            CASE WHEN s.set_price > 0 AND NULLIF(s.platform_fee, 0) IS NOT NULL
                 THEN ROUND(s.platform_fee / s.set_price * 100.0, 4) END,
            (SELECT value::numeric FROM platform_settings WHERE key = 'immigroov_commission_pct'),
            15)
-    INTO v_mentor_id, v_set, v_ment_ccy, v_is_ppp, v_fee_pct
+    INTO v_mentor_id, v_set, v_set_offer, v_ment_ccy, v_is_ppp, v_prices, v_fee_pct
   FROM services s WHERE s.id = p_service_id AND s.is_active AND s.status = 'approved';
   IF v_set IS NULL THEN RAISE EXCEPTION 'Service not available' USING errcode = 'P0001'; END IF;
 
   v_cust_ccy := currency_for_country(p_customer_country);
-  v_ppp := CASE WHEN v_is_ppp THEN get_ppp_factor(p_customer_country) ELSE 1 END;
 
-  v_fx_mc    := get_fx(v_ment_ccy, v_cust_ccy);   -- customer units per 1 mentor unit
-  v_fx_c_inr := get_fx(v_cust_ccy, 'INR');
-  v_fx_m_inr := get_fx(v_ment_ccy, 'INR');
+  -- 1. Is there an explicit price for the customer's currency (primary, or a currency_prices row)?
+  IF v_cust_ccy = v_ment_ccy THEN
+    v_explicit := COALESCE(v_set_offer, v_set);
+  ELSE
+    SELECT COALESCE((e->>'offer_price')::numeric, (e->>'base_price')::numeric)
+      INTO v_explicit
+    FROM jsonb_array_elements(v_prices) e
+    WHERE UPPER(e->>'currency') = v_cust_ccy AND COALESCE((e->>'base_price')::numeric, 0) > 0
+    LIMIT 1;
+  END IF;
 
-  v_gross      := ROUND(v_set * v_ppp * v_fx_mc, 2);
+  -- INR reporting rates + (for the mentor-payout figure) mentor->customer rate. Soft here so an
+  -- explicit-price charge never fails on stale FX; the fallback path below still hard-fails.
+  v_fx_c_inr := get_fx_or_null(v_cust_ccy, 'INR');
+  v_fx_m_inr := get_fx_or_null(v_ment_ccy, 'INR');
+
+  IF v_explicit IS NOT NULL THEN
+    -- The mentor set this currency's price directly -> charge it verbatim (no FX, no PPP).
+    v_source := 'explicit';
+    v_gross  := ROUND(v_explicit, 2);
+    v_fx_mc  := CASE WHEN v_cust_ccy = v_ment_ccy THEN 1 ELSE get_fx_or_null(v_ment_ccy, v_cust_ccy) END;
+  ELSE
+    -- 2. Fallback (unchanged behaviour): convert the primary price to the customer currency + PPP.
+    v_source := 'converted';
+    v_ppp    := CASE WHEN v_is_ppp THEN get_ppp_factor(p_customer_country) ELSE 1 END;
+    v_fx_mc  := get_fx(v_ment_ccy, v_cust_ccy);   -- hard-fails FX_UNAVAILABLE (the charge needs it)
+    v_base   := COALESCE(v_set_offer, v_set);
+    v_gross  := ROUND(v_base * v_ppp * v_fx_mc, 2);
+  END IF;
+
   v_fee        := ROUND(v_gross * v_fee_pct / 100.0, 2);
   v_net_cust   := ROUND(v_gross - v_fee, 2);
-  v_net_mentor := ROUND(v_net_cust / v_fx_mc, 2);  -- divide: customer-net -> mentor currency
+  v_net_mentor := CASE WHEN v_fx_mc IS NOT NULL AND v_fx_mc > 0 THEN ROUND(v_net_cust / v_fx_mc, 2) ELSE NULL END;
 
   RETURN jsonb_build_object(
     'pricing_version', v_pricing_version, 'ppp_version', v_ppp_version, 'fx_provider', v_provider,
     'service_id', p_service_id, 'mentor_id', v_mentor_id, 'customer_country', UPPER(COALESCE(p_customer_country, '')),
     'mentor_currency', v_ment_ccy, 'customer_currency', v_cust_ccy,
-    'set_price', v_set, 'ppp_multiplier', v_ppp,
+    'pricing_source', v_source, 'set_price', v_set, 'ppp_multiplier', v_ppp,
     'fx_mentor_customer', v_fx_mc, 'fx_customer_inr', v_fx_c_inr, 'fx_mentor_inr', v_fx_m_inr,
     'gross_customer', v_gross, 'fee_pct', v_fee_pct, 'fee_amount', v_fee,
     'net_customer', v_net_cust, 'net_mentor', v_net_mentor);

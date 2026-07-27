@@ -121,6 +121,8 @@ CREATE TABLE IF NOT EXISTS mentors (
   app_reschedule_policy   TEXT,
   avg_rating              NUMERIC(3,2) NOT NULL DEFAULT 0,
   review_count            INTEGER NOT NULL DEFAULT 0,
+  legacy_id               TEXT UNIQUE,           -- id from the old (AWS) immigroov system; makes migration idempotent
+  legacy_data             JSONB,                 -- source fields with no column here yet (total_sessions, response_time, per-service is_ppp, ...)
   created_at              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at              TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -218,8 +220,10 @@ CREATE TABLE IF NOT EXISTS services (
   duration     INTEGER NOT NULL CHECK (duration > 0),
   is_ppp       BOOLEAN NOT NULL DEFAULT FALSE,
   is_active    BOOLEAN NOT NULL DEFAULT TRUE,
-  set_price    NUMERIC(10,2) NOT NULL DEFAULT 0,
-  set_currency TEXT NOT NULL DEFAULT 'USD',
+  set_price    NUMERIC(10,2) NOT NULL DEFAULT 0,        -- base price in the mentor's PRIMARY currency
+  set_currency TEXT NOT NULL DEFAULT 'USD',             -- the primary currency (mentor payout currency)
+  set_offer_price NUMERIC(10,2),                        -- optional discount price in the primary currency
+  currency_prices JSONB NOT NULL DEFAULT '[]',          -- explicit extra prices [{currency, base_price, offer_price}]
   platform_fee NUMERIC(10,2) NOT NULL DEFAULT 0,
   category     TEXT,
   status       TEXT NOT NULL DEFAULT 'pending',   -- 'pending' | 'approved' | 'rejected' (admin review)
@@ -228,6 +232,8 @@ CREATE TABLE IF NOT EXISTS services (
 
 -- For DBs created before the approval column existed.
 ALTER TABLE services ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending';
+ALTER TABLE services ADD COLUMN IF NOT EXISTS set_offer_price NUMERIC(10,2);
+ALTER TABLE services ADD COLUMN IF NOT EXISTS currency_prices JSONB NOT NULL DEFAULT '[]';
 
 CREATE INDEX IF NOT EXISTS idx_services_mentor_id ON services(mentor_id);
 CREATE INDEX IF NOT EXISTS idx_services_active    ON services(mentor_id) WHERE is_active;
@@ -304,6 +310,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_bookings_idempotency
 -- smart_pricing toggle and stores tags.
 ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS hourly_rate NUMERIC;
 ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS smart_pricing BOOLEAN NOT NULL DEFAULT FALSE;
+-- Additional-currency base rates [{currency, hourly_rate}]; the primary is (currency, hourly_rate).
+-- Each service's currency_prices are derived from these by duration.
+ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS currency_rates JSONB NOT NULL DEFAULT '[]';
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS candidate_phone TEXT;
 ALTER TABLE services ADD COLUMN IF NOT EXISTS tags TEXT[] NOT NULL DEFAULT '{}';
 
@@ -1988,6 +1997,36 @@ BEGIN
   END LOOP;
 END $$;
 
+-- One dummy mentor for multi-currency + payment-flow testing: rename a seed mentor to
+-- "Yokesh Dhanabal" (an AI/software profile), primary INR, with explicit EUR + USD prices and a
+-- 30-min service on offer. Reuses its seeded availability + services so it's immediately bookable.
+-- Checkout then exercises every v2 path:
+--   INR customer -> primary INR, as-is           EUR / US customer -> explicit EUR / USD, as-is
+--   30-min INR service -> discounted offer_price  GBP/other customer -> fallback: convert + PPP
+DO $$
+DECLARE m_id UUID;
+BEGIN
+  SELECT id INTO m_id FROM mentors WHERE profile_id IS NULL ORDER BY created_at LIMIT 1;
+  IF m_id IS NULL THEN RETURN; END IF;
+  UPDATE mentors SET
+    display_name = 'Yokesh Dhanabal',
+    slug = 'yokesh-dhanabal',
+    headline = 'AI Engineer | Helping you land AI & software roles abroad',
+    bio = '<p>I am Yokesh, an AI/ML engineer. I help people break into AI, data and software roles abroad, from CV and portfolio to interviews and relocation.</p>',
+    currency = 'INR', smart_pricing = TRUE, expertise_categories = ARRAY['job_career']
+  WHERE id = m_id;
+  -- All SET expressions read the OLD row, so the EUR figure below is the original seed price.
+  UPDATE services s SET
+    set_currency = 'INR',
+    set_price = ROUND(s.set_price * 90, 0),
+    currency_prices = jsonb_build_array(
+      jsonb_build_object('currency', 'EUR', 'base_price', s.set_price),
+      jsonb_build_object('currency', 'USD', 'base_price', ROUND(s.set_price * 1.08, 2)))
+    WHERE s.mentor_id = m_id;
+  UPDATE services s SET set_offer_price = ROUND(s.set_price * 0.7, 0)
+    WHERE s.mentor_id = m_id AND s.duration = 30;
+END $$;
+
 
 -- ###########################################################################
 -- Booking lifecycle v2 (folded in from 017_booking_lifecycle_v2.sql)
@@ -2894,41 +2933,67 @@ CREATE TABLE IF NOT EXISTS booking_pricing (
 CREATE OR REPLACE FUNCTION compute_booking_price(p_service_id UUID, p_customer_country TEXT)
 RETURNS JSONB LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
 DECLARE
-  v_pricing_version CONSTANT INT := 1;
+  v_pricing_version CONSTANT INT := 2;   -- v2: explicit per-currency prices + offer price
   v_ppp_version     CONSTANT INT := 1;
   v_provider        CONSTANT TEXT := 'frankfurter';
-  v_mentor_id UUID; v_set NUMERIC; v_ment_ccy TEXT; v_is_ppp BOOLEAN; v_fee_pct NUMERIC;
-  v_cust_ccy TEXT; v_ppp NUMERIC;
+  v_mentor_id UUID; v_set NUMERIC; v_set_offer NUMERIC; v_ment_ccy TEXT; v_is_ppp BOOLEAN; v_fee_pct NUMERIC;
+  v_prices JSONB;
+  v_cust_ccy TEXT; v_ppp NUMERIC := 1; v_source TEXT; v_explicit NUMERIC; v_base NUMERIC;
   v_fx_mc NUMERIC; v_fx_c_inr NUMERIC; v_fx_m_inr NUMERIC;
   v_gross NUMERIC; v_fee NUMERIC; v_net_cust NUMERIC; v_net_mentor NUMERIC;
 BEGIN
-  SELECT s.mentor_id, s.set_price, COALESCE(s.set_currency, 'USD'), s.is_ppp,
+  SELECT s.mentor_id, s.set_price, s.set_offer_price, COALESCE(s.set_currency, 'USD'), s.is_ppp,
+         COALESCE(s.currency_prices, '[]'::jsonb),
          COALESCE(
            CASE WHEN s.set_price > 0 AND NULLIF(s.platform_fee, 0) IS NOT NULL
                 THEN ROUND(s.platform_fee / s.set_price * 100.0, 4) END,
            (SELECT value::numeric FROM platform_settings WHERE key = 'immigroov_commission_pct'),
            15)
-    INTO v_mentor_id, v_set, v_ment_ccy, v_is_ppp, v_fee_pct
+    INTO v_mentor_id, v_set, v_set_offer, v_ment_ccy, v_is_ppp, v_prices, v_fee_pct
   FROM services s WHERE s.id = p_service_id AND s.is_active AND s.status = 'approved';
   IF v_set IS NULL THEN RAISE EXCEPTION 'Service not available' USING errcode = 'P0001'; END IF;
 
   v_cust_ccy := currency_for_country(p_customer_country);
-  v_ppp := CASE WHEN v_is_ppp THEN get_ppp_factor(p_customer_country) ELSE 1 END;
 
-  v_fx_mc    := get_fx(v_ment_ccy, v_cust_ccy);   -- customer units per 1 mentor unit
-  v_fx_c_inr := get_fx(v_cust_ccy, 'INR');
-  v_fx_m_inr := get_fx(v_ment_ccy, 'INR');
+  -- 1. Is there an explicit price for the customer's currency (primary, or a currency_prices row)?
+  IF v_cust_ccy = v_ment_ccy THEN
+    v_explicit := COALESCE(v_set_offer, v_set);
+  ELSE
+    SELECT COALESCE((e->>'offer_price')::numeric, (e->>'base_price')::numeric)
+      INTO v_explicit
+    FROM jsonb_array_elements(v_prices) e
+    WHERE UPPER(e->>'currency') = v_cust_ccy AND COALESCE((e->>'base_price')::numeric, 0) > 0
+    LIMIT 1;
+  END IF;
 
-  v_gross      := ROUND(v_set * v_ppp * v_fx_mc, 2);
+  -- INR reporting rates + (for the mentor-payout figure) mentor->customer rate. Soft here so an
+  -- explicit-price charge never fails on stale FX; the fallback path below still hard-fails.
+  v_fx_c_inr := get_fx_or_null(v_cust_ccy, 'INR');
+  v_fx_m_inr := get_fx_or_null(v_ment_ccy, 'INR');
+
+  IF v_explicit IS NOT NULL THEN
+    -- The mentor set this currency's price directly -> charge it verbatim (no FX, no PPP).
+    v_source := 'explicit';
+    v_gross  := ROUND(v_explicit, 2);
+    v_fx_mc  := CASE WHEN v_cust_ccy = v_ment_ccy THEN 1 ELSE get_fx_or_null(v_ment_ccy, v_cust_ccy) END;
+  ELSE
+    -- 2. Fallback (unchanged behaviour): convert the primary price to the customer currency + PPP.
+    v_source := 'converted';
+    v_ppp    := CASE WHEN v_is_ppp THEN get_ppp_factor(p_customer_country) ELSE 1 END;
+    v_fx_mc  := get_fx(v_ment_ccy, v_cust_ccy);   -- hard-fails FX_UNAVAILABLE (the charge needs it)
+    v_base   := COALESCE(v_set_offer, v_set);
+    v_gross  := ROUND(v_base * v_ppp * v_fx_mc, 2);
+  END IF;
+
   v_fee        := ROUND(v_gross * v_fee_pct / 100.0, 2);
   v_net_cust   := ROUND(v_gross - v_fee, 2);
-  v_net_mentor := ROUND(v_net_cust / v_fx_mc, 2);  -- divide: customer-net -> mentor currency
+  v_net_mentor := CASE WHEN v_fx_mc IS NOT NULL AND v_fx_mc > 0 THEN ROUND(v_net_cust / v_fx_mc, 2) ELSE NULL END;
 
   RETURN jsonb_build_object(
     'pricing_version', v_pricing_version, 'ppp_version', v_ppp_version, 'fx_provider', v_provider,
     'service_id', p_service_id, 'mentor_id', v_mentor_id, 'customer_country', UPPER(COALESCE(p_customer_country, '')),
     'mentor_currency', v_ment_ccy, 'customer_currency', v_cust_ccy,
-    'set_price', v_set, 'ppp_multiplier', v_ppp,
+    'pricing_source', v_source, 'set_price', v_set, 'ppp_multiplier', v_ppp,
     'fx_mentor_customer', v_fx_mc, 'fx_customer_inr', v_fx_c_inr, 'fx_mentor_inr', v_fx_m_inr,
     'gross_customer', v_gross, 'fee_pct', v_fee_pct, 'fee_amount', v_fee,
     'net_customer', v_net_cust, 'net_mentor', v_net_mentor);

@@ -33,6 +33,9 @@ etc/
 graph.png
 system_architecture.png
 _dev_emails.jsonl
+# Legacy mentor migration downloads - contain PII, NEVER commit
+mentor_migration_raw.json
+mentor_migration_preview.json
 
 # Node (none here now; harmless)
 node_modules/

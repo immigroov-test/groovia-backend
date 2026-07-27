@@ -93,11 +93,15 @@ def refresh_fx_rates() -> dict[str, Any]:
     symbols = set(_FX_BASE_SYMBOLS)
     symbols.add("INR")
     try:
-        res = _supabase.table("services").select("set_currency").eq("is_active", True).execute()
+        res = _supabase.table("services").select("set_currency, currency_prices").eq("is_active", True).execute()
         for row in res.data or []:
             ccy = (row.get("set_currency") or "").upper()
             if ccy and ccy != "EUR":
                 symbols.add(ccy)
+            for p in (row.get("currency_prices") or []):          # explicit per-currency prices
+                c = (p.get("currency") or "").upper()
+                if c and c != "EUR":
+                    symbols.add(c)
     except Exception:
         logger.exception("refresh_fx_rates: failed to load active service currencies, using static set only")
 

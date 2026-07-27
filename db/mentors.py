@@ -363,6 +363,7 @@ def create_mentor_signup(
     public_notes: Optional[str] = None,
     hourly_rate: Optional[float] = None,
     currency: str = "USD",
+    currency_rates: Optional[list[dict]] = None,
     smart_pricing: bool = False,
     session_duration_minutes: int = 60,
 ) -> dict[str, Any]:
@@ -399,6 +400,7 @@ def create_mentor_signup(
         "public_notes": public_notes,
         "hourly_rate": hourly_rate,
         "currency": (currency or "USD").upper(),
+        "currency_rates": currency_rates or [],
         "smart_pricing": smart_pricing,
         "session_duration_minutes": session_duration_minutes,
     }).execute()
@@ -446,7 +448,7 @@ _EDITABLE_PROFILE_FIELDS = {
     "phone", "city", "country", "home_country_code", "social_links", "public_notes", "languages", "timezone",
     "expertise_country_codes", "expertise_categories", "years_lived_experience",
     "years_professional_experience", "professional_domains",
-    "hourly_rate", "currency",
+    "hourly_rate", "currency", "currency_rates",
 }
 
 

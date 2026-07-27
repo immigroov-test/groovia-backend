@@ -8,7 +8,7 @@ from pydantic import BaseModel, field_validator, model_validator
 
 import config
 import db
-from services import mailer, bank_validation, bank_crypto
+from services import mailer, bank_validation, bank_crypto, pricing_input
 from core.auth import AuthUser, get_current_user
 from core.permissions import require_mentor
 
@@ -98,7 +98,8 @@ class ServiceDraft(BaseModel):
     title: str
     duration: int       # 15 | 30 | 45 | 60
     is_active: bool = True
-    set_price: float = 0   # prorated from the mentor's hourly rate, editable per session
+    set_price: float = 0   # prorated from the mentor's primary hourly rate
+    currency_prices: list[dict] = []   # per-currency prices derived from the mentor's other rates
     description: Optional[str] = None
     category: Optional[str] = None
     tags: list[str] = []
@@ -175,6 +176,7 @@ class MentorSignupBody(BaseModel):
     agreed_to_mentor_terms: bool = False
     hourly_rate: Optional[float] = None
     currency: str = "USD"
+    currency_rates: list[dict] = []      # additional-currency base rates [{currency, hourly_rate}]
     smart_pricing: bool = False
     weekly_availability: list[WeeklySlot] = []
     services: list[ServiceDraft] = []
@@ -231,6 +233,10 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
         validated_bank = bank_validation.validate_bank_details(body.bank.country_code, body.bank.model_dump())
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
+    try:
+        validated_rates = pricing_input.validate_currency_rates(body.currency, body.currency_rates)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     result = db.create_mentor_signup(
         user.id,
         display_name=display_name,
@@ -252,6 +258,7 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
         professional_domains=body.professional_domains,
         hourly_rate=body.hourly_rate,
         currency=body.currency,
+        currency_rates=validated_rates,
         smart_pricing=body.smart_pricing,
     )
     mentor_id = result["id"]
@@ -275,7 +282,9 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
                               is_active=svc.is_active, set_price=svc.set_price,
                               description=(svc.description or "").strip() or None,
                               category=(svc.category or "").strip() or None,
-                              tags=svc.tags)
+                              tags=svc.tags,
+                              set_currency=(body.currency or "INR").upper(),
+                              currency_prices=pricing_input.validate_currency_prices(body.currency, svc.currency_prices))
         except Exception:
             logger.exception("Service create failed during signup for mentor %s", mentor_id)
             warnings.append(f"Could not save your session type \"{svc.title}\". Please re-add it from your dashboard.")
@@ -380,6 +389,7 @@ class ProfileUpdateBody(BaseModel):
     professional_domains: Optional[list[str]] = None
     hourly_rate: Optional[float] = None
     currency: Optional[str] = None
+    currency_rates: Optional[list[dict]] = None
 
     @field_validator("city")
     @classmethod
@@ -451,6 +461,12 @@ def update_profile(body: ProfileUpdateBody, user: AuthUser = Depends(get_current
         fields["hourly_rate"] = body.hourly_rate
     if body.currency is not None:
         fields["currency"] = (body.currency.strip().upper() or "USD")
+    if body.currency_rates is not None:
+        primary = fields.get("currency") or mentor.get("currency")
+        try:
+            fields["currency_rates"] = pricing_input.validate_currency_rates(primary, body.currency_rates)
+        except ValueError as e:
+            raise HTTPException(status_code=422, detail=str(e))
     try:
         return db.save_mentor_profile_edit(mentor["id"], fields)
     except PermissionError as e:
