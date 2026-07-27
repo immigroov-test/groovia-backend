@@ -20,7 +20,7 @@ def list_mentors(
     country: Optional[str] = Query(None, min_length=2, max_length=2, description="ISO 3166-1 alpha-2"),
     category: Optional[str] = None,
     q: Optional[str] = Query(None, description="Free-text keyword to match against headline"),
-    limit: int = Query(50, ge=1, le=100),
+    limit: int = Query(60, ge=1, le=300),
 ):
     """Public mentor browse - returns approved + active mentors with optional filters."""
     try:

@@ -55,13 +55,20 @@ def list_active_mentors(
                  "years_professional_experience, home_country_code, "
                  "avg_rating, review_count, currency, city, country, smart_pricing, ")
 
+    # Fetch more rows than the caller's display `limit`, because the serviceless filter below
+    # drops some: if we capped the DB read at `limit`, a page could shrink well under `limit`
+    # and hide later mentors entirely (the "I don't see Vinoth" bug). The table is small
+    # (tens-to-low-hundreds), so over-fetching a fixed buffer is cheap. Revisit with a
+    # has-active-service flag + keyset pagination if the roster ever grows into the thousands.
+    fetch_cap = limit + 100
+
     def build(svc_cols: str):
         q = (
             _supabase.table("mentors")
             .select(base_cols + f"services({svc_cols})")
             .eq("status", "approved")
             .eq("is_active", True)
-            .limit(limit)
+            .limit(fetch_cap)
         )
         if country_code:
             q = q.contains("expertise_country_codes", [country_code.upper()])
@@ -100,7 +107,7 @@ def list_active_mentors(
         r["min_price"] = float(cheapest["set_price"])
         r["price_currency"] = cheapest.get("set_currency") or r.get("currency") or "USD"
         out.append(r)
-    return out
+    return out[:limit]
 
 
 def list_mentors_grouped_by_country(limit_per_country: int = 2) -> dict[str, list[dict[str, Any]]]:

@@ -2017,7 +2017,7 @@ END $$;
 -- so checkout exercises every v2 path:
 --   INR customer -> primary INR, as-is           EUR / US customer -> explicit EUR / USD, as-is
 --   30-min INR service -> discounted offer_price  GBP/other customer -> fallback: convert + PPP
--- The legacy_id keeps it out of the dummy email-wipe + dummy-disable below, so it stays live and
+-- The legacy_id keeps it out of the dummy email-wipe + "(dummy)" tag below, so it stays live and
 -- keeps its real email. Reuses a seed dummy's availability + services so it's immediately bookable.
 DO $$
 DECLARE m_id UUID;
@@ -2056,11 +2056,15 @@ BEGIN
     WHERE s.mentor_id = m_id AND s.duration = 30;
 END $$;
 
--- Hide the remaining dummy seed mentors now that real migrated data is loaded: they clutter the
--- browse list and shouldn't be mistaken for real mentors. Scope = dummies only (legacy_id IS NULL,
--- profile_id IS NULL); migrated mentors (legacy_id set) and Yokesh (legacy_id 'seed-...') are kept.
--- Non-destructive (rows stay in the DB); flip is_active back to TRUE to show one again.
-UPDATE mentors SET is_active = FALSE
+-- Tag the dummy seed mentors with "(dummy)" so they're obvious in the list alongside the real
+-- migrated data (kept visible, not hidden). Scope is tight ON PURPOSE: dummies only (legacy_id IS
+-- NULL AND profile_id IS NULL). Migrated mentors (legacy_id set), onboarded mentors (profile_id
+-- set) and Yokesh (legacy_id 'seed-yokesh-dhanabal') are never touched. Idempotent: the CASE keeps
+-- a re-run from appending "(dummy)" twice.
+UPDATE mentors SET
+  is_active = TRUE,
+  display_name = CASE WHEN display_name LIKE '%(dummy)%' THEN display_name
+                      ELSE display_name || ' (dummy)' END
   WHERE legacy_id IS NULL AND profile_id IS NULL AND slug <> 'yokesh-dhanabal';
 
 
