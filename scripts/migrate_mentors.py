@@ -246,6 +246,10 @@ def transform_mentor(raw: dict, services: list[dict], weekly: list[dict]) -> dic
         "timezone": raw.get("app_timezone") or "UTC",
         "app_timezone": raw.get("app_timezone") or "UTC",
         "currency": (raw.get("currency") or "USD").upper(),
+        # Our PPP control is the mentor-level smart_pricing toggle (the charge + the browse card
+        # both key off it). The legacy data carried PPP per service, so enable smart_pricing when
+        # the mentor used fair pricing on any service; otherwise their PPP intent would be lost.
+        "smart_pricing": any(s["is_ppp"] for s in out_services),
         "languages": languages,
         "social_links": socials,
         "expertise_country_codes": expertise_countries,

@@ -2067,6 +2067,15 @@ UPDATE mentors SET
                       ELSE display_name || ' (dummy)' END
   WHERE legacy_id IS NULL AND profile_id IS NULL AND slug <> 'yokesh-dhanabal';
 
+-- Migrated mentors carried PPP per service in the legacy data, but our charge (compute_booking_price)
+-- and the browse card both key off the mentor-level smart_pricing toggle, which defaults FALSE. Turn
+-- it on for any migrated mentor that used PPP, so fair pricing actually applies (charge + badge +
+-- struck-through original -> discounted). No-op until migrate_mentors.py has loaded the mentors; the
+-- migration script now sets this at load time too, so this only backfills an already-loaded DB.
+UPDATE mentors m SET smart_pricing = TRUE
+  WHERE m.legacy_id IS NOT NULL
+    AND EXISTS (SELECT 1 FROM services s WHERE s.mentor_id = m.id AND s.is_ppp);
+
 
 -- ###########################################################################
 -- Booking lifecycle v2 (folded in from 017_booking_lifecycle_v2.sql)
