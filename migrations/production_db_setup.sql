@@ -312,6 +312,12 @@ ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS smart_pricing BOOLEAN NOT NULL DEF
 -- Additional-currency base rates [{currency, hourly_rate}]; the primary is (currency, hourly_rate).
 -- Each service's currency_prices are derived from these by duration.
 ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS currency_rates JSONB NOT NULL DEFAULT '[]';
+-- These were added to the CREATE TABLE above, but CREATE TABLE IF NOT EXISTS is a no-op on an
+-- existing DB, so they MUST also be ALTERed in (or the mentor-list SELECT breaks on old databases).
+ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS home_country_code CHAR(2);
+ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS years_professional_experience INTEGER;
+ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS legacy_id TEXT UNIQUE;
+ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS legacy_data JSONB;
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS candidate_phone TEXT;
 ALTER TABLE services ADD COLUMN IF NOT EXISTS tags TEXT[] NOT NULL DEFAULT '{}';
 
@@ -387,6 +393,7 @@ CREATE TABLE IF NOT EXISTS platform_settings (
 
 INSERT INTO platform_settings (key, value, description) VALUES
   ('immigroov_commission_pct', '15', 'Default Immigroov commission percentage'),
+  ('immigroov_markup_pct', '20', 'Global markup % ADDED on top of the mentor rate to get the customer price. The mentor rate is never shown to customers. Set by the developer in the DB; admin sees it read-only.'),
   ('default_currency', 'USD', 'Fallback currency for the platform')
 ON CONFLICT (key) DO NOTHING;
 
@@ -2316,29 +2323,26 @@ CREATE TABLE IF NOT EXISTS booking_pricing (
 CREATE OR REPLACE FUNCTION compute_booking_price(p_service_id UUID, p_customer_country TEXT)
 RETURNS JSONB LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
 DECLARE
-  v_pricing_version CONSTANT INT := 2;   -- v2: explicit per-currency prices + offer price
+  v_pricing_version CONSTANT INT := 3;   -- v3: customer price = mentor rate + global markup (mentor rate hidden)
   v_ppp_version     CONSTANT INT := 1;
   v_provider        CONSTANT TEXT := 'frankfurter';
-  v_mentor_id UUID; v_set NUMERIC; v_set_offer NUMERIC; v_ment_ccy TEXT; v_is_ppp BOOLEAN; v_fee_pct NUMERIC;
-  v_prices JSONB;
-  v_cust_ccy TEXT; v_ppp NUMERIC := 1; v_source TEXT; v_explicit NUMERIC; v_base NUMERIC;
+  v_mentor_id UUID; v_set NUMERIC; v_set_offer NUMERIC; v_ment_ccy TEXT; v_is_ppp BOOLEAN;
+  v_prices JSONB; v_markup NUMERIC;
+  v_cust_ccy TEXT; v_ppp NUMERIC := 1; v_source TEXT; v_explicit NUMERIC; v_base NUMERIC; v_mentor_amt NUMERIC;
   v_fx_mc NUMERIC; v_fx_c_inr NUMERIC; v_fx_m_inr NUMERIC;
   v_gross NUMERIC; v_fee NUMERIC; v_net_cust NUMERIC; v_net_mentor NUMERIC;
 BEGIN
   SELECT s.mentor_id, s.set_price, s.set_offer_price, COALESCE(s.set_currency, 'USD'), s.is_ppp,
-         COALESCE(s.currency_prices, '[]'::jsonb),
-         COALESCE(
-           CASE WHEN s.set_price > 0 AND NULLIF(s.platform_fee, 0) IS NOT NULL
-                THEN ROUND(s.platform_fee / s.set_price * 100.0, 4) END,
-           (SELECT value::numeric FROM platform_settings WHERE key = 'immigroov_commission_pct'),
-           15)
-    INTO v_mentor_id, v_set, v_set_offer, v_ment_ccy, v_is_ppp, v_prices, v_fee_pct
+         COALESCE(s.currency_prices, '[]'::jsonb)
+    INTO v_mentor_id, v_set, v_set_offer, v_ment_ccy, v_is_ppp, v_prices
   FROM services s WHERE s.id = p_service_id AND s.is_active AND s.status = 'approved';
   IF v_set IS NULL THEN RAISE EXCEPTION 'Service not available' USING errcode = 'P0001'; END IF;
 
+  -- Global markup added on top of the mentor rate to get the customer price. Set by the developer.
+  v_markup   := COALESCE((SELECT value::numeric FROM platform_settings WHERE key = 'immigroov_markup_pct'), 20);
   v_cust_ccy := currency_for_country(p_customer_country);
 
-  -- 1. Is there an explicit price for the customer's currency (primary, or a currency_prices row)?
+  -- 1. Is there an explicit MENTOR rate for the customer's currency (primary, or a currency_prices row)?
   IF v_cust_ccy = v_ment_ccy THEN
     v_explicit := COALESCE(v_set_offer, v_set);
   ELSE
@@ -2349,36 +2353,39 @@ BEGIN
     LIMIT 1;
   END IF;
 
-  -- INR reporting rates + (for the mentor-payout figure) mentor->customer rate. Soft here so an
-  -- explicit-price charge never fails on stale FX; the fallback path below still hard-fails.
   v_fx_c_inr := get_fx_or_null(v_cust_ccy, 'INR');
   v_fx_m_inr := get_fx_or_null(v_ment_ccy, 'INR');
 
   IF v_explicit IS NOT NULL THEN
-    -- The mentor set this currency's price directly -> charge it verbatim (no FX, no PPP).
-    v_source := 'explicit';
-    v_gross  := ROUND(v_explicit, 2);
-    v_fx_mc  := CASE WHEN v_cust_ccy = v_ment_ccy THEN 1 ELSE get_fx_or_null(v_ment_ccy, v_cust_ccy) END;
+    -- Mentor set this currency's rate directly -> no FX, no PPP on the rate.
+    v_source     := 'explicit';
+    v_fx_mc      := CASE WHEN v_cust_ccy = v_ment_ccy THEN 1 ELSE get_fx_or_null(v_ment_ccy, v_cust_ccy) END;
+    v_mentor_amt := ROUND(v_explicit, 2);
+    v_net_mentor := CASE WHEN v_fx_mc IS NOT NULL AND v_fx_mc > 0 THEN ROUND(v_explicit / v_fx_mc, 2) ELSE NULL END;
   ELSE
-    -- 2. Fallback (unchanged behaviour): convert the primary price to the customer currency + PPP.
-    v_source := 'converted';
-    v_ppp    := CASE WHEN v_is_ppp THEN get_ppp_factor(p_customer_country) ELSE 1 END;
-    v_fx_mc  := get_fx(v_ment_ccy, v_cust_ccy);   -- hard-fails FX_UNAVAILABLE (the charge needs it)
-    v_base   := COALESCE(v_set_offer, v_set);
-    v_gross  := ROUND(v_base * v_ppp * v_fx_mc, 2);
+    -- Fallback: localise the primary rate to the customer currency (+ PPP).
+    v_source     := 'converted';
+    v_ppp        := CASE WHEN v_is_ppp THEN get_ppp_factor(p_customer_country) ELSE 1 END;
+    v_fx_mc      := get_fx(v_ment_ccy, v_cust_ccy);   -- hard-fails FX_UNAVAILABLE (the charge needs it)
+    v_base       := COALESCE(v_set_offer, v_set);
+    v_mentor_amt := ROUND(v_base * v_ppp * v_fx_mc, 2);
+    v_net_mentor := v_base;                            -- mentor's filled rate (owner pays this manually)
   END IF;
 
-  v_fee        := ROUND(v_gross * v_fee_pct / 100.0, 2);
-  v_net_cust   := ROUND(v_gross - v_fee, 2);
-  v_net_mentor := CASE WHEN v_fx_mc IS NOT NULL AND v_fx_mc > 0 THEN ROUND(v_net_cust / v_fx_mc, 2) ELSE NULL END;
+  -- Customer pays the localised mentor rate PLUS the global markup. The mentor rate itself
+  -- (set_price / mentor_amount / net_mentor) is for admin + owner only, never shown to the customer.
+  v_gross    := ROUND(v_mentor_amt * (1 + v_markup / 100.0), 2);
+  v_fee      := ROUND(v_gross - v_mentor_amt, 2);
+  v_net_cust := v_mentor_amt;
 
   RETURN jsonb_build_object(
     'pricing_version', v_pricing_version, 'ppp_version', v_ppp_version, 'fx_provider', v_provider,
     'service_id', p_service_id, 'mentor_id', v_mentor_id, 'customer_country', UPPER(COALESCE(p_customer_country, '')),
     'mentor_currency', v_ment_ccy, 'customer_currency', v_cust_ccy,
     'pricing_source', v_source, 'set_price', v_set, 'ppp_multiplier', v_ppp,
+    'markup_pct', v_markup, 'mentor_amount', v_mentor_amt,
     'fx_mentor_customer', v_fx_mc, 'fx_customer_inr', v_fx_c_inr, 'fx_mentor_inr', v_fx_m_inr,
-    'gross_customer', v_gross, 'fee_pct', v_fee_pct, 'fee_amount', v_fee,
+    'gross_customer', v_gross, 'fee_pct', v_markup, 'fee_amount', v_fee,
     'net_customer', v_net_cust, 'net_mentor', v_net_mentor);
 END; $$;
 GRANT EXECUTE ON FUNCTION compute_booking_price(UUID, TEXT) TO anon, authenticated;
@@ -2407,9 +2414,11 @@ GRANT EXECUTE ON FUNCTION get_booking_quote(UUID, TEXT) TO anon, authenticated;
 CREATE OR REPLACE FUNCTION convert_prices(p_customer_country TEXT, p_items JSONB)
 RETURNS TABLE(key TEXT, you NUMERIC, you0 NUMERIC, customer_currency TEXT, fx_ok BOOLEAN)
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
-DECLARE it JSONB; v_amt NUMERIC; v_from TEXT; v_ppp_on BOOLEAN; v_cust TEXT; v_ppp NUMERIC; v_rate NUMERIC;
+DECLARE it JSONB; v_amt NUMERIC; v_from TEXT; v_ppp_on BOOLEAN; v_cust TEXT; v_ppp NUMERIC; v_rate NUMERIC; v_mk NUMERIC;
 BEGIN
   v_cust := currency_for_country(p_customer_country);
+  -- Same markup the charge uses, so the displayed price equals what the customer actually pays.
+  v_mk := 1 + COALESCE((SELECT value::numeric FROM platform_settings WHERE key = 'immigroov_markup_pct'), 20) / 100.0;
   FOR it IN SELECT * FROM jsonb_array_elements(COALESCE(p_items, '[]'::jsonb)) LOOP
     v_amt := COALESCE((it->>'amount')::numeric, 0);
     v_from := COALESCE(it->>'from', 'USD');
@@ -2417,10 +2426,10 @@ BEGIN
     v_ppp := CASE WHEN v_ppp_on THEN get_ppp_factor(p_customer_country) ELSE 1 END;
     v_rate := get_fx_or_null(v_from, v_cust);
     IF v_rate IS NULL THEN
-      key := it->>'key'; you0 := ROUND(v_amt, 2); you := ROUND(v_amt * v_ppp, 2);
+      key := it->>'key'; you0 := ROUND(v_amt * v_mk, 2); you := ROUND(v_amt * v_ppp * v_mk, 2);
       customer_currency := UPPER(v_from); fx_ok := false;
     ELSE
-      key := it->>'key'; you0 := ROUND(v_amt * v_rate, 2); you := ROUND(v_amt * v_ppp * v_rate, 2);
+      key := it->>'key'; you0 := ROUND(v_amt * v_rate * v_mk, 2); you := ROUND(v_amt * v_ppp * v_rate * v_mk, 2);
       customer_currency := v_cust; fx_ok := true;
     END IF;
     RETURN NEXT;
