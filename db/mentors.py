@@ -644,15 +644,19 @@ def list_mentors_by_status(status: str, limit: int = 500) -> list[dict[str, Any]
     """Return mentor rows with the given status, enriched with profile email/full_name.
     Limit is generous so the admin always sees EVERY mentor of a status; with 66 migrated
     mentors + seeds the old cap of 100 was close, and it must never silently truncate."""
-    rows = (
-        _supabase.table("mentors")
-        .select("id, slug, display_name, headline, photo_url, timezone, status, submission_count, created_at, profile_id, pending_submitted_at")
-        .eq("status", status)
-        .order("created_at")
-        .limit(limit)
-        .execute()
-        .data or []
-    )
+    base = "id, slug, display_name, headline, photo_url, timezone, status, submission_count, created_at, profile_id, pending_submitted_at"
+
+    def fetch(cols: str):
+        return (
+            _supabase.table("mentors").select(cols)
+            .eq("status", status).order("created_at").limit(limit).execute().data or []
+        )
+
+    # commission_* may not be migrated yet; fall back so the admin list never breaks on a missing col.
+    try:
+        rows = fetch(base + ", commission_pct, commission_expires_at")
+    except Exception:
+        rows = fetch(base)
     profile_ids = [r["profile_id"] for r in rows if r.get("profile_id")]
     if profile_ids:
         profiles = (
@@ -912,6 +916,43 @@ def get_mentor_full_details(mentor_id: str) -> Optional[dict[str, Any]]:
     return mentor
 
 
+def get_global_commission_pct() -> float:
+    """The general commission % (immigroov_markup_pct) added to a mentor's rate to get the customer
+    price. A per-mentor override (mentors.commission_pct) wins over this at pricing time."""
+    try:
+        res = _supabase.table("platform_settings").select("value").eq("key", "immigroov_markup_pct").limit(1).execute()
+        return float(res.data[0]["value"]) if res.data else 10.0
+    except Exception:
+        return 10.0
+
+
+def set_mentor_initial_rate(mentor_id: str, hourly_rate: float, currency: str,
+                            currency_rates: list[dict], smart_pricing: bool) -> dict[str, Any]:
+    """First-login rate capture for a migrated mentor: write rate/currency/smart_pricing straight to
+    the live row (not staged), so they become priceable immediately."""
+    payload = {
+        "hourly_rate": hourly_rate,
+        "currency": currency,
+        "currency_rates": currency_rates,
+        "smart_pricing": smart_pricing,
+    }
+    res = _supabase.table("mentors").update(payload).eq("id", mentor_id).execute()
+    if not res.data:
+        raise ValueError("Mentor not found")
+    return res.data[0]
+
+
+def set_mentor_commission(mentor_id: str, commission_pct: Optional[float], expires_at: Optional[str]) -> dict[str, Any]:
+    """Set or clear a mentor's commission override. pct=None clears it (mentor falls back to the
+    global commission). expires_at is an ISO timestamp or None (never expires)."""
+    payload: dict[str, Any] = {"commission_pct": commission_pct}
+    payload["commission_expires_at"] = expires_at if commission_pct is not None else None
+    res = _supabase.table("mentors").update(payload).eq("id", mentor_id).execute()
+    if not res.data:
+        raise ValueError("Mentor not found")
+    return res.data[0]
+
+
 def get_admin_stats() -> dict[str, int]:
     """Platform-level counters for the admin overview.
     'active' = mentors a user/guest can actually see AND book (approved + is_active + at least one
@@ -935,11 +976,13 @@ def get_admin_stats() -> dict[str, int]:
             "inactive_mentor_count": max(approved - active_flag, 0),    # is_active = false (hidden by admin)
             "no_service_mentor_count": max(active_flag - bookable, 0),  # active toggle but nothing to book
             "total_bookings": bookings,
+            "global_commission_pct": get_global_commission_pct(),      # general % added to get customer price
         }
     except Exception:
         logger.exception("Failed to fetch admin stats")
         return {"pending_mentor_count": 0, "approved_mentor_count": 0, "active_mentor_count": 0,
-                "inactive_mentor_count": 0, "no_service_mentor_count": 0, "total_bookings": 0}
+                "inactive_mentor_count": 0, "no_service_mentor_count": 0, "total_bookings": 0,
+                "global_commission_pct": 10.0}
 
 
 # ── Admin: booking oversight + no-show ops ──────────────────────────────────

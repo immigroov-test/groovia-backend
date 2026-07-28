@@ -393,7 +393,7 @@ CREATE TABLE IF NOT EXISTS platform_settings (
 
 INSERT INTO platform_settings (key, value, description) VALUES
   ('immigroov_commission_pct', '15', 'Default Immigroov commission percentage'),
-  ('immigroov_markup_pct', '20', 'Global markup % ADDED on top of the mentor rate to get the customer price. The mentor rate is never shown to customers. Set by the developer in the DB; admin sees it read-only.'),
+  ('immigroov_markup_pct', '10', 'General commission %: added on top of the mentor rate to get the customer price. A per-mentor override (mentors.commission_pct, optional expiry) wins over this. The mentor rate is never shown to customers.'),
   ('default_currency', 'USD', 'Fallback currency for the platform')
 ON CONFLICT (key) DO NOTHING;
 
@@ -2204,6 +2204,23 @@ RETURNS NUMERIC LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS
 $$;
 GRANT EXECUTE ON FUNCTION ppp_relative(TEXT, TEXT) TO anon, authenticated;
 
+-- Per-mentor commission override: the % added to the mentor rate to get the customer price. When
+-- set and not expired it WINS over the global immigroov_markup_pct; NULL = use the global.
+ALTER TABLE mentors ADD COLUMN IF NOT EXISTS commission_pct        NUMERIC;
+ALTER TABLE mentors ADD COLUMN IF NOT EXISTS commission_expires_at TIMESTAMPTZ;
+
+CREATE OR REPLACE FUNCTION effective_markup_pct(p_mentor_id UUID)
+RETURNS NUMERIC LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT COALESCE(
+    (SELECT commission_pct FROM mentors
+       WHERE id = p_mentor_id AND commission_pct IS NOT NULL
+         AND (commission_expires_at IS NULL OR commission_expires_at > NOW())),
+    (SELECT value::numeric FROM platform_settings WHERE key = 'immigroov_markup_pct'),
+    10
+  );
+$$;
+GRANT EXECUTE ON FUNCTION effective_markup_pct(UUID) TO anon, authenticated;
+
 -- ── FX rate infrastructure (EUR-pivot model, Frankfurter/ECB) ────────────────
 -- One API call refreshes the whole table. get_fx() is the STRICT variant the
 -- booking engine uses: it RAISES FX_UNAVAILABLE rather than silently falling
@@ -2380,8 +2397,9 @@ BEGIN
   WHERE s.id = p_service_id AND s.is_active AND s.status = 'approved';
   IF v_set IS NULL THEN RAISE EXCEPTION 'Service not available' USING errcode = 'P0001'; END IF;
 
-  -- Global markup added on top of the mentor rate to get the customer price. Set by the developer.
-  v_markup   := COALESCE((SELECT value::numeric FROM platform_settings WHERE key = 'immigroov_markup_pct'), 20);
+  -- Commission added on top of the mentor rate to get the customer price: the per-mentor override
+  -- if set + not expired, else the global immigroov_markup_pct.
+  v_markup   := effective_markup_pct(v_mentor_id);
   v_cust_ccy := currency_for_country(p_customer_country);
 
   -- 1. Is there an explicit MENTOR rate for the customer's currency (primary, or a currency_prices row)?
@@ -2459,13 +2477,13 @@ LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
 DECLARE it JSONB; v_amt NUMERIC; v_from TEXT; v_ppp_on BOOLEAN; v_cust TEXT; v_ppp NUMERIC; v_rate NUMERIC; v_mk NUMERIC;
 BEGIN
   v_cust := currency_for_country(p_customer_country);
-  -- Same markup the charge uses, so the displayed price equals what the customer actually pays.
-  v_mk := 1 + COALESCE((SELECT value::numeric FROM platform_settings WHERE key = 'immigroov_markup_pct'), 20) / 100.0;
   FOR it IN SELECT * FROM jsonb_array_elements(COALESCE(p_items, '[]'::jsonb)) LOOP
     v_amt := COALESCE((it->>'amount')::numeric, 0);
     v_from := COALESCE(it->>'from', 'USD');
     v_ppp_on := COALESCE((it->>'is_ppp')::boolean, false);
     v_ppp := CASE WHEN v_ppp_on THEN ppp_relative(p_customer_country, it->>'mentor_country') ELSE 1 END;
+    -- Same commission the charge uses (per-mentor override or global), so display = what's charged.
+    v_mk  := 1 + effective_markup_pct(NULLIF(it->>'mentor_id','')::uuid) / 100.0;
     v_rate := get_fx_or_null(v_from, v_cust);
     IF v_rate IS NULL THEN
       key := it->>'key'; you0 := ROUND(v_amt * v_mk, 2); you := ROUND(v_amt * v_ppp * v_mk, 2);

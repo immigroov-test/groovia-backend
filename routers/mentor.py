@@ -86,6 +86,38 @@ def get_my_mentor(user: AuthUser = Depends(get_current_user)):
     return mentor
 
 
+class InitialRateBody(BaseModel):
+    hourly_rate: float
+    currency: str = "INR"
+    currency_rates: list[dict] = []      # additional-currency base rates [{currency, hourly_rate}]
+    smart_pricing: bool = False
+
+
+@router.post("/setup-rate")
+def setup_rate(body: InitialRateBody, user: AuthUser = Depends(get_current_user)):
+    """First-login rate capture for a migrated mentor who has no per-hour rate yet. Applies directly
+    to the live row (not staged for re-approval) so the mentor is immediately priceable. First-time
+    only: once a rate exists, edits go through the normal profile flow."""
+    mentor = db.get_mentor_by_profile_id(user.id)
+    if not mentor:
+        raise HTTPException(status_code=404, detail="No mentor profile for this account")
+    if mentor.get("hourly_rate"):
+        raise HTTPException(status_code=409, detail="A rate is already set for this mentor")
+    if body.hourly_rate is None or body.hourly_rate <= 0 or body.hourly_rate > 100000:
+        raise HTTPException(status_code=422, detail="Enter a valid hourly rate")
+    try:
+        validated_rates = pricing_input.validate_currency_rates(body.currency, body.currency_rates)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    return db.set_mentor_initial_rate(
+        mentor["id"],
+        hourly_rate=round(body.hourly_rate, 2),
+        currency=(body.currency or "INR").strip().upper(),
+        currency_rates=validated_rates,
+        smart_pricing=body.smart_pricing,
+    )
+
+
 # ── Initial signup ─────────────────────────────────────────────────────────────
 
 class WeeklySlot(BaseModel):

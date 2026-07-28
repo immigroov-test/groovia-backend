@@ -13,6 +13,11 @@ from core.auth import AuthUser, require_admin
 class RejectBody(BaseModel):
     reason: Optional[str] = None
 
+
+class CommissionBody(BaseModel):
+    commission_pct: Optional[float] = None   # None = clear the override (mentor uses the global %)
+    expires_at: Optional[str] = None          # ISO timestamp, or None for no expiry
+
 logger = logging.getLogger("immigroov.routers.admin")
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -176,6 +181,18 @@ def request_changes(mentor_id: str, background_tasks: BackgroundTasks, body: Rej
             },
         )
     return result
+
+
+@router.post("/mentors/{mentor_id}/commission")
+def set_commission(mentor_id: str, body: CommissionBody, user: AuthUser = Depends(require_admin)):
+    """Set or clear a mentor's commission override. It wins over the global commission until the
+    optional expiry. commission_pct=null clears the override (back to the global %)."""
+    if body.commission_pct is not None and not (0 <= body.commission_pct <= 100):
+        raise HTTPException(status_code=422, detail="Commission must be between 0 and 100")
+    try:
+        return db.set_mentor_commission(mentor_id, body.commission_pct, body.expires_at)
+    except ValueError:
+        raise HTTPException(status_code=404, detail="Mentor not found")
 
 
 @router.post("/mentors/{mentor_id}/suspend")
