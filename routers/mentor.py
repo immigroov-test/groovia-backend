@@ -205,6 +205,7 @@ class MentorSignupBody(BaseModel):
     years_lived_experience: Optional[int] = None
     years_professional_experience: Optional[int] = None
     professional_domains: list[str] = []
+    specializations: list[str] = []
     agreed_to_mentor_terms: bool = False
     hourly_rate: Optional[float] = None
     currency: str = "USD"
@@ -296,6 +297,7 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
         years_lived_experience=body.years_lived_experience,
         years_professional_experience=body.years_professional_experience,
         professional_domains=body.professional_domains,
+        specializations=body.specializations,
         hourly_rate=body.hourly_rate,
         currency=body.currency,
         currency_rates=validated_rates,
@@ -427,6 +429,7 @@ class ProfileUpdateBody(BaseModel):
     years_lived_experience: Optional[int] = None
     years_professional_experience: Optional[int] = None
     professional_domains: Optional[list[str]] = None
+    specializations: Optional[list[str]] = None
     hourly_rate: Optional[float] = None
     currency: Optional[str] = None
     currency_rates: Optional[list[dict]] = None
@@ -502,6 +505,8 @@ def update_profile(body: ProfileUpdateBody, user: AuthUser = Depends(get_current
         fields["years_professional_experience"] = body.years_professional_experience
     if body.professional_domains is not None:
         fields["professional_domains"] = body.professional_domains
+    if body.specializations is not None:
+        fields["specializations"] = body.specializations
     if body.hourly_rate is not None:
         fields["hourly_rate"] = body.hourly_rate
     if body.currency is not None:

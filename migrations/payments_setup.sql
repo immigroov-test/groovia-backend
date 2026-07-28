@@ -84,6 +84,7 @@ GRANT EXECUTE ON FUNCTION ppp_relative(TEXT, TEXT) TO anon, authenticated;
 -- set and not expired it WINS over the global immigroov_markup_pct; NULL = use the global.
 ALTER TABLE mentors ADD COLUMN IF NOT EXISTS commission_pct        NUMERIC;
 ALTER TABLE mentors ADD COLUMN IF NOT EXISTS commission_expires_at TIMESTAMPTZ;
+ALTER TABLE mentors ADD COLUMN IF NOT EXISTS specializations       TEXT[] DEFAULT '{}';
 
 CREATE OR REPLACE FUNCTION effective_markup_pct(p_mentor_id UUID)
 RETURNS NUMERIC LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$

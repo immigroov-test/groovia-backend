@@ -371,6 +371,7 @@ def create_mentor_signup(
     expertise_categories: list[str] | None = None,
     languages: list[str] | None = None,
     professional_domains: list[str] | None = None,
+    specializations: list[str] | None = None,
     years_lived_experience: Optional[int] = None,
     years_professional_experience: Optional[int] = None,
     bio: Optional[str] = None,
@@ -408,6 +409,7 @@ def create_mentor_signup(
         "expertise_categories": expertise_categories or [],
         "languages": languages or [],
         "professional_domains": professional_domains or [],
+        "specializations": specializations or [],
         "years_lived_experience": years_lived_experience,
         "years_professional_experience": years_professional_experience,
         "bio": bio,
@@ -467,7 +469,7 @@ _EDITABLE_PROFILE_FIELDS = {
     "display_name", "headline", "bio", "photo_url",
     "phone", "city", "country", "home_country_code", "social_links", "public_notes", "languages", "timezone",
     "expertise_country_codes", "expertise_categories", "years_lived_experience",
-    "years_professional_experience", "professional_domains",
+    "years_professional_experience", "professional_domains", "specializations",
     "hourly_rate", "currency", "currency_rates",
 }
 
