@@ -646,7 +646,7 @@ def list_mentors_by_status(status: str, limit: int = 500) -> list[dict[str, Any]
     """Return mentor rows with the given status, enriched with profile email/full_name.
     Limit is generous so the admin always sees EVERY mentor of a status; with 66 migrated
     mentors + seeds the old cap of 100 was close, and it must never silently truncate."""
-    base = "id, slug, display_name, headline, photo_url, timezone, status, submission_count, created_at, profile_id, pending_submitted_at"
+    base = "id, slug, display_name, headline, photo_url, timezone, status, is_active, submission_count, created_at, profile_id, pending_submitted_at"
 
     def fetch(cols: str):
         return (
@@ -673,6 +673,22 @@ def list_mentors_by_status(status: str, limit: int = 500) -> list[dict[str, Any]
             p = profile_map.get(row.get("profile_id") or "")
             row["email"] = p["email"] if p else None
             row["full_name"] = p["full_name"] if p else None
+
+    # bookable = has >=1 active (admin-approved) service, so the admin can split the list into
+    # Active (is_active + bookable) / Inactive (is_active false) / No services (active but nothing
+    # to book). One query for all mentors on the page.
+    ids = [r["id"] for r in rows]
+    bookable_ids: set[str] = set()
+    if ids:
+        try:
+            svcs = _supabase.table("services").select("mentor_id, is_active, status").in_("mentor_id", ids).execute().data or []
+            for s in svcs:
+                if s.get("is_active") and s.get("status") in (None, "approved"):
+                    bookable_ids.add(s["mentor_id"])
+        except Exception:
+            logger.warning("list_mentors_by_status: could not load service flags")
+    for row in rows:
+        row["bookable"] = row["id"] in bookable_ids
     return rows
 
 
