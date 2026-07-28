@@ -2031,17 +2031,17 @@ BEGIN
                          home_country_code, expertise_country_codes, expertise_categories, languages,
                          headline, bio, currency, smart_pricing, booking_url, timezone)
     VALUES ('yokesh-dhanabal', 'Yokesh Dhanabal', 'dhanabalyokesh99@gmail.com', 'seed-yokesh-dhanabal',
-            TRUE, 'approved', 'NL', 'IN', ARRAY['NL','IN']::CHAR(2)[], ARRAY['job_career'],
+            TRUE, 'approved', 'IN', 'IN', ARRAY['NL','IN']::CHAR(2)[], ARRAY['job_career'],
             ARRAY['en','ta'],
             'AI Engineer | Helping you land AI & software roles abroad',
             '<p>I am Yokesh, an AI/ML engineer. I help people break into AI, data and software roles abroad, from CV and portfolio to interviews and relocation.</p>',
-            'INR', TRUE, 'yokesh-dhanabal', 'Europe/Amsterdam')
+            'INR', TRUE, 'yokesh-dhanabal', 'Asia/Kolkata')
     RETURNING id INTO m_id;
   ELSE
     UPDATE mentors SET
       display_name = 'Yokesh Dhanabal', email = 'dhanabalyokesh99@gmail.com',
       legacy_id = 'seed-yokesh-dhanabal', profile_id = NULL, is_active = TRUE, status = 'approved',
-      country = 'NL', home_country_code = 'IN', expertise_country_codes = ARRAY['NL','IN']::CHAR(2)[],
+      country = 'IN', home_country_code = 'IN', expertise_country_codes = ARRAY['NL','IN']::CHAR(2)[],
       headline = 'AI Engineer | Helping you land AI & software roles abroad',
       currency = 'INR', smart_pricing = TRUE, expertise_categories = ARRAY['job_career']
     WHERE id = m_id;
@@ -2068,7 +2068,7 @@ BEGIN
   END IF;
   IF NOT EXISTS (SELECT 1 FROM weekly_availability WHERE mentor_id = m_id) THEN
     INSERT INTO weekly_availability (mentor_id, weekday, start_time, end_time, timezone, is_active)
-    SELECT m_id, d, TIME '10:00', TIME '17:00', 'Europe/Amsterdam', TRUE
+    SELECT m_id, d, TIME '10:00', TIME '17:00', 'Asia/Kolkata', TRUE
     FROM unnest(ARRAY['Monday','Wednesday','Friday','Saturday']) AS d;
   END IF;
 END $$;
@@ -2084,6 +2084,11 @@ DELETE FROM reschedule_offers WHERE booking_id IN (
 DELETE FROM bookings WHERE mentor_id IN (
   SELECT id FROM mentors WHERE legacy_id IS NULL AND profile_id IS NULL AND slug <> 'yokesh-dhanabal');
 DELETE FROM mentors WHERE legacy_id IS NULL AND profile_id IS NULL AND slug <> 'yokesh-dhanabal';
+
+-- Clear the random pravatar placeholder that the (now-disabled) seed backfill used to stamp onto
+-- every photo-less mentor - including migrated ones, since they match profile_id IS NULL. A NULL
+-- photo_url makes the UI fall back to the mentor's initials avatar (what the user actually wants).
+UPDATE mentors SET photo_url = NULL WHERE photo_url LIKE '%pravatar%';
 
 -- Migrated mentors carried PPP per service in the legacy data, but our charge (compute_booking_price)
 -- and the browse card both key off the mentor-level smart_pricing toggle, which defaults FALSE. Turn
@@ -2866,6 +2871,21 @@ RETURNS NUMERIC LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS
 $$;
 GRANT EXECUTE ON FUNCTION get_ppp_factor(TEXT) TO anon, authenticated;
 
+-- Relative PPP: the CUSTOMER's purchasing-power factor divided by the MENTOR's, so a mentor's local
+-- price is re-based to the customer's country - a NL customer viewing an India-priced mentor pays
+-- MORE (uplift), an India customer viewing a US mentor pays less. Raw factors drive the ratio; the
+-- result is floored at ppp_floor so the discount side never drops below that fraction of the FX
+-- price. Unknown/absent countries default to factor 1.0 (no adjustment).
+CREATE OR REPLACE FUNCTION ppp_relative(p_customer TEXT, p_mentor TEXT)
+RETURNS NUMERIC LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT GREATEST(
+    COALESCE((SELECT factor FROM ppp_factors WHERE country_code = UPPER(p_customer)), 1.0)
+    / COALESCE((SELECT factor FROM ppp_factors WHERE country_code = UPPER(p_mentor)), 1.0),
+    COALESCE((SELECT value::numeric FROM platform_settings WHERE key = 'ppp_floor'), 0.40)
+  );
+$$;
+GRANT EXECUTE ON FUNCTION ppp_relative(TEXT, TEXT) TO anon, authenticated;
+
 -- ── FX rate infrastructure (EUR-pivot model, Frankfurter/ECB) ────────────────
 -- One API call refreshes the whole table. get_fx() is the STRICT variant the
 -- booking engine uses: it RAISES FX_UNAVAILABLE rather than silently falling
@@ -2890,9 +2910,12 @@ CREATE TABLE IF NOT EXISTS fx_refresh_log (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- Testing uses a long FX max-age (30 days) so the seeded static FX never goes stale between setup
+-- runs (no FX dispatcher needed in test). Otherwise get_fx_or_null returns NULL after 24h and every
+-- price falls back to the mentor's own currency (the "still showing INR" bug). Production keeps ~24h.
 INSERT INTO platform_settings (key, value, description) VALUES
-  ('fx_max_age_minutes', '1440', 'Max age (minutes) of an FX rate before bookings fail with FX_UNAVAILABLE (default 24h)')
-ON CONFLICT (key) DO NOTHING;
+  ('fx_max_age_minutes', '43200', 'Testing: 30 days so seeded FX never goes stale (no dispatcher). Prod: ~24h.')
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, description = EXCLUDED.description;
 
 -- Bootstrap FX so a fresh DB can localize prices immediately (else convert_prices has no rate and
 -- every price falls back to the mentor's own currency, e.g. an INR mentor shows INR to an EU visitor).
@@ -3031,15 +3054,16 @@ DECLARE
   v_ppp_version     CONSTANT INT := 1;
   v_provider        CONSTANT TEXT := 'frankfurter';
   v_mentor_id UUID; v_set NUMERIC; v_set_offer NUMERIC; v_ment_ccy TEXT; v_is_ppp BOOLEAN;
-  v_prices JSONB; v_markup NUMERIC;
+  v_prices JSONB; v_markup NUMERIC; v_mentor_country TEXT;
   v_cust_ccy TEXT; v_ppp NUMERIC := 1; v_source TEXT; v_explicit NUMERIC; v_base NUMERIC; v_mentor_amt NUMERIC;
   v_fx_mc NUMERIC; v_fx_c_inr NUMERIC; v_fx_m_inr NUMERIC;
   v_gross NUMERIC; v_fee NUMERIC; v_net_cust NUMERIC; v_net_mentor NUMERIC;
 BEGIN
   SELECT s.mentor_id, s.set_price, s.set_offer_price, COALESCE(s.set_currency, 'USD'), s.is_ppp,
-         COALESCE(s.currency_prices, '[]'::jsonb)
-    INTO v_mentor_id, v_set, v_set_offer, v_ment_ccy, v_is_ppp, v_prices
-  FROM services s WHERE s.id = p_service_id AND s.is_active AND s.status = 'approved';
+         COALESCE(s.currency_prices, '[]'::jsonb), m.country
+    INTO v_mentor_id, v_set, v_set_offer, v_ment_ccy, v_is_ppp, v_prices, v_mentor_country
+  FROM services s JOIN mentors m ON m.id = s.mentor_id
+  WHERE s.id = p_service_id AND s.is_active AND s.status = 'approved';
   IF v_set IS NULL THEN RAISE EXCEPTION 'Service not available' USING errcode = 'P0001'; END IF;
 
   -- Global markup added on top of the mentor rate to get the customer price. Set by the developer.
@@ -3069,7 +3093,7 @@ BEGIN
   ELSE
     -- Fallback: localise the primary rate to the customer currency (+ PPP).
     v_source     := 'converted';
-    v_ppp        := CASE WHEN v_is_ppp THEN get_ppp_factor(p_customer_country) ELSE 1 END;
+    v_ppp        := CASE WHEN v_is_ppp THEN ppp_relative(p_customer_country, v_mentor_country) ELSE 1 END;
     v_fx_mc      := get_fx(v_ment_ccy, v_cust_ccy);   -- hard-fails FX_UNAVAILABLE (the charge needs it)
     v_base       := COALESCE(v_set_offer, v_set);
     v_mentor_amt := ROUND(v_base * v_ppp * v_fx_mc, 2);
@@ -3127,7 +3151,7 @@ BEGIN
     v_amt := COALESCE((it->>'amount')::numeric, 0);
     v_from := COALESCE(it->>'from', 'USD');
     v_ppp_on := COALESCE((it->>'is_ppp')::boolean, false);
-    v_ppp := CASE WHEN v_ppp_on THEN get_ppp_factor(p_customer_country) ELSE 1 END;
+    v_ppp := CASE WHEN v_ppp_on THEN ppp_relative(p_customer_country, it->>'mentor_country') ELSE 1 END;
     v_rate := get_fx_or_null(v_from, v_cust);
     IF v_rate IS NULL THEN
       key := it->>'key'; you0 := ROUND(v_amt * v_mk, 2); you := ROUND(v_amt * v_ppp * v_mk, 2);

@@ -107,6 +107,16 @@ def list_active_mentors(
         r["min_price"] = float(cheapest["set_price"])
         r["price_currency"] = cheapest.get("set_currency") or r.get("currency") or "USD"
         out.append(r)
+
+    # Browse ordering (standard marketplace): mentors who are actually bookable RIGHT NOW (have
+    # weekly availability set) come first, then by rating, then by review count. A mentor with a
+    # service but no availability can't be booked, so they sink to the bottom instead of the top.
+    try:
+        avail = _supabase.table("weekly_availability").select("mentor_id").eq("is_active", True).execute().data or []
+        avail_ids = {a["mentor_id"] for a in avail}
+    except Exception:
+        avail_ids = set()
+    out.sort(key=lambda r: (r["id"] in avail_ids, float(r.get("avg_rating") or 0), int(r.get("review_count") or 0)), reverse=True)
     return out[:limit]
 
 
@@ -912,21 +922,24 @@ def get_admin_stats() -> dict[str, int]:
     try:
         pending = _supabase.table("mentors").select("id", count="exact").eq("status", "pending_review").execute().count or 0
         approved = _supabase.table("mentors").select("id", count="exact").eq("status", "approved").execute().count or 0
+        active_flag = _supabase.table("mentors").select("id", count="exact").eq("status", "approved").eq("is_active", True).execute().count or 0
         bookings = _supabase.table("bookings").select("id", count="exact").execute().count or 0
-        # Reuse the exact browse filter so the number matches what users see. Small roster, so
-        # fetching all and counting is fine (revisit with a SQL count if it ever grows huge).
-        active = len(list_active_mentors(limit=1000))
+        # Reuse the exact browse filter so 'active' matches what users see. Small roster, so fetching
+        # all and counting is fine (revisit with a SQL count if it ever grows huge). Inactive and
+        # no-service are kept as SEPARATE buckets so the admin can tell them apart.
+        bookable = len(list_active_mentors(limit=1000))
         return {
             "pending_mentor_count": pending,
-            "approved_mentor_count": approved,                 # all approved (= admin Mentors-tab size)
-            "active_mentor_count": active,                     # what users/guests actually see
-            "hidden_mentor_count": max(approved - active, 0),  # inactive or no bookable service
+            "approved_mentor_count": approved,                          # all approved (= Mentors-tab size)
+            "active_mentor_count": bookable,                            # approved + active + a bookable service
+            "inactive_mentor_count": max(approved - active_flag, 0),    # is_active = false (hidden by admin)
+            "no_service_mentor_count": max(active_flag - bookable, 0),  # active toggle but nothing to book
             "total_bookings": bookings,
         }
     except Exception:
         logger.exception("Failed to fetch admin stats")
-        return {"pending_mentor_count": 0, "approved_mentor_count": 0,
-                "active_mentor_count": 0, "hidden_mentor_count": 0, "total_bookings": 0}
+        return {"pending_mentor_count": 0, "approved_mentor_count": 0, "active_mentor_count": 0,
+                "inactive_mentor_count": 0, "no_service_mentor_count": 0, "total_bookings": 0}
 
 
 # ── Admin: booking oversight + no-show ops ──────────────────────────────────

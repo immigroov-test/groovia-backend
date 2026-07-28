@@ -337,6 +337,10 @@ def load_one(sb, rec: dict) -> None:
         new_url = copy_photo(sb, m["legacy_id"], rec["photo_url"])
         if new_url:
             sb.table("mentors").update({"photo_url": new_url}).eq("id", mid).execute()
+    else:
+        # No source photo: clear any stale placeholder (e.g. a pravatar left by an old seed run) so
+        # the UI shows the initials avatar instead of a random face.
+        sb.table("mentors").update({"photo_url": None}).eq("id", mid).execute()
 
     sb.rpc("avail_set_rules", {"p_mentor_id": mid, "p_days_ahead": days_ahead,
                                "p_min_notice_hours": min_notice, "p_cancel_hours": cancel}).execute()

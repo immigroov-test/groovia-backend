@@ -94,6 +94,7 @@ class ConvertItem(BaseModel):
     amount: float
     from_: str = Field("USD", alias="from")  # "from" is a Python keyword
     is_ppp: bool = False
+    mentor_country: Optional[str] = None     # for relative PPP (customer factor / mentor factor)
 
     model_config = {"populate_by_name": True}
 
@@ -119,7 +120,7 @@ def convert_prices(body: ConvertPricesBody, request: Request):
     # CHARGED price always agree (no showing an India price then charging US, or v.v.).
     country = resolve_pricing_country(request, body.country)
     items = [
-        {"key": i.key, "amount": i.amount, "from": i.from_, "is_ppp": i.is_ppp}
+        {"key": i.key, "amount": i.amount, "from": i.from_, "is_ppp": i.is_ppp, "mentor_country": i.mentor_country}
         for i in body.items
     ]
     try:
