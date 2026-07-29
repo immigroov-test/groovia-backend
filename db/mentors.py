@@ -974,6 +974,8 @@ def get_mentor_full_details(mentor_id: str) -> Optional[dict[str, Any]]:
         mentor.setdefault("services", [])
         mentor.setdefault("availability_rules", {})
         mentor.setdefault("date_overrides", [])
+    # Imported session history (read-only track record), so the admin sees it on the same detail card.
+    mentor["legacy_sessions"] = list_legacy_sessions(mentor_id)
     return mentor
 
 
@@ -1030,20 +1032,25 @@ def get_admin_stats() -> dict[str, int]:
         # all and counting is fine (revisit with a SQL count if it ever grows huge). Inactive and
         # no-service are kept as SEPARATE buckets so the admin can tell them apart.
         bookable = len(list_active_mentors(limit=1000))
+        # Services an approved mentor added after going live, awaiting review (the "mentor added a
+        # session type" event needs an admin surface). Reuses the exact review-queue query.
+        from . import direct_booking as _booking
+        pending_services = len(_booking.list_pending_services())
         return {
             "pending_mentor_count": pending,
             "approved_mentor_count": approved,                          # all approved (= Mentors-tab size)
             "active_mentor_count": bookable,                            # approved + active + a bookable service
             "inactive_mentor_count": max(approved - active_flag, 0),    # is_active = false (hidden by admin)
             "no_service_mentor_count": max(active_flag - bookable, 0),  # active toggle but nothing to book
+            "pending_service_count": pending_services,                  # services from live mentors awaiting review
             "total_bookings": bookings,
             "global_commission_pct": get_global_commission_pct(),      # general % added to get customer price
         }
     except Exception:
         logger.exception("Failed to fetch admin stats")
         return {"pending_mentor_count": 0, "approved_mentor_count": 0, "active_mentor_count": 0,
-                "inactive_mentor_count": 0, "no_service_mentor_count": 0, "total_bookings": 0,
-                "global_commission_pct": 10.0}
+                "inactive_mentor_count": 0, "no_service_mentor_count": 0, "pending_service_count": 0,
+                "total_bookings": 0, "global_commission_pct": 10.0}
 
 
 # ── Admin: booking oversight + no-show ops ──────────────────────────────────

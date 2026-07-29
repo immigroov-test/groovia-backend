@@ -30,7 +30,7 @@ def _base_body(**overrides):
     fields = dict(
         display_name="Test Mentor", agreed_to_mentor_terms=True,
         expertise_country_codes=["NL"], languages=["en"],
-        home_country_code="IN", years_lived_experience=3, years_professional_experience=5,
+        country="NL", home_country_code="IN", years_lived_experience=3, years_professional_experience=5,
         weekly_availability=[WeeklySlot(weekday="Monday", start_time="09:00", end_time="17:00")],
         services=[ServiceDraft(title="Career Chat", duration=30, set_price=50)],
         bank=_bank(),
