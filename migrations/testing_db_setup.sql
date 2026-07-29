@@ -2936,6 +2936,9 @@ CREATE TABLE IF NOT EXISTS legacy_sessions (
   amount_currency   TEXT,
   created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- RLS on, consistent with every other table: no direct table access. Reads flow through the
+-- SECURITY DEFINER mentor_legacy_sessions() RPC; writes through the service-role migration loader.
+ALTER TABLE legacy_sessions ENABLE ROW LEVEL SECURITY;
 CREATE INDEX IF NOT EXISTS idx_legacy_sessions_mentor ON legacy_sessions(mentor_id, slot_start DESC);
 
 CREATE OR REPLACE FUNCTION mentor_legacy_sessions(p_mentor_id UUID)
