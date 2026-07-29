@@ -394,6 +394,26 @@ def load_one(sb, rec: dict) -> None:
         sb.table("legacy_sessions").insert({**s, "mentor_id": mid}).execute()
 
 
+def load_sessions_only(sb) -> None:
+    """Refresh ONLY the imported session history, touching nothing else (not the mentor row, not
+    services, not availability). Reads each already-migrated mentor (by legacy_id), pulls their old
+    /bookings from the legacy API, and replaces just their legacy_sessions. Safe to run anytime."""
+    rows = sb.table("mentors").select("id, legacy_id, display_name").execute().data or []
+    rows = [r for r in rows if r.get("legacy_id")]
+    log.info("sessions-only: %s migrated mentors", len(rows))
+    total = 0
+    for r in rows:
+        mid, lid = r["id"], r["legacy_id"]
+        sessions = transform_bookings(fetch_bookings(lid))
+        sb.table("legacy_sessions").delete().eq("mentor_id", mid).execute()
+        for s in sessions:
+            sb.table("legacy_sessions").insert({**s, "mentor_id": mid}).execute()
+        total += len(sessions)
+        if sessions:
+            log.info("  %s: %s sessions", r.get("display_name"), len(sessions))
+    log.info("sessions-only: loaded %s session rows across %s mentors", total, len(rows))
+
+
 # ── main ─────────────────────────────────────────────────────────────────────────
 
 def dedupe_by_email(records: list[dict]) -> list[dict]:
@@ -424,7 +444,16 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--commit", action="store_true", help="actually load into Supabase (else dry-run)")
     ap.add_argument("--limit", type=int, default=0, help="only process the first N mentors (testing)")
+    ap.add_argument("--sessions-only", action="store_true",
+                    help="only (re)load legacy_sessions from the old /bookings; touch nothing else")
     args = ap.parse_args()
+
+    if args.sessions_only:
+        if not args.commit:
+            log.info("--sessions-only is a write operation: re-run with --commit + Supabase creds")
+            return
+        load_sessions_only(_supabase())
+        return
 
     raw_mentors = fetch_all_mentors()
     if args.limit:
