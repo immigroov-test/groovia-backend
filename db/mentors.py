@@ -974,8 +974,6 @@ def get_mentor_full_details(mentor_id: str) -> Optional[dict[str, Any]]:
         mentor.setdefault("services", [])
         mentor.setdefault("availability_rules", {})
         mentor.setdefault("date_overrides", [])
-    # Imported session history (read-only track record), so the admin sees it on the same detail card.
-    mentor["legacy_sessions"] = list_legacy_sessions(mentor_id)
     return mentor
 
 
@@ -1078,7 +1076,16 @@ def list_all_bookings(
         if q:
             safe = re.sub(r"[(),%*]", "", q).strip()
             if safe:
-                query = query.or_(f"candidate_email.ilike.*{safe}*,candidate_name.ilike.*{safe}*")
+                ors = [f"candidate_email.ilike.*{safe}*", f"candidate_name.ilike.*{safe}*"]
+                # Also match by mentor name: resolve matching mentor ids, then OR them into the filter.
+                try:
+                    mm = _supabase.table("mentors").select("id").ilike("display_name", f"*{safe}*").execute().data or []
+                    mids = [m["id"] for m in mm]
+                    if mids:
+                        ors.append(f"mentor_id.in.({','.join(mids)})")
+                except Exception:
+                    pass
+                query = query.or_(",".join(ors))
         rows = query.execute().data or []
         ids = list({r["mentor_id"] for r in rows if r.get("mentor_id")})
         names: dict[str, Any] = {}
@@ -1090,6 +1097,43 @@ def list_all_bookings(
         return rows
     except Exception:
         logger.exception("list_all_bookings failed")
+        return []
+
+
+def list_all_legacy_sessions(q: Optional[str] = None, status: Optional[str] = None,
+                             limit: int = 1000) -> list[dict[str, Any]]:
+    """All imported legacy sessions for the admin Bookings view, with the mentor name attached.
+    Filters: status (exact) and a search over mentor OR customer name (q)."""
+    try:
+        query = (
+            _supabase.table("legacy_sessions")
+            .select("id, mentor_id, status, service_title, service_type, customer_name, "
+                    "slot_start, duration_min, amount_total, amount_currency")
+            .order("slot_start", desc=True)
+            .limit(limit)
+        )
+        if status:
+            query = query.eq("status", status)
+        rows = query.execute().data or []
+        ids = list({r["mentor_id"] for r in rows if r.get("mentor_id")})
+        names: dict[str, Any] = {}
+        if ids:
+            mres = _supabase.table("mentors").select("id, display_name, slug").in_("id", ids).execute()
+            names = {m["id"]: m for m in (mres.data or [])}
+        for r in rows:
+            info = names.get(r.get("mentor_id")) or {}
+            r["mentor_name"] = info.get("display_name")
+            r["mentor_slug"] = info.get("slug")
+        # Name search runs in Python (small dataset): the searchable name lives on the joined
+        # mentors row + the denormalized customer_name, not on legacy_sessions itself.
+        if q:
+            ql = q.strip().lower()
+            rows = [r for r in rows
+                    if ql in (r.get("mentor_name") or "").lower()
+                    or ql in (r.get("customer_name") or "").lower()]
+        return rows
+    except Exception:
+        logger.warning("list_all_legacy_sessions failed")
         return []
 
 

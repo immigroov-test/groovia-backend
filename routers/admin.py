@@ -255,6 +255,14 @@ def list_bookings(
     return db.list_all_bookings(status=status, mentor_id=mentor_id, q=q)
 
 
+@router.get("/legacy-sessions")
+def list_legacy_sessions(status: Optional[str] = None, q: Optional[str] = None,
+                         user: AuthUser = Depends(require_admin)):
+    """Imported past sessions from the old portal, for the admin Bookings view.
+    Filter by status and a search over mentor / customer name. Declared before /bookings/{id}."""
+    return db.list_all_legacy_sessions(q=q, status=status)
+
+
 @router.get("/bookings/{booking_id}")
 def booking_detail(booking_id: str, user: AuthUser = Depends(require_admin)):
     detail = db.get_booking_admin_detail(booking_id)
