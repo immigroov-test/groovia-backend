@@ -261,6 +261,9 @@ def transform_mentor(raw: dict, services: list[dict], weekly: list[dict]) -> dic
         "review_count": int(raw.get("review_count") or 0),
         "status": "approved",
         "is_active": is_active,
+        # Imported mentors never gave us a per-hour rate, so gate them behind the first-login flow
+        # (welcome popup -> review profile -> set rate + confirm sessions) until they complete it.
+        "needs_onboarding": True,
         "legacy_data": {
             "total_sessions": raw.get("total_sessions"),
             "response_time": raw.get("response_time"),

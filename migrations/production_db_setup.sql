@@ -1957,6 +1957,7 @@ RETURNS TABLE (
   other_name       TEXT,          -- the mentor
   mentor_slug      TEXT,
   mentor_tz        TEXT,
+  mentor_country   TEXT,           -- lets the UI fall back to the mentor's city when app_timezone is a bare UTC
   attendee_tz      TEXT,
   reschedule_count INTEGER,
   no_show_by       TEXT,
@@ -1983,6 +1984,7 @@ RETURNS TABLE (
     s.title, s.duration,
     m.display_name, m.slug,
     COALESCE(m.app_timezone, 'UTC'),
+    m.country,
     COALESCE(b.attendee_timezone, p.timezone, 'UTC'),
     b.reschedule_count, b.no_show_by, booking_deadline_state(b.slot_time, COALESCE(m.cancel_notice_hours, 24)),
     ro.id, ro.proposed_by, ro.status, ro.offer_date, ro.range_start, ro.range_end,
@@ -2209,6 +2211,17 @@ GRANT EXECUTE ON FUNCTION ppp_relative(TEXT, TEXT) TO anon, authenticated;
 ALTER TABLE mentors ADD COLUMN IF NOT EXISTS commission_pct        NUMERIC;
 ALTER TABLE mentors ADD COLUMN IF NOT EXISTS commission_expires_at TIMESTAMPTZ;
 ALTER TABLE mentors ADD COLUMN IF NOT EXISTS specializations       TEXT[] DEFAULT '{}';
+
+-- First-login onboarding gate for migrated mentors. New self-service signups set their rate during
+-- registration (FALSE). Imported mentors have no rate yet, so they're flagged TRUE and the hub blocks
+-- them behind a welcome popup -> review profile -> set rate + confirm sessions, before it unlocks.
+-- Cleared by /mentor/complete-onboarding. Server-derived, so the gate survives refresh/new device.
+ALTER TABLE mentors ADD COLUMN IF NOT EXISTS needs_onboarding      BOOLEAN NOT NULL DEFAULT FALSE;
+
+-- Flag every imported mentor that still has no per-hour rate so the first-login flow fires for them.
+-- hourly_rate IS NULL guards it: a mentor who already set a rate (mid-onboarding or finished) is never
+-- re-flagged, so re-running this setup is safe/idempotent.
+UPDATE mentors SET needs_onboarding = TRUE WHERE legacy_id IS NOT NULL AND hourly_rate IS NULL;
 
 CREATE OR REPLACE FUNCTION effective_markup_pct(p_mentor_id UUID)
 RETURNS NUMERIC LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$

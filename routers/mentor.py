@@ -101,7 +101,9 @@ def setup_rate(body: InitialRateBody, user: AuthUser = Depends(get_current_user)
     mentor = db.get_mentor_by_profile_id(user.id)
     if not mentor:
         raise HTTPException(status_code=404, detail="No mentor profile for this account")
-    if mentor.get("hourly_rate"):
+    # A migrated mentor can (re)set their rate freely while still in first-login onboarding; once
+    # they've finished (needs_onboarding cleared), a set rate is locked and edits go via /profile.
+    if mentor.get("hourly_rate") and not mentor.get("needs_onboarding"):
         raise HTTPException(status_code=409, detail="A rate is already set for this mentor")
     if body.hourly_rate is None or body.hourly_rate <= 0 or body.hourly_rate > 100000:
         raise HTTPException(status_code=422, detail="Enter a valid hourly rate")
@@ -116,6 +118,21 @@ def setup_rate(body: InitialRateBody, user: AuthUser = Depends(get_current_user)
         currency_rates=validated_rates,
         smart_pricing=body.smart_pricing,
     )
+
+
+@router.post("/complete-onboarding")
+def complete_onboarding(user: AuthUser = Depends(get_current_user)):
+    """Clear the first-login onboarding gate for a migrated mentor once they've set their rate and
+    confirmed their sessions on the availability page. Idempotent. Requires a rate so they're
+    priceable before the hub unlocks. They stay approved/live throughout (no admin re-review)."""
+    mentor = db.get_mentor_by_profile_id(user.id)
+    if not mentor:
+        raise HTTPException(status_code=404, detail="No mentor profile for this account")
+    if not mentor.get("needs_onboarding"):
+        return {"completed": True}
+    if not mentor.get("hourly_rate"):
+        raise HTTPException(status_code=422, detail="Set your hourly rate before finishing setup.")
+    return db.complete_mentor_onboarding(mentor["id"])
 
 
 # ── Initial signup ─────────────────────────────────────────────────────────────
@@ -518,6 +535,11 @@ def update_profile(body: ProfileUpdateBody, user: AuthUser = Depends(get_current
         except ValueError as e:
             raise HTTPException(status_code=422, detail=str(e))
     try:
+        # A migrated mentor reviewing their imported profile during first-login onboarding stays
+        # approved and live, so their edits apply straight to the live row (no re-review). Everyone
+        # else follows the status-aware staging path.
+        if mentor.get("needs_onboarding"):
+            return db.save_mentor_profile_live(mentor["id"], fields)
         return db.save_mentor_profile_edit(mentor["id"], fields)
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))

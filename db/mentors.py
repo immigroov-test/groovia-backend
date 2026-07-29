@@ -50,7 +50,7 @@ def list_active_mentors(
     """Public mentor browse query. Also backs the agent's mentor lookup.
     All filters are AND-ed. country_code is an ISO 3166-1 alpha-2 code (e.g. 'NL')."""
     base_cols = ("id, slug, display_name, headline, bio, photo_url, "
-                 "expertise_country_codes, expertise_categories, languages, "
+                 "expertise_country_codes, expertise_categories, specializations, languages, "
                  "professional_domains, booking_url, years_lived_experience, "
                  "years_professional_experience, home_country_code, "
                  "avg_rating, review_count, currency, city, country, smart_pricing, ")
@@ -83,11 +83,11 @@ def list_active_mentors(
     # services.status isn't present in every environment; fall back without it so the
     # query (and the agent's mentor lookup) never crashes on a missing column.
     try:
-        rows = build("set_price, set_currency, is_active, status")
+        rows = build("set_price, set_currency, is_active, status, category")
         has_status = True
     except Exception:
         logger.warning("list_active_mentors: services.status missing; retrying without it")
-        rows = build("set_price, set_currency, is_active")
+        rows = build("set_price, set_currency, is_active, category")
         has_status = False
 
     # Collapse the mentor's bookable services into a single "starting from" price for the
@@ -106,6 +106,15 @@ def list_active_mentors(
         cheapest = min(svcs, key=lambda s: float(s["set_price"]))
         r["min_price"] = float(cheapest["set_price"])
         r["price_currency"] = cheapest.get("set_currency") or r.get("currency") or "USD"
+        # What the mentor actually helps with = the categories of the sessions they configured. This
+        # is the user-facing filter facet (not the self-declared expertise_categories), so browse
+        # filters/tags reflect what's really bookable.
+        svc_cats: list[str] = []
+        for s in svcs:
+            c = (s.get("category") or "").strip()
+            if c and c not in svc_cats:
+                svc_cats.append(c)
+        r["service_categories"] = svc_cats
         out.append(r)
 
     # Browse ordering (standard marketplace): mentors who are actually bookable RIGHT NOW (have
@@ -238,7 +247,7 @@ def get_mentor_by_profile_id(profile_id: str) -> Optional[dict[str, Any]]:
                 "headline, bio, photo_url, phone, country, home_country_code, city, timezone, languages, social_links, "
                 "expertise_country_codes, expertise_categories, professional_domains, "
                 "years_lived_experience, years_professional_experience, public_notes, submission_count, "
-                "hourly_rate, currency, smart_pricing, "
+                "hourly_rate, currency, currency_rates, smart_pricing, needs_onboarding, "
                 "pending_changes, pending_submitted_at")
         .eq("profile_id", profile_id)
         .limit(1)
@@ -524,6 +533,29 @@ def save_mentor_profile_edit(mentor_id: str, fields: dict[str, Any]) -> dict[str
     res = _supabase.table("mentors").update(payload).eq("id", mentor_id).execute()
     if not res.data:
         raise ValueError(f"Mentor {mentor_id!r} not found")
+    return res.data[0]
+
+
+def save_mentor_profile_live(mentor_id: str, fields: dict[str, Any]) -> dict[str, Any]:
+    """Apply profile edits straight to the live row, with no staging for re-approval. Used only
+    while a migrated mentor is completing first-login onboarding: they are already approved and
+    stay live, so their reviewed/completed details take effect immediately (no admin re-review)."""
+    safe = {k: v for k, v in fields.items() if k in _EDITABLE_PROFILE_FIELDS}
+    if not safe:
+        raise ValueError("No valid profile fields to update")
+    safe["updated_at"] = datetime.now(timezone.utc).isoformat()
+    res = _supabase.table("mentors").update(safe).eq("id", mentor_id).execute()
+    if not res.data:
+        raise ValueError(f"Mentor {mentor_id!r} not found")
+    return res.data[0]
+
+
+def complete_mentor_onboarding(mentor_id: str) -> dict[str, Any]:
+    """Clear the migrated-mentor onboarding gate once they've set a rate and confirmed their
+    sessions. After this the hub unlocks and the first-login flow no longer fires."""
+    res = _supabase.table("mentors").update({"needs_onboarding": False}).eq("id", mentor_id).execute()
+    if not res.data:
+        raise ValueError("Mentor not found")
     return res.data[0]
 
 
