@@ -25,3 +25,19 @@ DELETE FROM reschedule_offers WHERE booking_id IN (
 
 DELETE FROM bookings WHERE mentor_id IN (
   SELECT id FROM mentors WHERE slug = 'yokesh-dhanabal');
+
+-- Reset the test mentor's FIRST-LOGIN onboarding so the welcome popup + rate/sessions step can be
+-- re-tested from scratch. profile_id is left untouched, so he stays linked to the test account and a
+-- simple page refresh brings the popup back (no re-login needed). Clearing the rate + extra
+-- currencies undoes what the popup captured last time.
+UPDATE mentors
+   SET needs_onboarding = TRUE,
+       hourly_rate      = NULL,
+       currency_rates   = NULL
+ WHERE slug = 'yokesh-dhanabal';
+
+-- Drop any template session types he added during onboarding (status 'pending'), so the sessions
+-- step starts from just the seeded ones again. The seeded services (approved) are kept.
+DELETE FROM services
+ WHERE status = 'pending'
+   AND mentor_id IN (SELECT id FROM mentors WHERE slug = 'yokesh-dhanabal');
