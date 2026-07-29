@@ -2908,6 +2908,11 @@ ALTER TABLE mentors ADD COLUMN IF NOT EXISTS needs_onboarding      BOOLEAN NOT N
 -- (mid-onboarding or finished) is never re-flagged, so re-running this setup is safe/idempotent.
 UPDATE mentors SET needs_onboarding = TRUE WHERE legacy_id IS NOT NULL AND hourly_rate IS NULL;
 
+-- Yokesh is our end-to-end test mentor. Force him back into the first-login flow on every setup run,
+-- clearing any rate a previous test set, so the onboarding popup is always reproducible for him
+-- (the general backfill above skips a mentor who already has a rate).
+UPDATE mentors SET needs_onboarding = TRUE, hourly_rate = NULL WHERE slug = 'yokesh-dhanabal';
+
 CREATE OR REPLACE FUNCTION effective_markup_pct(p_mentor_id UUID)
 RETURNS NUMERIC LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
   SELECT COALESCE(
