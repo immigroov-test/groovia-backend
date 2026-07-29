@@ -2223,6 +2223,41 @@ ALTER TABLE mentors ADD COLUMN IF NOT EXISTS needs_onboarding      BOOLEAN NOT N
 -- re-flagged, so re-running this setup is safe/idempotent.
 UPDATE mentors SET needs_onboarding = TRUE WHERE legacy_id IS NOT NULL AND hourly_rate IS NULL;
 
+-- ============================================================================
+-- Legacy session history (imported read-only from the old portal's /bookings)
+-- ============================================================================
+-- Old sessions carry only a customer NAME (no email) and a service TITLE (no id), so they can't be
+-- real bookings (no account to link to, no live lifecycle). We keep them denormalized here as a
+-- read-only track record, shown on the mentor's dashboard + public profile. Loaded by
+-- scripts/migrate_mentors.py, idempotent on legacy_booking_id.
+CREATE TABLE IF NOT EXISTS legacy_sessions (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  mentor_id         UUID NOT NULL REFERENCES mentors(id) ON DELETE CASCADE,
+  legacy_booking_id TEXT UNIQUE,
+  status            TEXT,
+  service_title     TEXT,
+  service_type      TEXT,
+  customer_name     TEXT,
+  slot_start        TIMESTAMPTZ,
+  slot_end          TIMESTAMPTZ,
+  duration_min      INTEGER,
+  mentor_timezone   TEXT,
+  amount_total      NUMERIC,
+  amount_currency   TEXT,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_legacy_sessions_mentor ON legacy_sessions(mentor_id, slot_start DESC);
+
+CREATE OR REPLACE FUNCTION mentor_legacy_sessions(p_mentor_id UUID)
+RETURNS TABLE (
+  status TEXT, service_title TEXT, service_type TEXT, customer_name TEXT,
+  slot_start TIMESTAMPTZ, duration_min INTEGER, amount_total NUMERIC, amount_currency TEXT
+) LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT status, service_title, service_type, customer_name, slot_start, duration_min, amount_total, amount_currency
+  FROM legacy_sessions WHERE mentor_id = p_mentor_id ORDER BY slot_start DESC NULLS LAST;
+$$;
+GRANT EXECUTE ON FUNCTION mentor_legacy_sessions(UUID) TO anon, authenticated;
+
 CREATE OR REPLACE FUNCTION effective_markup_pct(p_mentor_id UUID)
 RETURNS NUMERIC LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
   SELECT COALESCE(

@@ -207,6 +207,17 @@ def list_mentor_facets() -> dict[str, Any]:
     }
 
 
+def list_legacy_sessions(mentor_id: str) -> list[dict[str, Any]]:
+    """Read-only session history imported from the old portal (customer name only, no email)."""
+    if not mentor_id:
+        return []
+    try:
+        return _supabase.rpc("mentor_legacy_sessions", {"p_mentor_id": mentor_id}).execute().data or []
+    except Exception:
+        logger.warning("list_legacy_sessions failed for %s", mentor_id)
+        return []
+
+
 def mentors_available_for_country(country_code: str) -> bool:
     """Cheap existence check - does the mentors table have any approved+active mentor
     whose expertise covers this ISO-2 country code?"""

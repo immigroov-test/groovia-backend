@@ -153,6 +153,14 @@ def fetch_weekly(mid: str) -> list[dict]:
         log.warning("weekly fetch failed for %s: %s", mid, e)
         return []
 
+def fetch_bookings(mid: str) -> list[dict]:
+    """Old/past sessions from the public /bookings endpoint (customer NAME only, no email)."""
+    try:
+        return (_get(f"/mentor/{mid}/bookings") or {}).get("data") or []
+    except Exception as e:
+        log.warning("bookings fetch failed for %s: %s", mid, e)
+        return []
+
 
 # ── transform (pure) ─────────────────────────────────────────────────────────────
 
@@ -276,6 +284,31 @@ def transform_mentor(raw: dict, services: list[dict], weekly: list[dict]) -> dic
             "photo_url": (raw.get("profile_pic_url") or "").strip() or None, "warnings": warnings}
 
 
+def transform_bookings(bookings: list[dict]) -> list[dict]:
+    """Map legacy /bookings rows to our legacy_sessions shape (denormalized, read-only history)."""
+    out = []
+    for b in bookings:
+        slot = b.get("slot") or {}
+        service = b.get("service") or {}
+        customer = b.get("customer") or {}
+        amount = b.get("amount") or {}
+        dur, total = slot.get("duration_min"), amount.get("total")
+        out.append({
+            "legacy_booking_id": str(b["id"]) if b.get("id") is not None else None,
+            "status": clean_text(b.get("status")) or None,
+            "service_title": clean_text(service.get("title")) or None,
+            "service_type": service.get("type") if service.get("type") in ("video", "dm") else None,
+            "customer_name": clean_text(customer.get("name")) or None,
+            "slot_start": slot.get("start_iso") or None,
+            "slot_end": slot.get("end_iso") or None,
+            "duration_min": int(dur) if dur not in (None, "") else None,
+            "mentor_timezone": clean_text(slot.get("mentor_timezone")) or None,
+            "amount_total": float(total) if total not in (None, "") else None,
+            "amount_currency": clean_text(amount.get("currency")) or None,
+        })
+    return out
+
+
 # ── load (needs Supabase service-role creds) ─────────────────────────────────────
 
 def _supabase():
@@ -355,6 +388,10 @@ def load_one(sb, rec: dict) -> None:
     sb.table("weekly_availability").delete().eq("mentor_id", mid).execute()
     for wk in rec["weekly"]:
         sb.table("weekly_availability").insert({**wk, "mentor_id": mid}).execute()
+    # Legacy session history (idempotent: clear then re-insert).
+    sb.table("legacy_sessions").delete().eq("mentor_id", mid).execute()
+    for s in rec.get("sessions") or []:
+        sb.table("legacy_sessions").insert({**s, "mentor_id": mid}).execute()
 
 
 # ── main ─────────────────────────────────────────────────────────────────────────
@@ -398,8 +435,10 @@ def main() -> None:
     for raw in raw_mentors:
         mid = raw.get("id")
         services, weekly = fetch_services(mid), fetch_weekly(mid)
-        raw_bundle.append({"profile": raw, "services": services, "weekly": weekly})
+        bookings = fetch_bookings(mid)
+        raw_bundle.append({"profile": raw, "services": services, "weekly": weekly, "bookings": bookings})
         rec = transform_mentor(raw, services, weekly)
+        rec["sessions"] = transform_bookings(bookings)
         records.append(rec)
         if rec["warnings"]:
             log.info("  %s (%s): %s", rec["mentor"]["display_name"], rec["mentor"]["email"], "; ".join(rec["warnings"]))

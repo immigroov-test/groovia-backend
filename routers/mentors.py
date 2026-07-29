@@ -66,3 +66,13 @@ def get_mentor(slug: str):
         raise HTTPException(status_code=404, detail="Mentor not found")
     public = {k: v for k, v in mentor.items() if k not in _PRIVATE_FIELDS}
     return public
+
+
+@router.get("/{slug}/sessions")
+def get_mentor_sessions(slug: str):
+    """Public read-only session history imported from the old portal (a mentor's track record).
+    Distinct 2-segment path, so it never collides with the /{slug} profile route above."""
+    mentor = db.get_mentor_by_slug(slug)
+    if not mentor:
+        raise HTTPException(status_code=404, detail="Mentor not found")
+    return {"sessions": db.list_legacy_sessions(mentor["id"])}
