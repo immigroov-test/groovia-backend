@@ -337,8 +337,11 @@ BEGIN
 
   -- Customer pays: mentor rate + platform fee, then tax on that total. The mentor rate itself
   -- (set_price / mentor_amount / net_mentor) is for admin + owner only, never shown to the customer.
+  -- Gross is a SINGLE combined round (fee x tax together), identical to convert_prices, so the
+  -- displayed price and the charged price never drift by a rounding cent. The subtotal + fee + tax
+  -- breakdown is derived from it for admin/receipt display.
+  v_gross    := ROUND(v_mentor_amt * (1 + v_fee_pct / 100.0) * (1 + v_tax_pct / 100.0), 2);
   v_subtotal := ROUND(v_mentor_amt * (1 + v_fee_pct / 100.0), 2);   -- mentor rate + platform fee
-  v_gross    := ROUND(v_subtotal   * (1 + v_tax_pct / 100.0), 2);   -- + tax (GST/VAT) for the customer's country
   v_fee      := ROUND(v_subtotal - v_mentor_amt, 2);                -- platform fee amount
   v_tax_amt  := ROUND(v_gross - v_subtotal, 2);                     -- tax amount
   v_net_cust := v_mentor_amt;
