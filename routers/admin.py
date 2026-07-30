@@ -18,6 +18,13 @@ class CommissionBody(BaseModel):
     commission_pct: Optional[float] = None   # None = clear the override (mentor uses the global %)
     expires_at: Optional[str] = None          # ISO timestamp, or None for no expiry
 
+
+class CountryPricingBody(BaseModel):
+    country_code: str                         # ISO-2, or 'DEFAULT' for the fallback
+    platform_fee_pct: float
+    tax_pct: float
+    tax_label: Optional[str] = None           # e.g. 'GST', 'VAT'
+
 logger = logging.getLogger("immigroov.routers.admin")
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -27,6 +34,26 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 def admin_stats(user: AuthUser = Depends(require_admin)):
     """Platform-level counters: pending mentors, approved mentors, total bookings."""
     return db.get_admin_stats()
+
+
+@router.get("/country-pricing")
+def get_country_pricing(user: AuthUser = Depends(require_admin)):
+    """Per-country platform fee + tax (for the admin Pricing editor + dashboard summary)."""
+    return db.list_country_pricing()
+
+
+@router.post("/country-pricing")
+def save_country_pricing(body: CountryPricingBody, user: AuthUser = Depends(require_admin)):
+    """Upsert a country's platform fee + tax. country_code='DEFAULT' is the fallback for any
+    country without its own row. Customer price = mentor rate x (1 + fee%) x (1 + tax%)."""
+    if not (0 <= body.platform_fee_pct <= 100):
+        raise HTTPException(status_code=422, detail="Platform fee must be between 0 and 100")
+    if not (0 <= body.tax_pct <= 100):
+        raise HTTPException(status_code=422, detail="Tax must be between 0 and 100")
+    try:
+        return db.set_country_pricing(body.country_code, body.platform_fee_pct, body.tax_pct, body.tax_label)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/mentors/pending")

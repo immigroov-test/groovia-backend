@@ -977,6 +977,35 @@ def get_mentor_full_details(mentor_id: str) -> Optional[dict[str, Any]]:
     return mentor
 
 
+def list_country_pricing() -> list[dict[str, Any]]:
+    """All per-country platform fee + tax rows (incl. the DEFAULT fallback) for the admin editor."""
+    try:
+        return _supabase.table("country_pricing").select("*").order("country_code").execute().data or []
+    except Exception:
+        logger.warning("list_country_pricing failed (table not migrated yet?)")
+        return []
+
+
+def set_country_pricing(country_code: str, platform_fee_pct: float, tax_pct: float,
+                        tax_label: Optional[str]) -> dict[str, Any]:
+    """Upsert a country's platform fee + tax (customer-country based). country_code='DEFAULT' is the
+    fallback used for any country without an explicit row."""
+    cc = (country_code or "").strip().upper()
+    if not cc:
+        raise ValueError("country_code is required")
+    payload = {
+        "country_code": cc,
+        "platform_fee_pct": platform_fee_pct,
+        "tax_pct": tax_pct,
+        "tax_label": (tax_label or "").strip() or None,
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    res = _supabase.table("country_pricing").upsert(payload, on_conflict="country_code").execute()
+    if not res.data:
+        raise ValueError("Could not save country pricing")
+    return res.data[0]
+
+
 def get_global_commission_pct() -> float:
     """The general commission % (immigroov_markup_pct) added to a mentor's rate to get the customer
     price. A per-mentor override (mentors.commission_pct) wins over this at pricing time."""

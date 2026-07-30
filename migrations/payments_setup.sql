@@ -98,6 +98,54 @@ RETURNS NUMERIC LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS
 $$;
 GRANT EXECUTE ON FUNCTION effective_markup_pct(UUID) TO anon, authenticated;
 
+-- ── Per-country platform fee + tax ───────────────────────────────────────────
+-- Customer price = mentor rate x (1 + platform_fee%) x (1 + tax%). Both are keyed to the CUSTOMER's
+-- country and admin-editable. The platform fee (default 5%) replaces the old global markup; a
+-- per-mentor commission override still wins for that mentor. Tax defaults to 0 except where set
+-- (India GST 18%). 'DEFAULT' is the fallback row used when a country has no explicit entry.
+CREATE TABLE IF NOT EXISTS country_pricing (
+  country_code     TEXT PRIMARY KEY,           -- ISO-2 (uppercase), or 'DEFAULT'
+  platform_fee_pct NUMERIC NOT NULL DEFAULT 5,
+  tax_pct          NUMERIC NOT NULL DEFAULT 0,
+  tax_label        TEXT,                        -- e.g. 'GST', 'VAT'
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE country_pricing ENABLE ROW LEVEL SECURITY;
+INSERT INTO country_pricing (country_code, platform_fee_pct, tax_pct, tax_label) VALUES
+  ('DEFAULT', 5, 0,  NULL),
+  ('IN',      5, 18, 'GST')
+ON CONFLICT (country_code) DO NOTHING;
+
+CREATE OR REPLACE FUNCTION country_platform_fee_pct(p_cc TEXT)
+RETURNS NUMERIC LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT COALESCE(
+    (SELECT platform_fee_pct FROM country_pricing WHERE country_code = UPPER(COALESCE(p_cc, ''))),
+    (SELECT platform_fee_pct FROM country_pricing WHERE country_code = 'DEFAULT'),
+    5);
+$$;
+GRANT EXECUTE ON FUNCTION country_platform_fee_pct(TEXT) TO anon, authenticated;
+
+CREATE OR REPLACE FUNCTION country_tax_pct(p_cc TEXT)
+RETURNS NUMERIC LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT COALESCE(
+    (SELECT tax_pct FROM country_pricing WHERE country_code = UPPER(COALESCE(p_cc, ''))),
+    (SELECT tax_pct FROM country_pricing WHERE country_code = 'DEFAULT'),
+    0);
+$$;
+GRANT EXECUTE ON FUNCTION country_tax_pct(TEXT) TO anon, authenticated;
+
+-- The platform fee for a booking: a live per-mentor override wins (special deals), else the
+-- customer country's fee.
+CREATE OR REPLACE FUNCTION effective_platform_fee_pct(p_mentor_id UUID, p_customer_country TEXT)
+RETURNS NUMERIC LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT COALESCE(
+    (SELECT commission_pct FROM mentors
+       WHERE id = p_mentor_id AND commission_pct IS NOT NULL
+         AND (commission_expires_at IS NULL OR commission_expires_at > NOW())),
+    country_platform_fee_pct(p_customer_country));
+$$;
+GRANT EXECUTE ON FUNCTION effective_platform_fee_pct(UUID, TEXT) TO anon, authenticated;
+
 -- ── FX rate infrastructure (EUR-pivot model, Frankfurter/ECB) ────────────────
 -- One API call refreshes the whole table. get_fx() is the STRICT variant the
 -- booking engine uses: it RAISES FX_UNAVAILABLE rather than silently falling
@@ -239,10 +287,10 @@ DECLARE
   v_ppp_version     CONSTANT INT := 1;
   v_provider        CONSTANT TEXT := 'frankfurter';
   v_mentor_id UUID; v_set NUMERIC; v_set_offer NUMERIC; v_ment_ccy TEXT; v_is_ppp BOOLEAN;
-  v_prices JSONB; v_markup NUMERIC; v_mentor_country TEXT;
+  v_prices JSONB; v_fee_pct NUMERIC; v_tax_pct NUMERIC; v_mentor_country TEXT;
   v_cust_ccy TEXT; v_ppp NUMERIC := 1; v_source TEXT; v_explicit NUMERIC; v_base NUMERIC; v_mentor_amt NUMERIC;
   v_fx_mc NUMERIC; v_fx_c_inr NUMERIC; v_fx_m_inr NUMERIC;
-  v_gross NUMERIC; v_fee NUMERIC; v_net_cust NUMERIC; v_net_mentor NUMERIC;
+  v_gross NUMERIC; v_fee NUMERIC; v_subtotal NUMERIC; v_tax_amt NUMERIC; v_net_cust NUMERIC; v_net_mentor NUMERIC;
 BEGIN
   SELECT s.mentor_id, s.set_price, s.set_offer_price, COALESCE(s.set_currency, 'USD'), s.is_ppp,
          COALESCE(s.currency_prices, '[]'::jsonb), m.country
@@ -251,9 +299,10 @@ BEGIN
   WHERE s.id = p_service_id AND s.is_active AND s.status = 'approved';
   IF v_set IS NULL THEN RAISE EXCEPTION 'Service not available' USING errcode = 'P0001'; END IF;
 
-  -- Commission added on top of the mentor rate to get the customer price: the per-mentor override
-  -- if set + not expired, else the global immigroov_markup_pct.
-  v_markup   := effective_markup_pct(v_mentor_id);
+  -- Platform fee + tax by the CUSTOMER's country (a live per-mentor override wins for the fee).
+  -- Customer price = mentor amount x (1 + fee%) x (1 + tax%).
+  v_fee_pct  := effective_platform_fee_pct(v_mentor_id, p_customer_country);
+  v_tax_pct  := country_tax_pct(p_customer_country);
   v_cust_ccy := currency_for_country(p_customer_country);
 
   -- 1. Is there an explicit MENTOR rate for the customer's currency (primary, or a currency_prices row)?
@@ -286,10 +335,12 @@ BEGIN
     v_net_mentor := v_base;                            -- mentor's filled rate (owner pays this manually)
   END IF;
 
-  -- Customer pays the localised mentor rate PLUS the global markup. The mentor rate itself
+  -- Customer pays: mentor rate + platform fee, then tax on that total. The mentor rate itself
   -- (set_price / mentor_amount / net_mentor) is for admin + owner only, never shown to the customer.
-  v_gross    := ROUND(v_mentor_amt * (1 + v_markup / 100.0), 2);
-  v_fee      := ROUND(v_gross - v_mentor_amt, 2);
+  v_subtotal := ROUND(v_mentor_amt * (1 + v_fee_pct / 100.0), 2);   -- mentor rate + platform fee
+  v_gross    := ROUND(v_subtotal   * (1 + v_tax_pct / 100.0), 2);   -- + tax (GST/VAT) for the customer's country
+  v_fee      := ROUND(v_subtotal - v_mentor_amt, 2);                -- platform fee amount
+  v_tax_amt  := ROUND(v_gross - v_subtotal, 2);                     -- tax amount
   v_net_cust := v_mentor_amt;
 
   RETURN jsonb_build_object(
@@ -297,9 +348,10 @@ BEGIN
     'service_id', p_service_id, 'mentor_id', v_mentor_id, 'customer_country', UPPER(COALESCE(p_customer_country, '')),
     'mentor_currency', v_ment_ccy, 'customer_currency', v_cust_ccy,
     'pricing_source', v_source, 'set_price', v_set, 'ppp_multiplier', v_ppp,
-    'markup_pct', v_markup, 'mentor_amount', v_mentor_amt,
+    'markup_pct', v_fee_pct, 'mentor_amount', v_mentor_amt,
     'fx_mentor_customer', v_fx_mc, 'fx_customer_inr', v_fx_c_inr, 'fx_mentor_inr', v_fx_m_inr,
-    'gross_customer', v_gross, 'fee_pct', v_markup, 'fee_amount', v_fee,
+    'gross_customer', v_gross, 'fee_pct', v_fee_pct, 'fee_amount', v_fee,
+    'subtotal', v_subtotal, 'tax_pct', v_tax_pct, 'tax_amount', v_tax_amt,
     'net_customer', v_net_cust, 'net_mentor', v_net_mentor);
 END; $$;
 GRANT EXECUTE ON FUNCTION compute_booking_price(UUID, TEXT) TO anon, authenticated;
@@ -336,8 +388,10 @@ BEGIN
     v_from := COALESCE(it->>'from', 'USD');
     v_ppp_on := COALESCE((it->>'is_ppp')::boolean, false);
     v_ppp := CASE WHEN v_ppp_on THEN ppp_relative(p_customer_country, it->>'mentor_country') ELSE 1 END;
-    -- Same commission the charge uses (per-mentor override or global), so display = what's charged.
-    v_mk  := 1 + effective_markup_pct(NULLIF(it->>'mentor_id','')::uuid) / 100.0;
+    -- Same platform fee + tax the charge uses (per-mentor override or country fee, then country tax),
+    -- so the displayed price equals what's charged.
+    v_mk  := (1 + effective_platform_fee_pct(NULLIF(it->>'mentor_id','')::uuid, p_customer_country) / 100.0)
+             * (1 + country_tax_pct(p_customer_country) / 100.0);
     v_rate := get_fx_or_null(v_from, v_cust);
     IF v_rate IS NULL THEN
       key := it->>'key'; you0 := ROUND(v_amt * v_mk, 2); you := ROUND(v_amt * v_ppp * v_mk, 2);
