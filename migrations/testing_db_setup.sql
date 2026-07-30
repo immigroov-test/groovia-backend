@@ -1442,7 +1442,7 @@ INSERT INTO mentors (
     'Software Engineer who moved from India to the Netherlands (Blue Card)',
     'I navigated the Dutch Blue Card process while changing jobs. Happy to share what I learned about paperwork, timing, and avoiding pitfalls.',
     ARRAY['NL']::CHAR(2)[],
-    ARRAY['job_career', 'visa_pr'],
+    ARRAY['job_career','visa_pr'],
     ARRAY['en', 'hi'],
     ARRAY['IT'],
     'maya-singh', 4
@@ -1486,7 +1486,7 @@ INSERT INTO mentors (
     'Healthcare professional - Germany work visa route',
     'Nurses, doctors, allied health: the Approbation process, B2 German requirement, and how to land your first hospital role.',
     ARRAY['DE']::CHAR(2)[],
-    ARRAY['job_career', 'visa_pr'],
+    ARRAY['job_career','visa_pr'],
     ARRAY['en', 'ur', 'de'],
     ARRAY['Healthcare'],
     'fatima-rahman', 5
@@ -1519,7 +1519,7 @@ INSERT INTO mentors (
     'Software Engineer - Vancouver tech scene + LMIA',
     'Moved from Seoul to Vancouver on LMIA, transitioned to PR. Tech job market reality, salaries, neighborhoods.',
     ARRAY['CA']::CHAR(2)[],
-    ARRAY['job_career', 'life_settling'],
+    ARRAY['job_career','life_settling'],
     ARRAY['en', 'ko'],
     ARRAY['IT'],
     'daniel-park', 4
@@ -1585,7 +1585,7 @@ INSERT INTO mentors (
     'Career across EU - France, Germany, Belgium',
     'I worked in 3 EU countries in 10 years. EU Blue Card, intra-EU moves, taxation, family relocations.',
     ARRAY['DE', 'FR', 'BE']::CHAR(2)[],
-    ARRAY['job_career', 'visa_pr', 'life_settling'],
+    ARRAY['job_career','visa_pr', 'life_settling'],
     ARRAY['en', 'fr', 'de'],
     ARRAY['Consulting'],
     'sophie-laurent', 10
@@ -1609,7 +1609,7 @@ INSERT INTO mentors (
     'Growth Marketer - Mexico to Canada',
     'Breaking into Canadian marketing roles, LinkedIn positioning, and Express Entry for marketers.',
     ARRAY['CA']::CHAR(2)[],
-    ARRAY['job_career', 'visa_pr'],
+    ARRAY['job_career','visa_pr'],
     ARRAY['en', 'es'],
     ARRAY['Marketing'],
     'carlos-mendez', 4
@@ -1642,7 +1642,7 @@ INSERT INTO mentors (
     'International teacher - Japan to Australia',
     'Getting teaching qualifications recognised in AU, school hiring, and the skilled visa for educators.',
     ARRAY['AU']::CHAR(2)[],
-    ARRAY['job_career', 'visa_pr'],
+    ARRAY['job_career','visa_pr'],
     ARRAY['en', 'ja'],
     ARRAY['Education'],
     'mei-tanaka', 5
@@ -1664,7 +1664,7 @@ INSERT INTO mentors (
     'Manufacturing engineer - India to Germany',
     'Automotive and industrial roles in Germany, the Blue Card for engineers, and workplace German.',
     ARRAY['DE']::CHAR(2)[],
-    ARRAY['job_career', 'visa_pr'],
+    ARRAY['job_career','visa_pr'],
     ARRAY['en', 'hi', 'de'],
     ARRAY['Manufacturing'],
     'raj-menon', 8
@@ -1686,7 +1686,7 @@ INSERT INTO mentors (
     'Journalist - Brazil to France',
     'Freelance and staff media roles in France, the visa route, and building a European portfolio.',
     ARRAY['FR']::CHAR(2)[],
-    ARRAY['job_career', 'visa_pr'],
+    ARRAY['job_career','visa_pr'],
     ARRAY['en', 'fr', 'pt'],
     ARRAY['Media & Journalism'],
     'diego-santos', 4
@@ -1697,7 +1697,7 @@ INSERT INTO mentors (
     'Policy analyst - Egypt to the UK',
     'Public-sector and think-tank roles, and the Skilled Worker route for policy professionals.',
     ARRAY['GB']::CHAR(2)[],
-    ARRAY['job_career', 'visa_pr'],
+    ARRAY['job_career','visa_pr'],
     ARRAY['en', 'ar'],
     ARRAY['Government & Policy'],
     'amir-hassan', 6
@@ -1708,7 +1708,7 @@ INSERT INTO mentors (
     'NGO program manager - Nigeria to the US',
     'International development roles, work visas for non-profit leaders, and life in DC.',
     ARRAY['US']::CHAR(2)[],
-    ARRAY['job_career', 'visa_pr'],
+    ARRAY['job_career','visa_pr'],
     ARRAY['en'],
     ARRAY['Non-profit'],
     'grace-adeyemi', 7
@@ -1732,7 +1732,7 @@ INSERT INTO mentors (
     'Musician navigating the Japan artist visa',
     'Performing and teaching music in Japan: the artist and entertainer visa, auditions, and building a network.',
     ARRAY['JP']::CHAR(2)[],
-    ARRAY['job_career', 'visa_pr'],
+    ARRAY['job_career','visa_pr'],
     ARRAY['en', 'ja'],
     ARRAY['Performing Arts'],
     'kenji-mori', 6
@@ -1743,7 +1743,7 @@ INSERT INTO mentors (
     'Chef who moved to France',
     'Restaurant kitchens, culinary school, and the talent passport for chefs relocating to France.',
     ARRAY['FR']::CHAR(2)[],
-    ARRAY['job_career', 'life_settling'],
+    ARRAY['job_career','life_settling'],
     ARRAY['en', 'fr'],
     ARRAY['Culinary Arts'],
     'amelie-dubois', 8
@@ -1754,7 +1754,7 @@ INSERT INTO mentors (
     'Architect practising in Singapore',
     'Getting architecture qualifications recognised, the Employment Pass, and firm culture in Singapore.',
     ARRAY['SG']::CHAR(2)[],
-    ARRAY['job_career', 'visa_pr'],
+    ARRAY['job_career','visa_pr'],
     ARRAY['en', 'zh'],
     ARRAY['Architecture'],
     'wei-lim', 9
@@ -1776,7 +1776,7 @@ INSERT INTO mentors (
     'Film professional in the New Zealand screen industry',
     'Working in NZ film and screen, the Accredited Employer Work Visa, and life on set in Wellington.',
     ARRAY['NZ']::CHAR(2)[],
-    ARRAY['job_career', 'visa_pr'],
+    ARRAY['job_career','visa_pr'],
     ARRAY['en'],
     ARRAY['Film & Screen'],
     'liam-walsh', 6
@@ -1787,7 +1787,7 @@ INSERT INTO mentors (
     'Management consultant in Dubai',
     'Consulting roles in the UAE, the Golden Visa, tax-free salary realities, and settling in Dubai.',
     ARRAY['AE']::CHAR(2)[],
-    ARRAY['job_career', 'life_settling'],
+    ARRAY['job_career','life_settling'],
     ARRAY['en', 'ar'],
     ARRAY['Consulting'],
     'omar-haddad', 7
@@ -1798,7 +1798,7 @@ INSERT INTO mentors (
     'Psychotherapist supporting newcomers in Ireland',
     'Registering as a therapist in Ireland, the Critical Skills route for health professionals, and settling in Dublin.',
     ARRAY['IE']::CHAR(2)[],
-    ARRAY['job_career', 'life_settling'],
+    ARRAY['job_career','life_settling'],
     ARRAY['en'],
     ARRAY['Healthcare'],
     'niamh-byrne', 6
@@ -1809,7 +1809,7 @@ INSERT INTO mentors (
     'Senior auditor in Copenhagen',
     'Finance and audit roles in Denmark, the Pay Limit scheme, and the Danish work-life balance.',
     ARRAY['DK']::CHAR(2)[],
-    ARRAY['job_career', 'visa_pr'],
+    ARRAY['job_career','visa_pr'],
     ARRAY['en', 'da'],
     ARRAY['Finance & Banking'],
     'mads-nielsen', 8
@@ -1820,7 +1820,7 @@ INSERT INTO mentors (
     'Dance teacher and choreographer, moved to Australia',
     'Working in dance and performing arts in Australia, the skilled visa for artists, and studio life in Melbourne.',
     ARRAY['AU']::CHAR(2)[],
-    ARRAY['job_career', 'study_abroad'],
+    ARRAY['job_career','study_abroad'],
     ARRAY['en'],
     ARRAY['Fine Arts', 'Performing Arts'],
     'grace-tan', 5
@@ -1945,7 +1945,7 @@ BEGIN
                             set_price, set_currency, is_active, status)
       VALUES (m.id, '1-on-1 Mentoring Session',
               'A 30-minute video call to talk through your visa and career questions.',
-              'video', 30, 'job_career', 50, 'EUR', TRUE, 'approved');
+              'video', 30, 'job_career',50, 'EUR', TRUE, 'approved');
     END IF;
 
     IF NOT EXISTS (SELECT 1 FROM weekly_availability WHERE mentor_id = m.id) THEN
@@ -2057,15 +2057,15 @@ BEGIN
     VALUES
       (m_id, 'Free intro call',
        '<p>A quick 15-minute chat to see how I can help with your move into AI/software roles abroad.</p>',
-       'video', 15, 'job_career', 0, 'INR', NULL, '[]'::jsonb, TRUE, TRUE, 'approved'),
+       'video', 15, 'Jobs & Careers', 0, 'INR', NULL, '[]'::jsonb, TRUE, TRUE, 'approved'),
       (m_id, 'CV & portfolio review',
        '<p>A focused 30-minute review of your CV and portfolio, tailored to AI/software hiring abroad.</p>',
-       'video', 30, 'job_career', 1499, 'INR', 999,
+       'video', 30, 'Jobs & Careers', 1499, 'INR', 999,
        jsonb_build_array(jsonb_build_object('currency','EUR','base_price',18),
                          jsonb_build_object('currency','USD','base_price',20)), TRUE, TRUE, 'approved'),
       (m_id, 'Mock interview',
        '<p>A realistic 45-minute mock interview for AI/ML and software roles, with direct feedback.</p>',
-       'video', 45, 'job_career', 2499, 'INR', NULL,
+       'video', 45, 'Jobs & Careers', 2499, 'INR', NULL,
        jsonb_build_array(jsonb_build_object('currency','EUR','base_price',30),
                          jsonb_build_object('currency','USD','base_price',33)), TRUE, TRUE, 'approved');
   END IF;
