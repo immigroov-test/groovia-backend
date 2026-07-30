@@ -86,6 +86,13 @@ def get_my_mentor(user: AuthUser = Depends(get_current_user)):
     return mentor
 
 
+@router.get("/legacy-sessions")
+def my_legacy_sessions(mentor: dict = Depends(require_mentor)):
+    """The logged-in mentor's OWN imported past sessions (private track record for their dashboard).
+    Scoped to this mentor only, never other mentors; the public profile does not show these at all."""
+    return {"sessions": db.list_legacy_sessions(mentor["id"])}
+
+
 class InitialRateBody(BaseModel):
     hourly_rate: float
     currency: str = "INR"

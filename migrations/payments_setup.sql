@@ -882,6 +882,19 @@ CREATE TABLE IF NOT EXISTS job_run_history (
   last_run_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- ── RLS on the remaining financial + internal tables (audit) ─────────────────
+-- Every table enables RLS with no broad policy: reads flow through SECURITY DEFINER functions, writes
+-- through the service-role backend. These were the gaps; the core ledger already had it.
+ALTER TABLE fx_rates                    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE fx_refresh_log              ENABLE ROW LEVEL SECURITY;
+ALTER TABLE pricing_quotes              ENABLE ROW LEVEL SECURITY;
+ALTER TABLE booking_pricing             ENABLE ROW LEVEL SECURITY;
+ALTER TABLE payment_refunds             ENABLE ROW LEVEL SECURITY;
+ALTER TABLE payment_events              ENABLE ROW LEVEL SECURITY;
+ALTER TABLE payment_reconciliation_log  ENABLE ROW LEVEL SECURITY;
+ALTER TABLE dispatcher_locks            ENABLE ROW LEVEL SECURITY;
+ALTER TABLE job_run_history             ENABLE ROW LEVEL SECURITY;
+
 
 -- ── Auto-expire abandoned payment holds (pg_cron; free, no external dispatcher for
 -- THIS job). Releases a slot whose 10-minute payment hold was never paid, so it can
