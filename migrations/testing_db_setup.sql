@@ -4527,3 +4527,36 @@ BEGIN
   IF v_mentor IS NOT NULL THEN PERFORM recompute_mentor_rating(v_mentor); END IF;
 END; $$;
 GRANT EXECUTE ON FUNCTION admin_set_review_status(UUID, TEXT) TO service_role, authenticated;
+
+-- ── Security hardening: referral + review RPCs are BACKEND-ONLY ───────────────
+-- The frontend never calls these directly - every request goes through the FastAPI backend using
+-- the service role, which enforces the admin/mentor checks. So strip the default PUBLIC / anon /
+-- authenticated EXECUTE: otherwise any logged-in user could call them straight through PostgREST
+-- (with the public anon key + their JWT) and bypass those checks - reading other mentors' earnings,
+-- customer emails and unpublished reviews, approving their own commissions, or submitting a review
+-- as another user. Same lock-down pattern as confirm_booking_payment.
+DO $$
+DECLARE fn TEXT;
+BEGIN
+  FOREACH fn IN ARRAY ARRAY[
+    'ensure_mentor_affiliate(uuid)',
+    'generate_referral_code(uuid,numeric,integer,timestamptz)',
+    'validate_referral_code(text)',
+    'current_affiliate_tier(uuid)',
+    'mentor_referral_overview(uuid)',
+    'admin_referrals_overview()',
+    'admin_referral_bookings(uuid)',
+    'admin_set_commission_status(uuid,text,uuid,text)',
+    'process_referral_commissions()',
+    'recompute_mentor_rating(uuid)',
+    'submit_review(uuid,uuid,integer,text,integer,integer,integer)',
+    'mentor_reviews(uuid,boolean)',
+    'mentor_rating_summary(uuid)',
+    'my_review_for_booking(uuid,uuid)',
+    'admin_reviews(integer)',
+    'admin_set_review_status(uuid,text)'
+  ] LOOP
+    EXECUTE format('REVOKE ALL ON FUNCTION %s FROM PUBLIC, anon, authenticated', fn);
+    EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO service_role', fn);
+  END LOOP;
+END $$;

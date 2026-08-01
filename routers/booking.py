@@ -186,9 +186,12 @@ def booking_detail(booking_id: str, user: AuthUser = Depends(get_current_user)):
         out["candidate_email"] = d.get("candidate_email")
         out["candidate_phone"] = d.get("candidate_phone")
 
-    # Payment amount/state: the candidate sees their own; mentor + admin see it too.
+    # Payment amount is the CUSTOMER's transaction - it bakes in the platform commission + tax,
+    # which are admin-only. The candidate sees their own; admin sees all. The MENTOR only needs to
+    # know it's paid (the `paid` flag); their own net earning lives in their payouts view, so we do
+    # NOT expose the gross customer amount to them.
     pay = d.get("payment")
-    if pay:
+    if pay and (is_candidate or is_admin):
         out["payment"] = {
             "state": pay.get("state"),
             "amount": pay.get("amount"),
