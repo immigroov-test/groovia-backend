@@ -33,10 +33,9 @@ def validate_code(body: ValidateBody):
 # ── Mentor (their own codes) ─────────────────────────────────────────────────
 
 class GenerateCodeBody(BaseModel):
-    discount_pct: float = Field(0, ge=0, le=100)
-    redemption_cap: Optional[int] = Field(None, ge=1, le=1_000_000)
-    expires_at: Optional[str] = None            # ISO8601; None = never expires
-    code: Optional[str] = Field(None, max_length=32)
+    discount_pct: float = Field(0, ge=0, le=100)   # hard ceiling; the DB enforces referral_max_discount_pct
+    redemption_cap: Optional[int] = Field(None, ge=1, le=1_000_000)  # None -> DB applies a finite default
+    expires_at: Optional[str] = None               # ISO8601; None -> DB applies the default expiry
 
 
 class CodeActiveBody(BaseModel):
@@ -57,17 +56,14 @@ def create_code(body: GenerateCodeBody, mentor: dict = Depends(require_mentor)):
             discount_pct=body.discount_pct,
             redemption_cap=body.redemption_cap,
             expires_at=body.expires_at,
-            code=body.code,
         )
         return {"code": code}
     except HTTPException:
         raise
     except Exception as e:
         msg = str(e)
-        if "already taken" in msg:
-            raise HTTPException(status_code=409, detail="That code is already taken - pick another")
-        if "between 0 and 100" in msg:
-            raise HTTPException(status_code=400, detail="Discount must be between 0 and 100")
+        if "Discount must be between" in msg:
+            raise HTTPException(status_code=400, detail="That discount is above the allowed maximum")
         logger.exception("generate_referral_code failed")
         raise HTTPException(status_code=500, detail="Could not create the code")
 

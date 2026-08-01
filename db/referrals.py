@@ -23,16 +23,15 @@ def generate_referral_code(
     discount_pct: float = 0,
     redemption_cap: Optional[int] = None,
     expires_at: Optional[str] = None,
-    code: Optional[str] = None,
 ) -> str:
-    """Create a code for the mentor's affiliate (auto-created on first use).
-    Returns the new code string. Raises the RPC's message on a taken code / bad input."""
+    """Create a system-generated code for the mentor's affiliate (auto-created on first use).
+    Returns the new code string. The RPC caps the discount and always applies a finite usage cap +
+    expiry; raises its message on bad input."""
     res = _supabase.rpc("generate_referral_code", {
         "p_mentor_id": mentor_id,
         "p_discount_pct": discount_pct,
         "p_redemption_cap": redemption_cap,
         "p_expires_at": expires_at,
-        "p_code": code,
     }).execute()
     return res.data
 

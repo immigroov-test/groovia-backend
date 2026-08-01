@@ -4050,7 +4050,10 @@ INSERT INTO platform_settings (key, value, description) VALUES
   ('referral_code_redemption_speed_minutes', '30', 'Minutes; a code used faster than this is a potential speed-fraud signal'),
   ('referral_manual_review_escalation_days', '5', 'Working days a flagged case can sit before auto-escalating to the co-founder'),
   ('referral_payout_min_working_days', '5', 'Minimum working days after session completion before a commission is payout-eligible'),
-  ('referral_attribution_days', '60', 'Days a referral attribution stays valid after the click/code')
+  ('referral_attribution_days', '60', 'Days a referral attribution stays valid after the click/code'),
+  ('referral_max_discount_pct', '50', 'Maximum discount % a mentor may set on a referral code (margin-floor guard)'),
+  ('referral_default_code_cap', '100', 'Redemption cap applied when a code is generated without an explicit one (codes are never unlimited)'),
+  ('referral_default_code_expiry_days', '90', 'Codes expire this many days after creation when no expiry is given (anti-leakage)')
 ON CONFLICT (key) DO NOTHING;
 
 -- ###########################################################################
@@ -4074,42 +4077,46 @@ BEGIN
 END; $$;
 GRANT EXECUTE ON FUNCTION ensure_mentor_affiliate(UUID) TO authenticated;
 
--- Mentor generates a referral code. Auto-creates their affiliate row. Returns the code_string.
--- p_code optional (a random 8-char code is generated when blank); cap/expiry optional (NULL = none).
+-- Mentor generates a referral code (auto-created affiliate row). Returns the code_string.
+-- Codes are ALWAYS system-generated (no user-supplied strings), discount is capped by
+-- referral_max_discount_pct, and every code gets a FINITE usage cap + an expiry (anti-leakage):
+-- a NULL cap/expiry falls back to referral_default_code_cap / referral_default_code_expiry_days.
+DROP FUNCTION IF EXISTS generate_referral_code(UUID, NUMERIC, INT, TIMESTAMPTZ, TEXT);
 CREATE OR REPLACE FUNCTION generate_referral_code(
   p_mentor_id UUID,
   p_discount_pct NUMERIC DEFAULT 0,
   p_redemption_cap INT DEFAULT NULL,
-  p_expires_at TIMESTAMPTZ DEFAULT NULL,
-  p_code TEXT DEFAULT NULL
+  p_expires_at TIMESTAMPTZ DEFAULT NULL
 ) RETURNS TEXT LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
-DECLARE v_aff UUID; v_code TEXT; v_try INT := 0;
+DECLARE v_aff UUID; v_code TEXT; v_try INT := 0; v_max NUMERIC; v_cap INT; v_days INT;
 BEGIN
-  IF COALESCE(p_discount_pct, 0) < 0 OR COALESCE(p_discount_pct, 0) > 100 THEN
-    RAISE EXCEPTION 'discount_pct must be between 0 and 100' USING errcode = 'P0001';
+  v_max := COALESCE((SELECT value::numeric FROM platform_settings WHERE key = 'referral_max_discount_pct'), 50);
+  IF COALESCE(p_discount_pct, 0) < 0 OR COALESCE(p_discount_pct, 0) > v_max THEN
+    RAISE EXCEPTION 'Discount must be between 0 and %', v_max USING errcode = 'P0001';
   END IF;
   v_aff := ensure_mentor_affiliate(p_mentor_id);
   IF v_aff IS NULL THEN RAISE EXCEPTION 'Mentor not found' USING errcode = 'P0001'; END IF;
 
-  IF p_code IS NOT NULL AND LENGTH(REGEXP_REPLACE(TRIM(p_code), '[^A-Za-z0-9]', '', 'g')) >= 4 THEN
-    v_code := UPPER(REGEXP_REPLACE(TRIM(p_code), '[^A-Za-z0-9]', '', 'g'));
-    IF EXISTS (SELECT 1 FROM referral_codes WHERE LOWER(code_string) = LOWER(v_code)) THEN
-      RAISE EXCEPTION 'That code is already taken - pick another' USING errcode = 'P0001';
-    END IF;
-  ELSE
-    LOOP
-      v_code := UPPER(SUBSTRING(MD5(random()::text || clock_timestamp()::text) FROM 1 FOR 8));
-      EXIT WHEN NOT EXISTS (SELECT 1 FROM referral_codes WHERE LOWER(code_string) = LOWER(v_code));
-      v_try := v_try + 1;
-      IF v_try > 25 THEN RAISE EXCEPTION 'Could not generate a unique code, please retry'; END IF;
-    END LOOP;
-  END IF;
+  -- Usage cap is always finite (never unlimited); default from settings when not provided.
+  v_cap := COALESCE(p_redemption_cap, (SELECT value::int FROM platform_settings WHERE key = 'referral_default_code_cap'), 100);
+  IF v_cap < 1 THEN v_cap := 1; END IF;
+  -- Codes always expire; default from settings when no expiry is given.
+  v_days := COALESCE((SELECT value::int FROM platform_settings WHERE key = 'referral_default_code_expiry_days'), 90);
+  IF p_expires_at IS NULL THEN p_expires_at := NOW() + MAKE_INTERVAL(days => v_days); END IF;
+
+  -- Always system-generate a unique code.
+  LOOP
+    v_code := UPPER(SUBSTRING(MD5(random()::text || clock_timestamp()::text) FROM 1 FOR 8));
+    EXIT WHEN NOT EXISTS (SELECT 1 FROM referral_codes WHERE LOWER(code_string) = LOWER(v_code));
+    v_try := v_try + 1;
+    IF v_try > 25 THEN RAISE EXCEPTION 'Could not generate a unique code, please retry'; END IF;
+  END LOOP;
 
   INSERT INTO referral_codes (affiliate_id, code_string, discount_pct, redemption_cap, expires_at)
-    VALUES (v_aff, v_code, COALESCE(p_discount_pct, 0), p_redemption_cap, p_expires_at);
+    VALUES (v_aff, v_code, COALESCE(p_discount_pct, 0), v_cap, p_expires_at);
   RETURN v_code;
 END; $$;
-GRANT EXECUTE ON FUNCTION generate_referral_code(UUID, NUMERIC, INT, TIMESTAMPTZ, TEXT) TO authenticated;
+GRANT EXECUTE ON FUNCTION generate_referral_code(UUID, NUMERIC, INT, TIMESTAMPTZ) TO authenticated;
 
 -- Validate a code at checkout (read-only). Returns {valid, reason, discount_pct, code_id,
 -- affiliate_id, code}. The discount % the customer sees comes from HERE (backend-checked), never
