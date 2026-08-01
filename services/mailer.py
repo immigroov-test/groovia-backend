@@ -390,18 +390,25 @@ def _mentor_attendance_check(d: dict) -> tuple[str, str]:
 def _review_request(d: dict) -> tuple[str, str]:
     candidate = _e(d.get("candidate_name", ""))
     mentor = d.get("mentor_name", "your mentor")
-    review_url = d.get("platform_url", config.FRONTEND_URL) + "/mentors"
+    # Prefer a session-specific link (the review form lives on /session/<id>); fall back to /mentors.
+    review_url = d.get("review_url") or (d.get("platform_url", config.FRONTEND_URL) + "/mentors")
+    is_reminder = bool(d.get("is_reminder"))
+    lead = ("Just a quick reminder to review your recent session with"
+            if is_reminder else "We hope your session with")
+    tail = "" if is_reminder else " was valuable"
     body = (
         f'<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">How was your session with {_e(mentor)}?</h1>'
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {candidate},</p>'
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
-        f"We hope your session with <strong>{_e(mentor)}</strong> was valuable! Your feedback helps other "
+        f"{lead} <strong>{_e(mentor)}</strong>{tail}! Your feedback helps other "
         "international professionals find the right mentor for their journey."
         "</p>"
         '<p style="margin:0;font-size:15px;color:#444;line-height:1.6">It only takes a minute to leave a review.</p>'
         + _btn(review_url, "Leave a Review")
     )
-    return f"How was your session with {mentor}?", _base(body)
+    subject = (f"Reminder: review your session with {mentor}"
+               if is_reminder else f"How was your session with {mentor}?")
+    return subject, _base(body)
 
 
 def _welcome_candidate(d: dict) -> tuple[str, str]:

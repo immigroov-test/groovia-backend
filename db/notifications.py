@@ -58,6 +58,66 @@ def due_unreminded_bookings(
     return [i for i in ids if i not in seen_ids]
 
 
+def due_review_requests(
+    reminder: bool = False, window_days: int = 14, reminder_after_days: int = 3,
+) -> list[str]:
+    """Booking ids eligible for a post-session review email: status 'completed', the mentee is a
+    registered account (candidate_id) who actually joined (candidate_joined_at), the session ended
+    within window_days, and there's no review yet. For reminder=True, only those whose initial
+    'review_request' went out at least reminder_after_days ago and still have no review.
+    claim_reminder() is the real double-send guard."""
+    now = datetime.now(timezone.utc)
+    since = (now - timedelta(days=window_days)).isoformat()
+    try:
+        rows = (
+            _supabase.table("bookings")
+            .select("id, candidate_id, candidate_joined_at")
+            .eq("status", "completed")
+            .gte("slot_end", since)
+            .execute()
+        ).data or []
+    except Exception:
+        logger.exception("due_review_requests query failed reminder=%s", reminder)
+        return []
+    ids = [r["id"] for r in rows if r.get("candidate_id") and r.get("candidate_joined_at")]
+    if not ids:
+        return []
+    # Drop bookings that already have a review.
+    try:
+        reviewed = (_supabase.table("reviews").select("booking_id").in_("booking_id", ids).execute()).data or []
+    except Exception:
+        reviewed = []
+    reviewed_ids = {r["booking_id"] for r in reviewed}
+    ids = [i for i in ids if i not in reviewed_ids]
+    if not ids:
+        return []
+    kind = "review_reminder" if reminder else "review_request"
+    # Drop bookings already claimed for THIS kind.
+    try:
+        seen = (_supabase.table("booking_reminders").select("booking_id").eq("kind", kind).in_("booking_id", ids).execute()).data or []
+    except Exception:
+        seen = []
+    seen_ids = {r["booking_id"] for r in seen}
+    ids = [i for i in ids if i not in seen_ids]
+    if not reminder or not ids:
+        return ids
+    # Reminder: only those whose initial request went out >= reminder_after_days ago.
+    cutoff = (now - timedelta(days=reminder_after_days)).isoformat()
+    try:
+        reqs = (
+            _supabase.table("booking_reminders")
+            .select("booking_id")
+            .eq("kind", "review_request")
+            .in_("booking_id", ids)
+            .lte("created_at", cutoff)
+            .execute()
+        ).data or []
+    except Exception:
+        reqs = []
+    ready = {r["booking_id"] for r in reqs}
+    return [i for i in ids if i in ready]
+
+
 def claim_reminder(booking_id: str, kind: str) -> bool:
     """Atomically claim the right to send this (booking, kind) reminder. Returns True only
     if THIS caller inserted the row; False if another tick already claimed it (the

@@ -35,6 +35,7 @@ class ReserveBody(BaseModel):
     timezone: str = "UTC"
     answers: list[BookingAnswerItem] = []
     specific_availability_id: Optional[str] = None
+    referral_code: Optional[str] = None
 
     @field_validator("email")
     @classmethod
@@ -75,6 +76,7 @@ def reserve(body: ReserveBody, user: Optional[AuthUser] = Depends(get_current_us
             answers=answers_json,
             specific_availability_id=body.specific_availability_id,
             candidate_id=candidate_id,
+            referral_code=body.referral_code,
         )
         try:
             db.set_booking_phone(result["booking_id"], body.phone)

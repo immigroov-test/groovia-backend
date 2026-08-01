@@ -1006,16 +1006,6 @@ def set_country_pricing(country_code: str, platform_fee_pct: float, tax_pct: flo
     return res.data[0]
 
 
-def get_global_commission_pct() -> float:
-    """The general commission % (immigroov_markup_pct) added to a mentor's rate to get the customer
-    price. A per-mentor override (mentors.commission_pct) wins over this at pricing time."""
-    try:
-        res = _supabase.table("platform_settings").select("value").eq("key", "immigroov_markup_pct").limit(1).execute()
-        return float(res.data[0]["value"]) if res.data else 10.0
-    except Exception:
-        return 10.0
-
-
 def set_mentor_initial_rate(mentor_id: str, hourly_rate: float, currency: str,
                             currency_rates: list[dict], smart_pricing: bool) -> dict[str, Any]:
     """First-login rate capture for a migrated mentor: write rate/currency/smart_pricing straight to
@@ -1071,13 +1061,12 @@ def get_admin_stats() -> dict[str, int]:
             "no_service_mentor_count": max(active_flag - bookable, 0),  # active toggle but nothing to book
             "pending_service_count": pending_services,                  # services from live mentors awaiting review
             "total_bookings": bookings,
-            "global_commission_pct": get_global_commission_pct(),      # general % added to get customer price
         }
     except Exception:
         logger.exception("Failed to fetch admin stats")
         return {"pending_mentor_count": 0, "approved_mentor_count": 0, "active_mentor_count": 0,
                 "inactive_mentor_count": 0, "no_service_mentor_count": 0, "pending_service_count": 0,
-                "total_bookings": 0, "global_commission_pct": 10.0}
+                "total_bookings": 0}
 
 
 # ── Admin: booking oversight + no-show ops ──────────────────────────────────

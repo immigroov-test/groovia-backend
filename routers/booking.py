@@ -304,6 +304,7 @@ class BookSessionBody(BaseModel):
     answers: list[BookingAnswerItem] = []
     specific_availability_id: Optional[str] = None
     idempotency_key: Optional[str] = None
+    referral_code: Optional[str] = None
 
     @field_validator("email")
     @classmethod
@@ -364,6 +365,10 @@ def book_session(
             booking_id = result[0]["booking_id"]
             if body.idempotency_key:
                 db.set_booking_idempotency_key(booking_id, body.idempotency_key)
+            if body.referral_code:
+                # Mock/free path: no charge + no pricing rows, so this records attribution only
+                # (no commission is generated). The paid path applies the discount in reserve.
+                db.attribute_booking_referral(booking_id, body.referral_code)
             db.set_booking_phone(booking_id, body.phone)
             if candidate_id:
                 db.set_profile_phone_if_empty(candidate_id, body.phone)

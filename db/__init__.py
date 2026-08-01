@@ -7,6 +7,8 @@ from .payments import *
 from .jobs import *
 from .notifications import *
 from .bank import *
+from .referrals import *
+from .reviews import *
 
 
 def client():

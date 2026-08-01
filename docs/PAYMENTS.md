@@ -14,15 +14,17 @@ Everything below is what it takes to turn real payments on.
 
 ## 1. Apply the database migration
 
-Run `migrations/payments_setup.sql` against the Supabase database (SQL editor or
-`psql`). It is additive and idempotent (safe to re-run). It creates the pricing
-engine (PPP + FX), the Razorpay payment tables, the reserve/confirm/expire RPCs,
-and the dispatcher lease lock. It does **not** touch the existing booking
-lifecycle RPCs.
+The pricing engine (PPP + FX + per-country commission/tax), the payment tables,
+the reserve/confirm/expire RPCs, and the dispatcher lease lock are now folded
+directly into `migrations/testing_db_setup.sql` (and `production_db_setup.sql`),
+each a single self-contained script. Just run the one setup script:
 
 ```
-psql "$SUPABASE_DB_URL" -f migrations/payments_setup.sql
+psql "$SUPABASE_DB_URL" -f migrations/testing_db_setup.sql
 ```
+
+`migrations/payments_setup.sql` is **deprecated** and must not be run separately;
+it is kept only as a reference copy. It is safe to re-run the setup script.
 
 Requires `pgcrypto` in the `extensions` schema (Supabase provides this by
 default; the base migration already enables it).

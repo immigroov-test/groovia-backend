@@ -392,10 +392,11 @@ CREATE TABLE IF NOT EXISTS platform_settings (
 );
 
 INSERT INTO platform_settings (key, value, description) VALUES
-  ('immigroov_commission_pct', '15', 'Default Immigroov commission percentage'),
-  ('immigroov_markup_pct', '10', 'General commission %: added on top of the mentor rate to get the customer price. A per-mentor override (mentors.commission_pct, optional expiry) wins over this. The mentor rate is never shown to customers.'),
+  ('immigroov_commission_pct', '15', 'Default Immigroov commission %; used at service_create to seed services.platform_fee'),
   ('default_currency', 'USD', 'Fallback currency for the platform')
 ON CONFLICT (key) DO NOTHING;
+-- Retire the legacy global-markup setting (superseded by country_pricing + the revenue-split model).
+DELETE FROM platform_settings WHERE key = 'immigroov_markup_pct';
 
 -- ============================================================================
 -- service_questions
@@ -2206,8 +2207,9 @@ RETURNS NUMERIC LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS
 $$;
 GRANT EXECUTE ON FUNCTION ppp_relative(TEXT, TEXT) TO anon, authenticated;
 
--- Per-mentor commission override: the % added to the mentor rate to get the customer price. When
--- set and not expired it WINS over the global immigroov_markup_pct; NULL = use the global.
+-- Per-mentor commission override: the % taken OUT of the mentor's price (revenue-split). When set
+-- and not expired it WINS over the country/DEFAULT commission (effective_platform_fee_pct); NULL =
+-- use the customer country's commission from country_pricing.
 ALTER TABLE mentors ADD COLUMN IF NOT EXISTS commission_pct        NUMERIC;
 ALTER TABLE mentors ADD COLUMN IF NOT EXISTS commission_expires_at TIMESTAMPTZ;
 ALTER TABLE mentors ADD COLUMN IF NOT EXISTS specializations       TEXT[] DEFAULT '{}';
@@ -2261,17 +2263,8 @@ RETURNS TABLE (
 $$;
 GRANT EXECUTE ON FUNCTION mentor_legacy_sessions(UUID) TO anon, authenticated;
 
-CREATE OR REPLACE FUNCTION effective_markup_pct(p_mentor_id UUID)
-RETURNS NUMERIC LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
-  SELECT COALESCE(
-    (SELECT commission_pct FROM mentors
-       WHERE id = p_mentor_id AND commission_pct IS NOT NULL
-         AND (commission_expires_at IS NULL OR commission_expires_at > NOW())),
-    (SELECT value::numeric FROM platform_settings WHERE key = 'immigroov_markup_pct'),
-    10
-  );
-$$;
-GRANT EXECUTE ON FUNCTION effective_markup_pct(UUID) TO anon, authenticated;
+-- Retired: the old global-markup helper. Superseded by effective_platform_fee_pct (revenue-split).
+DROP FUNCTION IF EXISTS effective_markup_pct(UUID);
 
 -- ── FX rate infrastructure (EUR-pivot model, Frankfurter/ECB) ────────────────
 -- One API call refreshes the whole table. get_fx() is the STRICT variant the
@@ -2424,23 +2417,73 @@ CREATE TABLE IF NOT EXISTS booking_pricing (
   calculated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+-- ── Per-country commission + tax ─────────────────────────────────────────────
+-- Revenue-split model: the mentor's rate IS the customer-facing price. platform_fee_pct is
+-- Immigroov's COMMISSION, taken OUT of that price (the mentor nets the rest) - it is NOT added on
+-- top. The customer pays price + tax; the commission is internal and shown to ADMIN ONLY. Both %s
+-- are keyed to the CUSTOMER's country and admin-editable; a live per-mentor commission override
+-- still wins. Default commission 15%, tax 0 except where set (India GST 18%). 'DEFAULT' is the
+-- fallback row used when a country has no explicit entry.
+CREATE TABLE IF NOT EXISTS country_pricing (
+  country_code     TEXT PRIMARY KEY,            -- ISO-2 (uppercase), or 'DEFAULT'
+  platform_fee_pct NUMERIC NOT NULL DEFAULT 15, -- Immigroov commission %, taken OUT of the price
+  tax_pct          NUMERIC NOT NULL DEFAULT 0,
+  tax_label        TEXT,                         -- e.g. 'GST', 'VAT'
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE country_pricing ENABLE ROW LEVEL SECURITY;
+INSERT INTO country_pricing (country_code, platform_fee_pct, tax_pct, tax_label) VALUES
+  ('DEFAULT', 15, 0,  NULL),
+  ('IN',      15, 18, 'GST')
+ON CONFLICT (country_code) DO NOTHING;
+
+CREATE OR REPLACE FUNCTION country_platform_fee_pct(p_cc TEXT)
+RETURNS NUMERIC LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT COALESCE(
+    (SELECT platform_fee_pct FROM country_pricing WHERE country_code = UPPER(COALESCE(p_cc, ''))),
+    (SELECT platform_fee_pct FROM country_pricing WHERE country_code = 'DEFAULT'),
+    15);
+$$;
+GRANT EXECUTE ON FUNCTION country_platform_fee_pct(TEXT) TO anon, authenticated;
+
+CREATE OR REPLACE FUNCTION country_tax_pct(p_cc TEXT)
+RETURNS NUMERIC LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT COALESCE(
+    (SELECT tax_pct FROM country_pricing WHERE country_code = UPPER(COALESCE(p_cc, ''))),
+    (SELECT tax_pct FROM country_pricing WHERE country_code = 'DEFAULT'),
+    0);
+$$;
+GRANT EXECUTE ON FUNCTION country_tax_pct(TEXT) TO anon, authenticated;
+
+-- The commission % for a booking (taken out of the mentor's price): a live per-mentor override
+-- wins (special deals), else the customer country's commission.
+CREATE OR REPLACE FUNCTION effective_platform_fee_pct(p_mentor_id UUID, p_customer_country TEXT)
+RETURNS NUMERIC LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT COALESCE(
+    (SELECT commission_pct FROM mentors
+       WHERE id = p_mentor_id AND commission_pct IS NOT NULL
+         AND (commission_expires_at IS NULL OR commission_expires_at > NOW())),
+    country_platform_fee_pct(p_customer_country));
+$$;
+GRANT EXECUTE ON FUNCTION effective_platform_fee_pct(UUID, TEXT) TO anon, authenticated;
+
 -- The single pricing engine. Returns the canonical BookingPrice as jsonb.
 -- Raises FX_UNAVAILABLE if rates are missing/stale.
--- NOTE: services.platform_fee is an ABSOLUTE commission amount in the mentor's
--- currency (e.g. set_price 2500 -> platform_fee 375 = 15%), converted here to a
--- percentage so it applies to the PPP-adjusted, FX-converted customer gross.
--- Falls back to the admin global pct (immigroov_commission_pct).
+-- REVENUE-SPLIT model: the mentor's localised rate IS the customer's price. Immigroov's commission
+-- (effective_platform_fee_pct) is taken OUT of that price -> the mentor nets the rest. Tax is added
+-- on top for the customer. The commission (fee_pct / fee_amount / net_mentor) is admin-only and
+-- never returned to the customer's browser (see _PUBLIC_QUOTE_FIELDS).
 CREATE OR REPLACE FUNCTION compute_booking_price(p_service_id UUID, p_customer_country TEXT)
 RETURNS JSONB LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
 DECLARE
-  v_pricing_version CONSTANT INT := 3;   -- v3: customer price = mentor rate + global markup (mentor rate hidden)
+  v_pricing_version CONSTANT INT := 4;   -- v4: revenue split - commission taken OUT of the mentor's price
   v_ppp_version     CONSTANT INT := 1;
   v_provider        CONSTANT TEXT := 'frankfurter';
   v_mentor_id UUID; v_set NUMERIC; v_set_offer NUMERIC; v_ment_ccy TEXT; v_is_ppp BOOLEAN;
-  v_prices JSONB; v_markup NUMERIC; v_mentor_country TEXT;
+  v_prices JSONB; v_fee_pct NUMERIC; v_tax_pct NUMERIC; v_mentor_country TEXT;
   v_cust_ccy TEXT; v_ppp NUMERIC := 1; v_source TEXT; v_explicit NUMERIC; v_base NUMERIC; v_mentor_amt NUMERIC;
   v_fx_mc NUMERIC; v_fx_c_inr NUMERIC; v_fx_m_inr NUMERIC;
-  v_gross NUMERIC; v_fee NUMERIC; v_net_cust NUMERIC; v_net_mentor NUMERIC;
+  v_gross NUMERIC; v_fee NUMERIC; v_subtotal NUMERIC; v_tax_amt NUMERIC; v_net_cust NUMERIC; v_net_mentor NUMERIC;
 BEGIN
   SELECT s.mentor_id, s.set_price, s.set_offer_price, COALESCE(s.set_currency, 'USD'), s.is_ppp,
          COALESCE(s.currency_prices, '[]'::jsonb), m.country
@@ -2449,9 +2492,9 @@ BEGIN
   WHERE s.id = p_service_id AND s.is_active AND s.status = 'approved';
   IF v_set IS NULL THEN RAISE EXCEPTION 'Service not available' USING errcode = 'P0001'; END IF;
 
-  -- Commission added on top of the mentor rate to get the customer price: the per-mentor override
-  -- if set + not expired, else the global immigroov_markup_pct.
-  v_markup   := effective_markup_pct(v_mentor_id);
+  -- Commission + tax by the CUSTOMER's country (a live per-mentor commission override wins).
+  v_fee_pct  := effective_platform_fee_pct(v_mentor_id, p_customer_country);
+  v_tax_pct  := country_tax_pct(p_customer_country);
   v_cust_ccy := currency_for_country(p_customer_country);
 
   -- 1. Is there an explicit MENTOR rate for the customer's currency (primary, or a currency_prices row)?
@@ -2481,23 +2524,29 @@ BEGIN
     v_fx_mc      := get_fx(v_ment_ccy, v_cust_ccy);   -- hard-fails FX_UNAVAILABLE (the charge needs it)
     v_base       := COALESCE(v_set_offer, v_set);
     v_mentor_amt := ROUND(v_base * v_ppp * v_fx_mc, 2);
-    v_net_mentor := v_base;                            -- mentor's filled rate (owner pays this manually)
+    v_net_mentor := v_base;                            -- mentor's full rate in mentor ccy; commission applied below
   END IF;
 
-  -- Customer pays the localised mentor rate PLUS the global markup. The mentor rate itself
-  -- (set_price / mentor_amount / net_mentor) is for admin + owner only, never shown to the customer.
-  v_gross    := ROUND(v_mentor_amt * (1 + v_markup / 100.0), 2);
-  v_fee      := ROUND(v_gross - v_mentor_amt, 2);
-  v_net_cust := v_mentor_amt;
+  -- Revenue split: v_mentor_amt (the mentor's localised rate) IS the customer's price. Immigroov's
+  -- commission comes OUT of it; the mentor nets the rest. Tax is added on top for the customer.
+  -- Customer-facing: price (subtotal) + tax = gross. The commission (fee) is internal, admin-only.
+  v_subtotal := v_mentor_amt;                                       -- price the customer sees (pre-tax)
+  v_fee      := ROUND(v_mentor_amt * v_fee_pct / 100.0, 2);         -- Immigroov commission (out of the price)
+  v_tax_amt  := ROUND(v_mentor_amt * v_tax_pct / 100.0, 2);         -- tax on the price
+  v_gross    := ROUND(v_mentor_amt * (1 + v_tax_pct / 100.0), 2);   -- total the customer pays
+  v_net_cust := ROUND(v_mentor_amt - v_fee, 2);                     -- mentor take-home, customer currency
+  v_net_mentor := CASE WHEN v_net_mentor IS NOT NULL                -- mentor take-home, mentor currency
+                       THEN ROUND(v_net_mentor * (1 - v_fee_pct / 100.0), 2) ELSE NULL END;
 
   RETURN jsonb_build_object(
     'pricing_version', v_pricing_version, 'ppp_version', v_ppp_version, 'fx_provider', v_provider,
     'service_id', p_service_id, 'mentor_id', v_mentor_id, 'customer_country', UPPER(COALESCE(p_customer_country, '')),
     'mentor_currency', v_ment_ccy, 'customer_currency', v_cust_ccy,
     'pricing_source', v_source, 'set_price', v_set, 'ppp_multiplier', v_ppp,
-    'markup_pct', v_markup, 'mentor_amount', v_mentor_amt,
+    'markup_pct', v_fee_pct, 'mentor_amount', v_mentor_amt,
     'fx_mentor_customer', v_fx_mc, 'fx_customer_inr', v_fx_c_inr, 'fx_mentor_inr', v_fx_m_inr,
-    'gross_customer', v_gross, 'fee_pct', v_markup, 'fee_amount', v_fee,
+    'gross_customer', v_gross, 'fee_pct', v_fee_pct, 'fee_amount', v_fee,
+    'subtotal', v_subtotal, 'tax_pct', v_tax_pct, 'tax_amount', v_tax_amt,
     'net_customer', v_net_cust, 'net_mentor', v_net_mentor);
 END; $$;
 GRANT EXECUTE ON FUNCTION compute_booking_price(UUID, TEXT) TO anon, authenticated;
@@ -2534,8 +2583,10 @@ BEGIN
     v_from := COALESCE(it->>'from', 'USD');
     v_ppp_on := COALESCE((it->>'is_ppp')::boolean, false);
     v_ppp := CASE WHEN v_ppp_on THEN ppp_relative(p_customer_country, it->>'mentor_country') ELSE 1 END;
-    -- Same commission the charge uses (per-mentor override or global), so display = what's charged.
-    v_mk  := 1 + effective_markup_pct(NULLIF(it->>'mentor_id','')::uuid) / 100.0;
+    -- Revenue split: the mentor's rate IS the customer price; the commission is taken OUT of it, so
+    -- it never changes what the customer sees. Only tax is added on top, so the displayed price
+    -- (mentor rate + tax) equals what's charged.
+    v_mk  := (1 + country_tax_pct(p_customer_country) / 100.0);
     v_rate := get_fx_or_null(v_from, v_cust);
     IF v_rate IS NULL THEN
       key := it->>'key'; you0 := ROUND(v_amt * v_mk, 2); you := ROUND(v_amt * v_ppp * v_mk, 2);
@@ -2865,11 +2916,12 @@ GRANT EXECUTE ON FUNCTION booking_status(UUID) TO anon, authenticated;
 -- Identity: if no candidate_id is given, look up profiles by email but do NOT
 -- create one (profiles is Supabase-Auth-owned). A guest who never signs up has
 -- candidate_id = NULL; their identity lives in candidate_email/candidate_name.
+DROP FUNCTION IF EXISTS reserve_booking(UUID, UUID, UUID, TIMESTAMPTZ, TEXT, TEXT, TEXT, JSONB, UUID, UUID);
 CREATE OR REPLACE FUNCTION reserve_booking(
   p_quote_id UUID, p_mentor_id UUID, p_service_id UUID, p_slot_time TIMESTAMPTZ,
   p_email TEXT, p_name TEXT DEFAULT NULL, p_timezone TEXT DEFAULT 'UTC',
   p_answers JSONB DEFAULT '[]', p_specific_availability_id UUID DEFAULT NULL,
-  p_candidate_id UUID DEFAULT NULL
+  p_candidate_id UUID DEFAULT NULL, p_referral_code TEXT DEFAULT NULL
 ) RETURNS TABLE(booking_id UUID, amount NUMERIC, currency TEXT, hold_expires_at TIMESTAMPTZ)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE
@@ -2877,7 +2929,9 @@ DECLARE
   s JSONB;
   v_booking_id UUID;
   v_hold_expires_at TIMESTAMPTZ := NOW() + INTERVAL '10 minutes';
-  v_gross NUMERIC; v_fee_amount NUMERIC; v_net_customer NUMERIC;
+  v_gross NUMERIC; v_fee_amount NUMERIC; v_net_customer NUMERIC; v_net_mentor NUMERIC;
+  v_discount NUMERIC := 0; v_factor NUMERIC := 1; v_val JSONB;
+  v_code_id UUID; v_aff_id UUID; v_code_norm TEXT; v_amount NUMERIC;
   v_timezone TEXT := CASE WHEN is_valid_timezone(p_timezone) THEN p_timezone ELSE 'UTC' END;
 BEGIN
   IF p_email IS NULL OR POSITION('@' IN p_email) = 0 THEN
@@ -2907,19 +2961,41 @@ BEGIN
   v_gross := (s->>'gross_customer')::numeric;
   v_fee_amount := (s->>'fee_amount')::numeric;
   v_net_customer := (s->>'net_customer')::numeric;
+  v_net_mentor := (s->>'net_mentor')::numeric;
+  v_amount := ROUND((s->>'set_price')::numeric * (s->>'ppp_multiplier')::numeric, 2);
+
+  -- Referral code (optional): validated server-side; its discount scales what the customer pays.
+  -- The commission SPLIT for a referred first session is applied later at completion.
+  IF p_referral_code IS NOT NULL AND LENGTH(TRIM(p_referral_code)) > 0 THEN
+    v_val := validate_referral_code(p_referral_code);
+    IF (v_val->>'valid')::boolean THEN
+      v_discount  := (v_val->>'discount_pct')::numeric;
+      v_code_id   := (v_val->>'code_id')::uuid;
+      v_aff_id    := (v_val->>'affiliate_id')::uuid;
+      v_code_norm := v_val->>'code';
+    END IF;
+  END IF;
+  v_factor := 1 - COALESCE(v_discount, 0) / 100.0;
+  v_gross        := ROUND(v_gross * v_factor, 2);
+  v_fee_amount   := ROUND(v_fee_amount * v_factor, 2);
+  v_net_customer := ROUND(v_net_customer * v_factor, 2);
+  v_amount       := ROUND(v_amount * v_factor, 2);
+  v_net_mentor   := CASE WHEN v_net_mentor IS NOT NULL THEN ROUND(v_net_mentor * v_factor, 2) ELSE NULL END;
 
   BEGIN
     INSERT INTO bookings(
       mentor_id, candidate_id, candidate_email, candidate_name,
       service_id, slot_time, status, attendee_timezone,
       specific_availability_id, source,
-      customer_currency, fx_customer_inr, fx_mentor_inr, payment_hold_expires_at
+      customer_currency, fx_customer_inr, fx_mentor_inr, payment_hold_expires_at,
+      referral_code, referral_code_id, referral_affiliate_id, referral_discount_applied_pct
     ) VALUES (
       p_mentor_id, p_candidate_id, LOWER(p_email), p_name,
       p_service_id, p_slot_time, 'pending', v_timezone,
       p_specific_availability_id, 'direct',
       s->>'customer_currency', NULLIF((s->>'fx_customer_inr')::numeric, 0), NULLIF((s->>'fx_mentor_inr')::numeric, 0),
-      v_hold_expires_at
+      v_hold_expires_at,
+      v_code_norm, v_code_id, v_aff_id, NULLIF(v_discount, 0)
     ) RETURNING id INTO v_booking_id;
   EXCEPTION WHEN exclusion_violation OR unique_violation THEN
     RAISE EXCEPTION 'That time was just taken — please choose another slot' USING errcode = 'P0001';
@@ -2939,9 +3015,9 @@ BEGIN
       customer_currency, mentor_currency, ppp_multiplier, payout_state
     ) VALUES (
       p_mentor_id, v_booking_id,
-      ROUND((s->>'set_price')::numeric * (s->>'ppp_multiplier')::numeric, 2),
+      v_amount,
       v_gross, (s->>'fee_pct')::numeric, v_fee_amount,
-      v_net_customer, (s->>'net_mentor')::numeric, (s->>'fx_mentor_customer')::numeric,
+      v_net_customer, v_net_mentor, (s->>'fx_mentor_customer')::numeric,
       UPPER(s->>'customer_currency'), s->>'mentor_currency', (s->>'ppp_multiplier')::numeric, 'pending'
     );
 
@@ -2954,15 +3030,18 @@ BEGIN
       v_booking_id, (s->>'pricing_version')::int, (s->>'ppp_version')::int, s->>'fx_provider',
       s->>'mentor_currency', s->>'customer_currency', (s->>'set_price')::numeric, (s->>'ppp_multiplier')::numeric,
       (s->>'fx_mentor_customer')::numeric, (s->>'fx_customer_inr')::numeric, (s->>'fx_mentor_inr')::numeric,
-      v_gross, (s->>'fee_pct')::numeric, v_fee_amount, v_net_customer, (s->>'net_mentor')::numeric
+      v_gross, (s->>'fee_pct')::numeric, v_fee_amount, v_net_customer, v_net_mentor
     );
 
   UPDATE pricing_quotes SET used = TRUE, booking_id = v_booking_id WHERE id = p_quote_id;  -- one-time use
+  IF v_code_id IS NOT NULL THEN
+    UPDATE referral_codes SET redemption_count = redemption_count + 1 WHERE id = v_code_id;
+  END IF;
 
   RETURN QUERY SELECT v_booking_id, v_gross, UPPER(s->>'customer_currency'), v_hold_expires_at;
 END;
 $$;
-GRANT EXECUTE ON FUNCTION reserve_booking(UUID, UUID, UUID, TIMESTAMPTZ, TEXT, TEXT, TEXT, JSONB, UUID, UUID) TO anon, authenticated;
+GRANT EXECUTE ON FUNCTION reserve_booking(UUID, UUID, UUID, TIMESTAMPTZ, TEXT, TEXT, TEXT, JSONB, UUID, UUID, TEXT) TO anon, authenticated;
 
 -- Finalize a payment hold into a confirmed booking. Idempotent (a webhook retry
 -- or duplicate confirm is a no-op once confirmed). HOLD_EXPIRED means the caller
@@ -3087,3 +3166,670 @@ END $$;
 --                           'X-Dispatcher-Token','<your DISPATCHER_TOKEN>'),
 --              body    := '{}'::jsonb);
 --          $cron$); end $$;
+
+
+-- ===========================================================================
+-- Referral + Reviews systems (ported from testing_db_setup.sql - keep in sync)
+-- ===========================================================================
+-- ###########################################################################
+-- Referral / affiliate commission system (SCHEMA)
+-- ---------------------------------------------------------------------------
+-- Adapted from the Gautham fork + the referral logic doc. Revenue-split model:
+-- on a referred customer's FIRST completed session the price splits mentor /
+-- Immigroov / promoter (see process_referral_commissions, next section). All of
+-- this is ADDITIVE (new tables, ADD COLUMN IF NOT EXISTS, widened CHECKs).
+--
+-- DIVERGENCE from the source: referral_codes has NO UNIQUE(affiliate_id) - an
+-- affiliate (e.g. a mentor) may hold MANY codes over time (generate new ones,
+-- keep expired ones in their history). cap + expiry are optional (NULL = none).
+-- ###########################################################################
+
+-- ── 1. Affiliate identity ───────────────────────────────────────────────────
+-- profile_id nullable + email fallback so an admin can onboard an affiliate
+-- before they sign up (same pattern as mentors.profile_id + link-on-first-login).
+CREATE TABLE IF NOT EXISTS affiliates (
+  id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  profile_id         UUID UNIQUE REFERENCES profiles(id) ON DELETE SET NULL,
+  mentor_id          UUID REFERENCES mentors(id) ON DELETE SET NULL,
+  type               TEXT NOT NULL CHECK (type IN ('mentor', 'non_mentor')),
+  email              TEXT,                          -- contact for a not-yet-signed-up affiliate
+  display_name       TEXT,
+  payout_details     JSONB,
+  audience_corridor  TEXT,
+  status             TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'frozen')),
+  agreed_terms_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT affiliates_mentor_type_chk CHECK (type <> 'mentor' OR mentor_id IS NOT NULL)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_affiliates_email_lower ON affiliates(LOWER(email)) WHERE email IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS idx_affiliates_mentor ON affiliates(mentor_id) WHERE mentor_id IS NOT NULL;
+ALTER TABLE affiliates ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS affiliates_self_read ON affiliates;
+CREATE POLICY affiliates_self_read ON affiliates FOR SELECT USING (profile_id = auth.uid());
+
+-- Slug-based /r/<slug> link (link-attribution phase). One per affiliate.
+CREATE TABLE IF NOT EXISTS affiliate_links (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  affiliate_id      UUID NOT NULL UNIQUE REFERENCES affiliates(id) ON DELETE CASCADE,
+  slug              TEXT NOT NULL UNIQUE,
+  is_house_channel  BOOLEAN NOT NULL DEFAULT FALSE,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE affiliate_links ENABLE ROW LEVEL SECURITY;
+
+-- Discount/attribution codes. MANY per affiliate (history + regenerate).
+CREATE TABLE IF NOT EXISTS referral_codes (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  affiliate_id      UUID NOT NULL REFERENCES affiliates(id) ON DELETE CASCADE,
+  code_string       TEXT NOT NULL UNIQUE,
+  discount_pct      NUMERIC NOT NULL DEFAULT 0 CHECK (discount_pct >= 0 AND discount_pct <= 100),
+  redemption_cap    INT,                            -- NULL = unlimited
+  redemption_count  INT NOT NULL DEFAULT 0,
+  expires_at        TIMESTAMPTZ,                    -- NULL = no expiry
+  is_active         BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_referral_codes_affiliate ON referral_codes(affiliate_id, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_referral_codes_string_lower ON referral_codes(LOWER(code_string));
+ALTER TABLE referral_codes ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS referral_codes_self_read ON referral_codes;
+CREATE POLICY referral_codes_self_read ON referral_codes FOR SELECT USING (
+  affiliate_id IN (SELECT id FROM affiliates WHERE profile_id = auth.uid())
+);
+
+-- ── 2. Attribution pipeline ─────────────────────────────────────────────────
+CREATE TABLE IF NOT EXISTS referral_click_events (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  affiliate_id  UUID NOT NULL REFERENCES affiliates(id) ON DELETE CASCADE,
+  session_token TEXT NOT NULL,
+  clicked_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_referral_click_events_session ON referral_click_events(session_token, clicked_at DESC);
+ALTER TABLE referral_click_events ENABLE ROW LEVEL SECURITY;
+
+-- Durable per-customer-email attribution (60-day window; code wins over link).
+CREATE TABLE IF NOT EXISTS attribution_records (
+  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  email_hash       TEXT NOT NULL UNIQUE,
+  affiliate_id     UUID REFERENCES affiliates(id) ON DELETE SET NULL,
+  referral_code_id UUID REFERENCES referral_codes(id) ON DELETE SET NULL,
+  source_type      TEXT NOT NULL CHECK (source_type IN ('link', 'code')),
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  expires_at       TIMESTAMPTZ NOT NULL,
+  frozen           BOOLEAN NOT NULL DEFAULT FALSE,   -- paused while a no-show rebooking decision is pending
+  frozen_at        TIMESTAMPTZ,
+  updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE attribution_records ENABLE ROW LEVEL SECURITY;   -- internal (RPC-only), no select policy
+
+-- ── 3. Commission ledger + payout batching ──────────────────────────────────
+-- One row per referred first-session, written at completion. Enriched with
+-- gross/discount/currency so admin + payout views need no extra joins.
+-- commission_amount = the promoter's cut in the customer currency;
+-- commission_amount_inr = the same normalised to INR (the payout basis).
+CREATE TABLE IF NOT EXISTS commission_ledger (
+  id                     UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  booking_id             UUID NOT NULL UNIQUE REFERENCES bookings(id) ON DELETE CASCADE,
+  session_completed_at   TIMESTAMPTZ NOT NULL,
+  mentor_id              UUID NOT NULL REFERENCES mentors(id) ON DELETE CASCADE,
+  affiliate_id           UUID NOT NULL REFERENCES affiliates(id) ON DELETE CASCADE,
+  referral_code          TEXT,
+  split_snapshot         JSONB NOT NULL,            -- {mentor_pct, immigroov_pct, promoter_pct}
+  gross_customer         NUMERIC(12,2),             -- what the customer paid (post-discount, pre-tax)
+  customer_currency      TEXT,
+  discount_pct           NUMERIC DEFAULT 0,
+  commission_amount      NUMERIC(12,2),             -- promoter cut, customer currency
+  commission_amount_inr  NUMERIC(12,2) NOT NULL,    -- promoter cut, normalised to INR (payout basis)
+  status                 TEXT NOT NULL DEFAULT 'pending_review'
+                           CHECK (status IN ('pending_review', 'approved', 'paid', 'rejected', 'void')),
+  payout_batch_id        UUID,                      -- FK added below, after payout_batches exists
+  notified_at            TIMESTAMPTZ,               -- claim marker for the "commission approved" email
+  created_at             TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_commission_ledger_affiliate ON commission_ledger(affiliate_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_commission_ledger_status ON commission_ledger(status);
+ALTER TABLE commission_ledger ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS commission_ledger_self_read ON commission_ledger;
+CREATE POLICY commission_ledger_self_read ON commission_ledger FOR SELECT USING (
+  affiliate_id IN (SELECT id FROM affiliates WHERE profile_id = auth.uid())
+);
+
+CREATE TABLE IF NOT EXISTS payout_batches (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  batch_date  DATE NOT NULL UNIQUE,
+  status      TEXT NOT NULL DEFAULT 'preview' CHECK (status IN ('preview', 'finalized', 'paid')),
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE payout_batches ENABLE ROW LEVEL SECURITY;
+
+DO $$ BEGIN
+  ALTER TABLE commission_ledger
+    ADD CONSTRAINT commission_ledger_payout_batch_fkey
+    FOREIGN KEY (payout_batch_id) REFERENCES payout_batches(id) ON DELETE SET NULL;
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+
+-- ── 4. Fraud review + admin audit trail ─────────────────────────────────────
+CREATE TABLE IF NOT EXISTS fraud_flags (
+  id                          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  affiliate_id                UUID NOT NULL REFERENCES affiliates(id) ON DELETE CASCADE,
+  booking_id                  UUID REFERENCES bookings(id) ON DELETE SET NULL,
+  commission_ledger_id        UUID REFERENCES commission_ledger(id) ON DELETE SET NULL,
+  vector_type                 TEXT NOT NULL CHECK (vector_type IN (
+                                 'duplicate_person', 'volume_spike', 'geography_mismatch',
+                                 'code_speed', 'cancel_rebook_cycling', 'mentor_steering', 'chargeback'
+                               )),
+  status                      TEXT NOT NULL DEFAULT 'escalated' CHECK (status IN ('auto_cleared', 'escalated', 'resolved')),
+  reviewer                    UUID REFERENCES profiles(id),
+  decision                    TEXT CHECK (decision IN ('approve', 'approve_with_note', 'reject_and_hold')),
+  note                        TEXT,
+  created_at                  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  resolved_at                 TIMESTAMPTZ,
+  escalated_to_cofounder_at   TIMESTAMPTZ
+);
+ALTER TABLE fraud_flags ENABLE ROW LEVEL SECURITY;   -- admin RPCs only, no select policy
+
+CREATE TABLE IF NOT EXISTS referral_admin_actions (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  admin_id    UUID REFERENCES profiles(id),
+  action      TEXT NOT NULL,
+  target_type TEXT NOT NULL,
+  target_id   UUID NOT NULL,
+  note        TEXT NOT NULL,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+ALTER TABLE referral_admin_actions ENABLE ROW LEVEL SECURITY;
+
+-- ── 5. Booking + ledger schema additions ────────────────────────────────────
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS referral_session_token        TEXT;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS referral_code                 TEXT;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS referral_code_id              UUID REFERENCES referral_codes(id) ON DELETE SET NULL;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS referral_affiliate_id         UUID REFERENCES affiliates(id) ON DELETE SET NULL;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS referral_discount_applied_pct NUMERIC;
+
+-- booking_ledger gains a 'promoter' party + a 'commission' kind for affiliate entries.
+ALTER TABLE booking_ledger DROP CONSTRAINT IF EXISTS booking_ledger_party_check;
+ALTER TABLE booking_ledger ADD CONSTRAINT booking_ledger_party_check
+  CHECK (party IN ('customer', 'mentor', 'platform', 'promoter'));
+ALTER TABLE booking_ledger DROP CONSTRAINT IF EXISTS booking_ledger_kind_check;
+ALTER TABLE booking_ledger ADD CONSTRAINT booking_ledger_kind_check
+  CHECK (kind IN ('penalty', 'refund', 'credit', 'charge', 'commission'));
+
+-- ── 6. Platform settings (all tunable) ──────────────────────────────────────
+INSERT INTO platform_settings (key, value, description) VALUES
+  ('referral_tier_starter_max', '4', 'Non-mentor affiliate: max referrals/month to stay Starter tier'),
+  ('referral_tier_growth_max', '14', 'Non-mentor affiliate: max referrals/month to stay Growth tier (above = Partner)'),
+  ('referral_volume_spike_autoapprove_multiplier', '3', 'Auto-approve today''s commission count up to this multiple of the 30-day daily average'),
+  ('referral_volume_spike_escalate_multiplier', '5', 'Escalate for manual review above this multiple of the 30-day daily average'),
+  ('referral_code_redemption_speed_minutes', '30', 'Minutes; a code used faster than this is a potential speed-fraud signal'),
+  ('referral_manual_review_escalation_days', '5', 'Working days a flagged case can sit before auto-escalating to the co-founder'),
+  ('referral_payout_min_working_days', '5', 'Minimum working days after session completion before a commission is payout-eligible'),
+  ('referral_attribution_days', '60', 'Days a referral attribution stays valid after the click/code')
+ON CONFLICT (key) DO NOTHING;
+
+-- ###########################################################################
+-- Referral system (FUNCTIONS - phase 1: codes + checkout validation)
+-- The completion-time commission split (process_referral_commissions) and the
+-- reserve-time discount wiring are added in the next section.
+-- ###########################################################################
+
+-- Ensure a mentor has an affiliate row (type='mentor'); returns its id.
+CREATE OR REPLACE FUNCTION ensure_mentor_affiliate(p_mentor_id UUID)
+RETURNS UUID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_aff UUID;
+BEGIN
+  SELECT id INTO v_aff FROM affiliates WHERE mentor_id = p_mentor_id;
+  IF v_aff IS NULL THEN
+    INSERT INTO affiliates (profile_id, mentor_id, type, email, display_name)
+    SELECT m.profile_id, m.id, 'mentor', m.email, m.display_name FROM mentors m WHERE m.id = p_mentor_id
+    RETURNING id INTO v_aff;
+  END IF;
+  RETURN v_aff;
+END; $$;
+GRANT EXECUTE ON FUNCTION ensure_mentor_affiliate(UUID) TO authenticated;
+
+-- Mentor generates a referral code. Auto-creates their affiliate row. Returns the code_string.
+-- p_code optional (a random 8-char code is generated when blank); cap/expiry optional (NULL = none).
+CREATE OR REPLACE FUNCTION generate_referral_code(
+  p_mentor_id UUID,
+  p_discount_pct NUMERIC DEFAULT 0,
+  p_redemption_cap INT DEFAULT NULL,
+  p_expires_at TIMESTAMPTZ DEFAULT NULL,
+  p_code TEXT DEFAULT NULL
+) RETURNS TEXT LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_aff UUID; v_code TEXT; v_try INT := 0;
+BEGIN
+  IF COALESCE(p_discount_pct, 0) < 0 OR COALESCE(p_discount_pct, 0) > 100 THEN
+    RAISE EXCEPTION 'discount_pct must be between 0 and 100' USING errcode = 'P0001';
+  END IF;
+  v_aff := ensure_mentor_affiliate(p_mentor_id);
+  IF v_aff IS NULL THEN RAISE EXCEPTION 'Mentor not found' USING errcode = 'P0001'; END IF;
+
+  IF p_code IS NOT NULL AND LENGTH(REGEXP_REPLACE(TRIM(p_code), '[^A-Za-z0-9]', '', 'g')) >= 4 THEN
+    v_code := UPPER(REGEXP_REPLACE(TRIM(p_code), '[^A-Za-z0-9]', '', 'g'));
+    IF EXISTS (SELECT 1 FROM referral_codes WHERE LOWER(code_string) = LOWER(v_code)) THEN
+      RAISE EXCEPTION 'That code is already taken - pick another' USING errcode = 'P0001';
+    END IF;
+  ELSE
+    LOOP
+      v_code := UPPER(SUBSTRING(MD5(random()::text || clock_timestamp()::text) FROM 1 FOR 8));
+      EXIT WHEN NOT EXISTS (SELECT 1 FROM referral_codes WHERE LOWER(code_string) = LOWER(v_code));
+      v_try := v_try + 1;
+      IF v_try > 25 THEN RAISE EXCEPTION 'Could not generate a unique code, please retry'; END IF;
+    END LOOP;
+  END IF;
+
+  INSERT INTO referral_codes (affiliate_id, code_string, discount_pct, redemption_cap, expires_at)
+    VALUES (v_aff, v_code, COALESCE(p_discount_pct, 0), p_redemption_cap, p_expires_at);
+  RETURN v_code;
+END; $$;
+GRANT EXECUTE ON FUNCTION generate_referral_code(UUID, NUMERIC, INT, TIMESTAMPTZ, TEXT) TO authenticated;
+
+-- Validate a code at checkout (read-only). Returns {valid, reason, discount_pct, code_id,
+-- affiliate_id, code}. The discount % the customer sees comes from HERE (backend-checked), never
+-- from the client. A booking still re-checks + records the code at reserve time.
+CREATE OR REPLACE FUNCTION validate_referral_code(p_code TEXT)
+RETURNS JSONB LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+DECLARE c referral_codes; v_aff affiliates;
+BEGIN
+  IF p_code IS NULL OR LENGTH(TRIM(p_code)) = 0 THEN
+    RETURN jsonb_build_object('valid', false, 'reason', 'empty', 'discount_pct', 0);
+  END IF;
+  SELECT * INTO c FROM referral_codes WHERE LOWER(code_string) = LOWER(TRIM(p_code));
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object('valid', false, 'reason', 'not_found', 'discount_pct', 0);
+  END IF;
+  IF NOT c.is_active THEN
+    RETURN jsonb_build_object('valid', false, 'reason', 'inactive', 'discount_pct', 0);
+  END IF;
+  IF c.expires_at IS NOT NULL AND c.expires_at < NOW() THEN
+    RETURN jsonb_build_object('valid', false, 'reason', 'expired', 'discount_pct', 0);
+  END IF;
+  IF c.redemption_cap IS NOT NULL AND c.redemption_count >= c.redemption_cap THEN
+    RETURN jsonb_build_object('valid', false, 'reason', 'cap_reached', 'discount_pct', 0);
+  END IF;
+  SELECT * INTO v_aff FROM affiliates WHERE id = c.affiliate_id;
+  IF v_aff.status <> 'active' THEN
+    RETURN jsonb_build_object('valid', false, 'reason', 'affiliate_inactive', 'discount_pct', 0);
+  END IF;
+  RETURN jsonb_build_object(
+    'valid', true, 'reason', 'ok', 'discount_pct', c.discount_pct,
+    'code_id', c.id, 'affiliate_id', c.affiliate_id, 'code', c.code_string);
+END; $$;
+GRANT EXECUTE ON FUNCTION validate_referral_code(TEXT) TO anon, authenticated;
+
+-- Non-mentor affiliate tier by this-month approved/paid referral count. Mentors split flat
+-- (self 90/10/0, peer 70/20/10), so this is only consulted for type='non_mentor'.
+CREATE OR REPLACE FUNCTION current_affiliate_tier(p_affiliate_id UUID)
+RETURNS TEXT LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_count INT; v_starter INT; v_growth INT;
+BEGIN
+  v_starter := COALESCE((SELECT value::int FROM platform_settings WHERE key = 'referral_tier_starter_max'), 4);
+  v_growth  := COALESCE((SELECT value::int FROM platform_settings WHERE key = 'referral_tier_growth_max'), 14);
+  SELECT COUNT(*) INTO v_count FROM commission_ledger
+    WHERE affiliate_id = p_affiliate_id
+      AND status IN ('approved', 'paid')
+      AND session_completed_at >= date_trunc('month', NOW());
+  IF v_count > v_growth THEN RETURN 'partner';
+  ELSIF v_count > v_starter THEN RETURN 'growth';
+  ELSE RETURN 'starter'; END IF;
+END; $$;
+GRANT EXECUTE ON FUNCTION current_affiliate_tier(UUID) TO authenticated;
+
+-- ###########################################################################
+-- Referral system (FUNCTIONS - phase 2: completion split + read views)
+-- ###########################################################################
+
+-- Completion-time commission. For each newly-completed referred booking that is the customer's
+-- FIRST completed session, write the commission_ledger row + the promoter's booking_ledger entry,
+-- and adjust the mentor payout to the referred split (doc: self 90/10/0, mentor-to-mentor 70/20/10,
+-- influencer 70 + tiered). Idempotent: skips bookings that already have a commission_ledger row.
+CREATE OR REPLACE FUNCTION process_referral_commissions()
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  r RECORD; v_aff affiliates;
+  v_price NUMERIC; v_ccy TEXT; v_fx_c_inr NUMERIC; v_fx_mc NUMERIC;
+  v_mentor_pct INT; v_immigroov_pct INT; v_promoter_pct INT; v_tier TEXT;
+  v_prev BOOLEAN; v_comm NUMERIC; v_comm_inr NUMERIC;
+BEGIN
+  FOR r IN
+    SELECT b.*, bp.net_customer AS bp_net, bp.fee_amount AS bp_fee, bp.customer_currency AS bp_ccy,
+           bp.fx_mentor_customer AS bp_fxmc
+    FROM bookings b
+    JOIN booking_pricing bp ON bp.booking_id = b.id
+    WHERE b.status = 'completed'
+      AND b.referral_affiliate_id IS NOT NULL
+      AND NOT EXISTS (SELECT 1 FROM commission_ledger cl WHERE cl.booking_id = b.id)
+  LOOP
+    IF r.candidate_email IS NULL THEN CONTINUE; END IF;
+    SELECT * INTO v_aff FROM affiliates WHERE id = r.referral_affiliate_id;
+    IF NOT FOUND OR v_aff.status <> 'active' THEN CONTINUE; END IF;
+
+    -- Referral commission applies to the customer's lifetime FIRST completed session only.
+    SELECT EXISTS(
+      SELECT 1 FROM bookings b2
+      WHERE b2.id <> r.id AND b2.status = 'completed'
+        AND LOWER(b2.candidate_email) = LOWER(r.candidate_email)
+        AND b2.slot_time < r.slot_time
+    ) INTO v_prev;
+    IF v_prev THEN CONTINUE; END IF;
+
+    v_price    := ROUND(COALESCE(r.bp_net, 0) + COALESCE(r.bp_fee, 0), 2);  -- pre-tax, discounted price (customer ccy)
+    v_ccy      := COALESCE(r.bp_ccy, r.customer_currency);
+    v_fx_c_inr := COALESCE(r.fx_customer_inr, 1);
+    v_fx_mc    := NULLIF(r.bp_fxmc, 0);
+
+    IF v_aff.mentor_id = r.mentor_id THEN
+      v_mentor_pct := 90; v_immigroov_pct := 10; v_promoter_pct := 0;    -- mentor referred their own client
+    ELSIF v_aff.type = 'mentor' THEN
+      v_mentor_pct := 70; v_immigroov_pct := 20; v_promoter_pct := 10;   -- mentor-to-mentor (Track A)
+    ELSE
+      v_tier := current_affiliate_tier(v_aff.id);                        -- influencer (Track B)
+      v_mentor_pct := 70;
+      CASE v_tier
+        WHEN 'growth'  THEN v_immigroov_pct := 19; v_promoter_pct := 11;
+        WHEN 'partner' THEN v_immigroov_pct := 15; v_promoter_pct := 15;
+        ELSE                v_immigroov_pct := 22; v_promoter_pct := 8;   -- starter
+      END CASE;
+    END IF;
+
+    v_comm     := ROUND(v_price * v_promoter_pct / 100.0, 2);            -- promoter cut, customer ccy
+    v_comm_inr := ROUND(v_price * v_fx_c_inr * v_promoter_pct / 100.0, 2);
+
+    INSERT INTO commission_ledger (
+      booking_id, session_completed_at, mentor_id, affiliate_id, referral_code, split_snapshot,
+      gross_customer, customer_currency, discount_pct, commission_amount, commission_amount_inr, status
+    ) VALUES (
+      r.id, COALESCE(r.slot_end, NOW()), r.mentor_id, v_aff.id, r.referral_code,
+      jsonb_build_object('mentor_pct', v_mentor_pct, 'immigroov_pct', v_immigroov_pct, 'promoter_pct', v_promoter_pct),
+      v_price, v_ccy, COALESCE(r.referral_discount_applied_pct, 0), v_comm, v_comm_inr, 'pending_review'
+    );
+
+    IF v_promoter_pct > 0 THEN
+      PERFORM add_ledger(r.id, 'promoter', 'commission', v_comm, v_promoter_pct,
+                         'Referral commission - affiliate ' || v_aff.id::text);
+    END IF;
+
+    -- Adjust the mentor payout to the referred split.
+    UPDATE mentor_payouts SET
+      net_amount_customer_currency = ROUND(v_price * v_mentor_pct / 100.0, 2),
+      net_amount_mentor_currency   = CASE WHEN v_fx_mc IS NOT NULL
+                                          THEN ROUND(v_price * v_mentor_pct / 100.0 / v_fx_mc, 2)
+                                          ELSE net_amount_mentor_currency END
+    WHERE booking_id = r.id;
+  END LOOP;
+END; $$;
+GRANT EXECUTE ON FUNCTION process_referral_commissions() TO service_role;
+
+-- Guarded cron: process referral commissions every 15 min (no-op if pg_cron absent).
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron') THEN
+    IF EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'referral-commissions') THEN
+      PERFORM cron.unschedule('referral-commissions');
+    END IF;
+    PERFORM cron.schedule('referral-commissions', '*/15 * * * *', 'SELECT process_referral_commissions()');
+  ELSE
+    RAISE NOTICE 'pg_cron not enabled - skipping referral-commissions schedule.';
+  END IF;
+END $$;
+
+-- Admin: one row per affiliate (mentor or non-mentor) with code + referral + money aggregates.
+CREATE OR REPLACE FUNCTION admin_referrals_overview()
+RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT COALESCE(jsonb_agg(row ORDER BY (row->>'referrals')::int DESC, (row->>'redemptions')::int DESC), '[]'::jsonb)
+  FROM (
+    SELECT jsonb_build_object(
+      'affiliate_id', a.id, 'type', a.type,
+      'name', COALESCE(a.display_name, m.display_name, a.email, 'Affiliate'),
+      'mentor_id', a.mentor_id, 'status', a.status,
+      'codes', (SELECT COUNT(*) FROM referral_codes rc WHERE rc.affiliate_id = a.id),
+      'active_codes', (SELECT COUNT(*) FROM referral_codes rc WHERE rc.affiliate_id = a.id
+                         AND rc.is_active AND (rc.expires_at IS NULL OR rc.expires_at > NOW())),
+      'redemptions', COALESCE((SELECT SUM(rc.redemption_count) FROM referral_codes rc WHERE rc.affiliate_id = a.id), 0),
+      'referrals', (SELECT COUNT(*) FROM commission_ledger cl WHERE cl.affiliate_id = a.id),
+      'commission_inr', COALESCE((SELECT SUM(cl.commission_amount_inr) FROM commission_ledger cl
+                                    WHERE cl.affiliate_id = a.id AND cl.status IN ('approved','paid')), 0),
+      'commission_pending_inr', COALESCE((SELECT SUM(cl.commission_amount_inr) FROM commission_ledger cl
+                                    WHERE cl.affiliate_id = a.id AND cl.status = 'pending_review'), 0)
+    ) AS row
+    FROM affiliates a
+    LEFT JOIN mentors m ON m.id = a.mentor_id
+  ) t;
+$$;
+GRANT EXECUTE ON FUNCTION admin_referrals_overview() TO service_role, authenticated;
+
+-- Admin drill-in / payouts: one row per referred (commission) booking - who gave the code, the
+-- customer, service/booking, discount, split, and the final amount + commission.
+CREATE OR REPLACE FUNCTION admin_referral_bookings(p_affiliate_id UUID DEFAULT NULL)
+RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT COALESCE(jsonb_agg(row ORDER BY (row->>'completed_at') DESC), '[]'::jsonb)
+  FROM (
+    SELECT jsonb_build_object(
+      'ledger_id', cl.id, 'booking_id', cl.booking_id, 'completed_at', cl.session_completed_at,
+      'affiliate_id', cl.affiliate_id,
+      'affiliate_name', COALESCE(a.display_name, m2.display_name, a.email),
+      'referral_code', cl.referral_code,
+      'customer_email', b.candidate_email, 'customer_name', b.candidate_name,
+      'service_id', b.service_id, 'mentor_id', cl.mentor_id, 'mentor_name', m.display_name,
+      'discount_pct', cl.discount_pct, 'gross_customer', cl.gross_customer,
+      'customer_currency', cl.customer_currency, 'split', cl.split_snapshot,
+      'commission_amount', cl.commission_amount, 'commission_amount_inr', cl.commission_amount_inr,
+      'status', cl.status
+    ) AS row
+    FROM commission_ledger cl
+    JOIN bookings b ON b.id = cl.booking_id
+    JOIN mentors m ON m.id = cl.mentor_id
+    JOIN affiliates a ON a.id = cl.affiliate_id
+    LEFT JOIN mentors m2 ON m2.id = a.mentor_id
+    WHERE p_affiliate_id IS NULL OR cl.affiliate_id = p_affiliate_id
+  ) t;
+$$;
+GRANT EXECUTE ON FUNCTION admin_referral_bookings(UUID) TO service_role, authenticated;
+
+-- Mentor dashboard: this mentor's own affiliate codes + promoter earnings.
+CREATE OR REPLACE FUNCTION mentor_referral_overview(p_mentor_id UUID)
+RETURNS JSONB LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_aff UUID; v_result JSONB;
+BEGIN
+  SELECT id INTO v_aff FROM affiliates WHERE mentor_id = p_mentor_id;
+  IF v_aff IS NULL THEN
+    RETURN jsonb_build_object('affiliate_id', NULL, 'codes', '[]'::jsonb,
+      'referrals', 0, 'earnings_inr', 0, 'pending_inr', 0);
+  END IF;
+  SELECT jsonb_build_object(
+    'affiliate_id', v_aff,
+    'codes', COALESCE((
+      SELECT jsonb_agg(jsonb_build_object(
+        'id', rc.id, 'code', rc.code_string, 'discount_pct', rc.discount_pct,
+        'redemption_cap', rc.redemption_cap, 'redemption_count', rc.redemption_count,
+        'expires_at', rc.expires_at, 'is_active', rc.is_active,
+        'expired', (rc.expires_at IS NOT NULL AND rc.expires_at < NOW()),
+        'created_at', rc.created_at
+      ) ORDER BY rc.created_at DESC) FROM referral_codes rc WHERE rc.affiliate_id = v_aff), '[]'::jsonb),
+    'referrals', (SELECT COUNT(*) FROM commission_ledger cl WHERE cl.affiliate_id = v_aff),
+    'earnings_inr', COALESCE((SELECT SUM(commission_amount_inr) FROM commission_ledger
+                                WHERE affiliate_id = v_aff AND status IN ('approved','paid')), 0),
+    'pending_inr', COALESCE((SELECT SUM(commission_amount_inr) FROM commission_ledger
+                                WHERE affiliate_id = v_aff AND status = 'pending_review'), 0)
+  ) INTO v_result;
+  RETURN v_result;
+END; $$;
+GRANT EXECUTE ON FUNCTION mentor_referral_overview(UUID) TO authenticated;
+
+-- Admin: approve or reject a pending commission (simple review; the full fraud queue is a later phase).
+CREATE OR REPLACE FUNCTION admin_set_commission_status(p_ledger_id UUID, p_status TEXT, p_admin UUID DEFAULT NULL, p_note TEXT DEFAULT NULL)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF p_status NOT IN ('approved', 'rejected', 'paid', 'void') THEN
+    RAISE EXCEPTION 'Invalid status %', p_status USING errcode = 'P0001';
+  END IF;
+  UPDATE commission_ledger SET status = p_status,
+     notified_at = CASE WHEN p_status = 'approved' THEN NULL ELSE notified_at END
+   WHERE id = p_ledger_id;
+  INSERT INTO referral_admin_actions (admin_id, action, target_type, target_id, note)
+    VALUES (p_admin, 'commission_' || p_status, 'commission_ledger', p_ledger_id, COALESCE(p_note, ''));
+END; $$;
+GRANT EXECUTE ON FUNCTION admin_set_commission_status(UUID, TEXT, UUID, TEXT) TO service_role, authenticated;
+
+-- ###########################################################################
+-- Reviews: mentee -> mentor post-session ratings + written reviews + moderation.
+-- One review per completed booking (editable within the review window; editing
+-- re-enters moderation). PRE-MODERATION: a review is 'pending' until an admin
+-- publishes it; only 'published' reviews are public + counted in the mentor's
+-- avg_rating / review_count. Optional sub-ratings (knowledge/communication/help).
+-- ###########################################################################
+
+CREATE TABLE IF NOT EXISTS reviews (
+  id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  booking_id           UUID NOT NULL UNIQUE REFERENCES bookings(id) ON DELETE CASCADE,
+  mentor_id            UUID NOT NULL REFERENCES mentors(id) ON DELETE CASCADE,
+  reviewer_id          UUID REFERENCES profiles(id) ON DELETE SET NULL,
+  reviewer_name        TEXT,                                    -- first-name snapshot for public display
+  rating               INT NOT NULL CHECK (rating BETWEEN 1 AND 5),
+  rating_knowledge     INT CHECK (rating_knowledge BETWEEN 1 AND 5),
+  rating_communication INT CHECK (rating_communication BETWEEN 1 AND 5),
+  rating_helpfulness   INT CHECK (rating_helpfulness BETWEEN 1 AND 5),
+  body                 TEXT,                                    -- sanitized rich-text HTML
+  status               TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending','published','rejected')),
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at           TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+-- Idempotent upgrades if reviews was created by the earlier (v1) version.
+ALTER TABLE reviews ADD COLUMN IF NOT EXISTS rating_knowledge     INT;
+ALTER TABLE reviews ADD COLUMN IF NOT EXISTS rating_communication INT;
+ALTER TABLE reviews ADD COLUMN IF NOT EXISTS rating_helpfulness   INT;
+ALTER TABLE reviews ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'pending';
+ALTER TABLE reviews DROP COLUMN IF EXISTS is_hidden;   -- retired: superseded by status
+DO $$ BEGIN
+  ALTER TABLE reviews ADD CONSTRAINT reviews_status_chk CHECK (status IN ('pending','published','rejected'));
+EXCEPTION WHEN duplicate_object THEN NULL; END $$;
+CREATE INDEX IF NOT EXISTS idx_reviews_mentor ON reviews(mentor_id, created_at DESC);
+ALTER TABLE reviews ENABLE ROW LEVEL SECURITY;
+DROP POLICY IF EXISTS reviews_public_read ON reviews;
+CREATE POLICY reviews_public_read ON reviews FOR SELECT USING (status = 'published');
+
+INSERT INTO platform_settings (key, value, description) VALUES
+  ('review_window_days', '14', 'Days after a session completes during which the mentee can leave/edit a review')
+ON CONFLICT (key) DO NOTHING;
+
+-- Recompute a mentor's cached avg_rating + review_count from their PUBLISHED reviews.
+CREATE OR REPLACE FUNCTION recompute_mentor_rating(p_mentor_id UUID)
+RETURNS VOID LANGUAGE sql SECURITY DEFINER SET search_path = public AS $$
+  UPDATE mentors m SET
+    avg_rating   = COALESCE((SELECT ROUND(AVG(rating)::numeric, 2) FROM reviews r WHERE r.mentor_id = p_mentor_id AND r.status = 'published'), 0),
+    review_count = (SELECT COUNT(*) FROM reviews r WHERE r.mentor_id = p_mentor_id AND r.status = 'published')
+  WHERE m.id = p_mentor_id;
+$$;
+GRANT EXECUTE ON FUNCTION recompute_mentor_rating(UUID) TO service_role, authenticated;
+
+-- Mentee submits/edits their review for a COMPLETED session they attended, within the review window.
+-- Editing re-enters moderation (status -> pending). One per booking.
+DROP FUNCTION IF EXISTS submit_review(UUID, UUID, INT, TEXT);
+CREATE OR REPLACE FUNCTION submit_review(
+  p_booking_id UUID, p_reviewer UUID, p_rating INT, p_body TEXT DEFAULT NULL,
+  p_knowledge INT DEFAULT NULL, p_communication INT DEFAULT NULL, p_helpfulness INT DEFAULT NULL
+) RETURNS UUID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE b bookings; v_name TEXT; v_id UUID; v_window INT; v_end TIMESTAMPTZ;
+BEGIN
+  IF p_rating < 1 OR p_rating > 5 THEN RAISE EXCEPTION 'Rating must be between 1 and 5' USING errcode = 'P0001'; END IF;
+  SELECT * INTO b FROM bookings WHERE id = p_booking_id;
+  IF NOT FOUND THEN RAISE EXCEPTION 'Booking not found' USING errcode = 'P0001'; END IF;
+  IF b.candidate_id IS NULL OR b.candidate_id <> p_reviewer THEN
+    RAISE EXCEPTION 'Only the mentee on this booking can review it' USING errcode = 'P0001';
+  END IF;
+  IF b.status <> 'completed' THEN
+    RAISE EXCEPTION 'You can review only after the session is completed' USING errcode = 'P0001';
+  END IF;
+  v_window := COALESCE((SELECT value::int FROM platform_settings WHERE key = 'review_window_days'), 14);
+  v_end    := COALESCE(b.slot_end, b.slot_time, NOW());
+  IF NOW() > v_end + MAKE_INTERVAL(days => v_window) THEN
+    RAISE EXCEPTION 'The review window for this session has closed' USING errcode = 'P0001';
+  END IF;
+  SELECT split_part(COALESCE(NULLIF(TRIM(display_name), ''), NULLIF(TRIM(full_name), ''), 'Member'), ' ', 1)
+    INTO v_name FROM profiles WHERE id = p_reviewer;
+  INSERT INTO reviews (booking_id, mentor_id, reviewer_id, reviewer_name, rating,
+                       rating_knowledge, rating_communication, rating_helpfulness, body, status)
+    VALUES (p_booking_id, b.mentor_id, p_reviewer, v_name, p_rating,
+            p_knowledge, p_communication, p_helpfulness, NULLIF(TRIM(p_body), ''), 'pending')
+  ON CONFLICT (booking_id) DO UPDATE
+    SET rating = EXCLUDED.rating, rating_knowledge = EXCLUDED.rating_knowledge,
+        rating_communication = EXCLUDED.rating_communication, rating_helpfulness = EXCLUDED.rating_helpfulness,
+        body = EXCLUDED.body, status = 'pending', updated_at = NOW()
+  RETURNING id INTO v_id;
+  PERFORM recompute_mentor_rating(b.mentor_id);   -- an edit drops a previously-published review until re-approved
+  RETURN v_id;
+END; $$;
+GRANT EXECUTE ON FUNCTION submit_review(UUID, UUID, INT, TEXT, INT, INT, INT) TO authenticated;
+
+-- Public: a mentor's PUBLISHED reviews (+ sub-ratings). Admin passes p_include_hidden := true for all.
+CREATE OR REPLACE FUNCTION mentor_reviews(p_mentor_id UUID, p_include_hidden BOOLEAN DEFAULT FALSE)
+RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT COALESCE(jsonb_agg(jsonb_build_object(
+    'id', r.id, 'rating', r.rating, 'body', r.body, 'reviewer_name', r.reviewer_name,
+    'knowledge', r.rating_knowledge, 'communication', r.rating_communication, 'helpfulness', r.rating_helpfulness,
+    'created_at', r.created_at, 'status', r.status, 'verified', true
+  ) ORDER BY r.created_at DESC), '[]'::jsonb)
+  FROM reviews r
+  WHERE r.mentor_id = p_mentor_id AND (p_include_hidden OR r.status = 'published');
+$$;
+GRANT EXECUTE ON FUNCTION mentor_reviews(UUID, BOOLEAN) TO anon, authenticated;
+
+-- Public: a mentor's rating summary (avg, count, 5..1 distribution, sub-rating averages).
+CREATE OR REPLACE FUNCTION mentor_rating_summary(p_mentor_id UUID)
+RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT jsonb_build_object(
+    'avg',   COALESCE(ROUND(AVG(rating)::numeric, 2), 0),
+    'count', COUNT(*),
+    'distribution', jsonb_build_object(
+      '5', COUNT(*) FILTER (WHERE rating = 5), '4', COUNT(*) FILTER (WHERE rating = 4),
+      '3', COUNT(*) FILTER (WHERE rating = 3), '2', COUNT(*) FILTER (WHERE rating = 2),
+      '1', COUNT(*) FILTER (WHERE rating = 1)),
+    'knowledge',     ROUND(AVG(rating_knowledge)::numeric, 2),
+    'communication', ROUND(AVG(rating_communication)::numeric, 2),
+    'helpfulness',   ROUND(AVG(rating_helpfulness)::numeric, 2)
+  )
+  FROM reviews WHERE mentor_id = p_mentor_id AND status = 'published';
+$$;
+GRANT EXECUTE ON FUNCTION mentor_rating_summary(UUID) TO anon, authenticated;
+
+-- The mentee's own review for a booking (to prefill the edit form). NULL if none.
+CREATE OR REPLACE FUNCTION my_review_for_booking(p_booking_id UUID, p_reviewer UUID)
+RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT to_jsonb(r) FROM reviews r WHERE r.booking_id = p_booking_id AND r.reviewer_id = p_reviewer;
+$$;
+GRANT EXECUTE ON FUNCTION my_review_for_booking(UUID, UUID) TO authenticated;
+
+-- Admin: recent reviews for moderation, enriched with the meeting details.
+CREATE OR REPLACE FUNCTION admin_reviews(p_limit INT DEFAULT 200)
+RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT COALESCE(jsonb_agg(row ORDER BY (row->>'created_at') DESC), '[]'::jsonb) FROM (
+    SELECT jsonb_build_object(
+      'id', r.id, 'rating', r.rating, 'body', r.body, 'reviewer_name', r.reviewer_name,
+      'knowledge', r.rating_knowledge, 'communication', r.rating_communication, 'helpfulness', r.rating_helpfulness,
+      'mentor_id', r.mentor_id, 'mentor_name', m.display_name,
+      'mentee_name', b.candidate_name, 'mentee_email', b.candidate_email,
+      'booking_id', r.booking_id, 'slot_time', b.slot_time, 'slot_end', b.slot_end,
+      'duration', s.duration, 'service_title', s.title,
+      'status', r.status, 'created_at', r.created_at
+    ) AS row
+    FROM reviews r
+    JOIN mentors m ON m.id = r.mentor_id
+    JOIN bookings b ON b.id = r.booking_id
+    LEFT JOIN services s ON s.id = b.service_id
+    ORDER BY r.created_at DESC LIMIT GREATEST(p_limit, 1)
+  ) t;
+$$;
+GRANT EXECUTE ON FUNCTION admin_reviews(INT) TO service_role, authenticated;
+
+-- Admin: publish (enable) / reject (disable) / reset a review; re-syncs the mentor's rating.
+DROP FUNCTION IF EXISTS admin_set_review_hidden(UUID, BOOLEAN);
+CREATE OR REPLACE FUNCTION admin_set_review_status(p_review_id UUID, p_status TEXT)
+RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_mentor UUID;
+BEGIN
+  IF p_status NOT IN ('pending','published','rejected') THEN
+    RAISE EXCEPTION 'Invalid status %', p_status USING errcode = 'P0001';
+  END IF;
+  UPDATE reviews SET status = p_status, updated_at = NOW() WHERE id = p_review_id RETURNING mentor_id INTO v_mentor;
+  IF v_mentor IS NOT NULL THEN PERFORM recompute_mentor_rating(v_mentor); END IF;
+END; $$;
+GRANT EXECUTE ON FUNCTION admin_set_review_status(UUID, TEXT) TO service_role, authenticated;

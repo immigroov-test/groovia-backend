@@ -66,6 +66,33 @@ def send_session_reminders() -> dict:
     return {"reminders_sent": sent}
 
 
+def send_review_requests() -> dict:
+    """Post-session 'leave a review' email to the mentee (attended, registered accounts only),
+    then one reminder ~3 days later if they still haven't reviewed. Links to the session page,
+    where the review form lives. Claim-then-send, so no double emails."""
+    sent = 0
+    for reminder in (False, True):
+        kind = "review_reminder" if reminder else "review_request"
+        for bid in db.due_review_requests(reminder=reminder):
+            if not db.claim_reminder(bid, kind):
+                continue
+            try:
+                info = db.get_booking_notify_info(bid) or {}
+                to = info.get("candidate_email")
+                if not to:
+                    continue
+                mailer.send_transactional(to, "review_request", {
+                    "candidate_name": info.get("candidate_name") or "there",
+                    "mentor_name": info.get("mentor_name") or "your mentor",
+                    "review_url": f"{config.FRONTEND_URL}/session/{bid}",
+                    "is_reminder": reminder,
+                })
+                sent += 1
+            except Exception:
+                logger.warning("review request send failed booking=%s kind=%s", bid, kind)
+    return {"review_requests_sent": sent}
+
+
 def send_attendance_checks() -> dict:
     """T-60 'are you available?' nudge to the mentor for still-unconfirmed sessions."""
     lo, hi = _ATTEND_WINDOW

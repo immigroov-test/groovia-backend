@@ -1,10 +1,13 @@
 -- ============================================================================
--- payments_setup.sql  —  Pricing (PPP + FX) + Razorpay payment flow
+-- payments_setup.sql  —  DEPRECATED. Folded into testing_db_setup.sql.
 -- ----------------------------------------------------------------------------
--- Additive migration: run AFTER testing_db_setup.sql / production_db_setup.sql
--- against the same Supabase database. Every statement is idempotent
--- (IF NOT EXISTS / CREATE OR REPLACE / ON CONFLICT DO NOTHING), so it is safe
--- to re-run.
+-- The pricing + payments engine below now lives directly inside
+-- testing_db_setup.sql (and production_db_setup.sql), each a SINGLE
+-- self-contained script. For staging, run ONLY testing_db_setup.sql - do NOT run
+-- this file separately. Kept for reference and as the source when re-folding
+-- pricing into production_db_setup.sql; keep in sync if pricing changes.
+-- Every statement is still idempotent (IF NOT EXISTS / CREATE OR REPLACE /
+-- ON CONFLICT DO NOTHING).
 --
 -- Ported from the Gautham fork (which itself ports immigroov's pricing +
 -- Razorpay engine), with two deliberate scope reductions:
@@ -98,22 +101,24 @@ RETURNS NUMERIC LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS
 $$;
 GRANT EXECUTE ON FUNCTION effective_markup_pct(UUID) TO anon, authenticated;
 
--- ── Per-country platform fee + tax ───────────────────────────────────────────
--- Customer price = mentor rate x (1 + platform_fee%) x (1 + tax%). Both are keyed to the CUSTOMER's
--- country and admin-editable. The platform fee (default 5%) replaces the old global markup; a
--- per-mentor commission override still wins for that mentor. Tax defaults to 0 except where set
--- (India GST 18%). 'DEFAULT' is the fallback row used when a country has no explicit entry.
+-- ── Per-country commission + tax ─────────────────────────────────────────────
+-- Revenue-split model: the mentor's rate IS the customer-facing price. platform_fee_pct is
+-- Immigroov's COMMISSION, taken OUT of that price (the mentor nets the rest) - it is NOT added on
+-- top. The customer pays price + tax; the commission is internal and shown to ADMIN ONLY. Both %s
+-- are keyed to the CUSTOMER's country and admin-editable; a live per-mentor commission override
+-- still wins. Default commission 15%, tax 0 except where set (India GST 18%). 'DEFAULT' is the
+-- fallback row used when a country has no explicit entry.
 CREATE TABLE IF NOT EXISTS country_pricing (
   country_code     TEXT PRIMARY KEY,           -- ISO-2 (uppercase), or 'DEFAULT'
-  platform_fee_pct NUMERIC NOT NULL DEFAULT 5,
+  platform_fee_pct NUMERIC NOT NULL DEFAULT 15, -- Immigroov commission %, taken OUT of the price
   tax_pct          NUMERIC NOT NULL DEFAULT 0,
   tax_label        TEXT,                        -- e.g. 'GST', 'VAT'
   updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 ALTER TABLE country_pricing ENABLE ROW LEVEL SECURITY;
 INSERT INTO country_pricing (country_code, platform_fee_pct, tax_pct, tax_label) VALUES
-  ('DEFAULT', 5, 0,  NULL),
-  ('IN',      5, 18, 'GST')
+  ('DEFAULT', 15, 0,  NULL),
+  ('IN',      15, 18, 'GST')
 ON CONFLICT (country_code) DO NOTHING;
 
 CREATE OR REPLACE FUNCTION country_platform_fee_pct(p_cc TEXT)
@@ -134,8 +139,8 @@ RETURNS NUMERIC LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS
 $$;
 GRANT EXECUTE ON FUNCTION country_tax_pct(TEXT) TO anon, authenticated;
 
--- The platform fee for a booking: a live per-mentor override wins (special deals), else the
--- customer country's fee.
+-- The commission % for a booking (taken out of the mentor's price): a live per-mentor override
+-- wins (special deals), else the customer country's commission.
 CREATE OR REPLACE FUNCTION effective_platform_fee_pct(p_mentor_id UUID, p_customer_country TEXT)
 RETURNS NUMERIC LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
   SELECT COALESCE(
@@ -273,17 +278,17 @@ CREATE TABLE IF NOT EXISTS booking_pricing (
 
 -- The single pricing engine. Returns the canonical BookingPrice as jsonb.
 -- Raises FX_UNAVAILABLE if rates are missing/stale.
--- NOTE: services.platform_fee is an ABSOLUTE commission amount in the mentor's
--- currency (e.g. set_price 2500 -> platform_fee 375 = 15%), converted here to a
--- percentage so it applies to the PPP-adjusted, FX-converted customer gross.
--- Falls back to the admin global pct (immigroov_commission_pct).
+-- REVENUE-SPLIT model: the mentor's localised rate IS the customer's price. Immigroov's commission
+-- (effective_platform_fee_pct) is taken OUT of that price -> the mentor nets the rest. Tax is added
+-- on top for the customer. The commission (fee_pct / fee_amount / net_mentor) is admin-only and
+-- never returned to the customer's browser (see _PUBLIC_QUOTE_FIELDS).
 -- Multi-currency columns (v2) - added here too so this migration is safe to run standalone.
 ALTER TABLE services ADD COLUMN IF NOT EXISTS set_offer_price NUMERIC(10,2);
 ALTER TABLE services ADD COLUMN IF NOT EXISTS currency_prices JSONB NOT NULL DEFAULT '[]';
 CREATE OR REPLACE FUNCTION compute_booking_price(p_service_id UUID, p_customer_country TEXT)
 RETURNS JSONB LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
 DECLARE
-  v_pricing_version CONSTANT INT := 3;   -- v3: customer price = mentor rate + global markup (mentor rate hidden)
+  v_pricing_version CONSTANT INT := 4;   -- v4: revenue split - commission taken OUT of the mentor's price
   v_ppp_version     CONSTANT INT := 1;
   v_provider        CONSTANT TEXT := 'frankfurter';
   v_mentor_id UUID; v_set NUMERIC; v_set_offer NUMERIC; v_ment_ccy TEXT; v_is_ppp BOOLEAN;
@@ -332,19 +337,19 @@ BEGIN
     v_fx_mc      := get_fx(v_ment_ccy, v_cust_ccy);   -- hard-fails FX_UNAVAILABLE (the charge needs it)
     v_base       := COALESCE(v_set_offer, v_set);
     v_mentor_amt := ROUND(v_base * v_ppp * v_fx_mc, 2);
-    v_net_mentor := v_base;                            -- mentor's filled rate (owner pays this manually)
+    v_net_mentor := v_base;                            -- mentor's full rate in mentor ccy; commission applied below
   END IF;
 
-  -- Customer pays: mentor rate + platform fee, then tax on that total. The mentor rate itself
-  -- (set_price / mentor_amount / net_mentor) is for admin + owner only, never shown to the customer.
-  -- Gross is a SINGLE combined round (fee x tax together), identical to convert_prices, so the
-  -- displayed price and the charged price never drift by a rounding cent. The subtotal + fee + tax
-  -- breakdown is derived from it for admin/receipt display.
-  v_gross    := ROUND(v_mentor_amt * (1 + v_fee_pct / 100.0) * (1 + v_tax_pct / 100.0), 2);
-  v_subtotal := ROUND(v_mentor_amt * (1 + v_fee_pct / 100.0), 2);   -- mentor rate + platform fee
-  v_fee      := ROUND(v_subtotal - v_mentor_amt, 2);                -- platform fee amount
-  v_tax_amt  := ROUND(v_gross - v_subtotal, 2);                     -- tax amount
-  v_net_cust := v_mentor_amt;
+  -- Revenue split: v_mentor_amt (the mentor's localised rate) IS the customer's price. Immigroov's
+  -- commission comes OUT of it; the mentor nets the rest. Tax is added on top for the customer.
+  -- Customer-facing: price (subtotal) + tax = gross. The commission (fee) is internal, admin-only.
+  v_subtotal := v_mentor_amt;                                       -- price the customer sees (pre-tax)
+  v_fee      := ROUND(v_mentor_amt * v_fee_pct / 100.0, 2);         -- Immigroov commission (out of the price)
+  v_tax_amt  := ROUND(v_mentor_amt * v_tax_pct / 100.0, 2);         -- tax on the price
+  v_gross    := ROUND(v_mentor_amt * (1 + v_tax_pct / 100.0), 2);   -- total the customer pays
+  v_net_cust := ROUND(v_mentor_amt - v_fee, 2);                     -- mentor take-home, customer currency
+  v_net_mentor := CASE WHEN v_net_mentor IS NOT NULL                -- mentor take-home, mentor currency
+                       THEN ROUND(v_net_mentor * (1 - v_fee_pct / 100.0), 2) ELSE NULL END;
 
   RETURN jsonb_build_object(
     'pricing_version', v_pricing_version, 'ppp_version', v_ppp_version, 'fx_provider', v_provider,
@@ -391,10 +396,10 @@ BEGIN
     v_from := COALESCE(it->>'from', 'USD');
     v_ppp_on := COALESCE((it->>'is_ppp')::boolean, false);
     v_ppp := CASE WHEN v_ppp_on THEN ppp_relative(p_customer_country, it->>'mentor_country') ELSE 1 END;
-    -- Same platform fee + tax the charge uses (per-mentor override or country fee, then country tax),
-    -- so the displayed price equals what's charged.
-    v_mk  := (1 + effective_platform_fee_pct(NULLIF(it->>'mentor_id','')::uuid, p_customer_country) / 100.0)
-             * (1 + country_tax_pct(p_customer_country) / 100.0);
+    -- Revenue split: the mentor's rate IS the customer price; the commission is taken OUT of it, so
+    -- it never changes what the customer sees. Only tax is added on top, so the displayed price
+    -- (mentor rate + tax) equals what's charged.
+    v_mk  := (1 + country_tax_pct(p_customer_country) / 100.0);
     v_rate := get_fx_or_null(v_from, v_cust);
     IF v_rate IS NULL THEN
       key := it->>'key'; you0 := ROUND(v_amt * v_mk, 2); you := ROUND(v_amt * v_ppp * v_mk, 2);

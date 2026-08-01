@@ -45,10 +45,13 @@ def reserve_booking(
     answers: list[dict] = [],
     specific_availability_id: Optional[str] = None,
     candidate_id: Optional[str] = None,
+    referral_code: Optional[str] = None,
 ) -> dict[str, Any]:
     """Consume a binding price quote into a 'pending' (payment-hold) booking.
     Raises on QUOTE_EXPIRED / slot-taken — the RPC's own error message is
-    preserved so the router can map it to the right HTTP status."""
+    preserved so the router can map it to the right HTTP status.
+    referral_code (optional) is validated server-side; a valid code applies its
+    discount to what the customer pays and records the attribution on the booking."""
     res = _supabase.rpc("reserve_booking", {
         "p_quote_id":                 quote_id,
         "p_mentor_id":                mentor_id,
@@ -60,6 +63,7 @@ def reserve_booking(
         "p_answers":                  answers,
         "p_specific_availability_id": specific_availability_id,
         "p_candidate_id":             candidate_id,
+        "p_referral_code":            referral_code,
     }).execute()
     if not res.data:
         raise RuntimeError("reserve_booking returned no data")

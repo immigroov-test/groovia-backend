@@ -65,6 +65,7 @@ _JOBS = [
     ("reconcile_payments", _reconcile_payments_if_due),
     ("session_reminders", notifications.send_session_reminders),
     ("attendance_checks", notifications.send_attendance_checks),
+    ("review_requests", notifications.send_review_requests),
 ]
 
 
