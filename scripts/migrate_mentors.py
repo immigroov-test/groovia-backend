@@ -221,7 +221,7 @@ def transform_mentor(raw: dict, services: list[dict], weekly: list[dict]) -> dic
             "description": sv.get("description") or None,
             "type": stype,
             "duration": int(sv.get("duration") or 30),
-            "is_ppp": bool(sv.get("is_ppp")),
+            "is_ppp": False,   # imported PPP-off; the mentor opts in during first-login onboarding
             "is_active": bool(sv.get("is_active")),
             "set_price": float(pricing.get("base_price") or 0),
             "set_currency": (pricing.get("currency") or raw.get("currency") or "USD").upper(),
@@ -254,10 +254,9 @@ def transform_mentor(raw: dict, services: list[dict], weekly: list[dict]) -> dic
         "timezone": raw.get("app_timezone") or "UTC",
         "app_timezone": raw.get("app_timezone") or "UTC",
         "currency": (raw.get("currency") or "USD").upper(),
-        # Our PPP control is the mentor-level smart_pricing toggle (the charge + the browse card
-        # both key off it). The legacy data carried PPP per service, so enable smart_pricing when
-        # the mentor used fair pricing on any service; otherwise their PPP intent would be lost.
-        "smart_pricing": any(s["is_ppp"] for s in out_services),
+        # PPP is the mentor-level smart_pricing toggle. Imported mentors start with it OFF; each
+        # mentor chooses to enable/disable fair pricing during the first-login onboarding flow.
+        "smart_pricing": False,
         "languages": languages,
         "social_links": socials,
         "expertise_country_codes": expertise_countries,

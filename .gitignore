@@ -47,3 +47,7 @@ node_modules/
 Thumbs.db
 .vscode/
 .idea/
+
+# Local DR backups (never commit - may contain PII)
+scripts/backups/
+scripts/*.log
