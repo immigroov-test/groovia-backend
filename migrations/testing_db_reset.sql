@@ -33,7 +33,8 @@ DELETE FROM bookings WHERE mentor_id IN (
 UPDATE mentors
    SET needs_onboarding = TRUE,
        hourly_rate      = NULL,
-       currency_rates   = NULL
+       currency_rates   = NULL,
+       onboarded_at     = NULL
  WHERE slug = 'yokesh-dhanabal';
 
 -- Drop any template session types he added during onboarding (status 'pending'), so the sessions

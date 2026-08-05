@@ -2219,11 +2219,16 @@ ALTER TABLE mentors ADD COLUMN IF NOT EXISTS specializations       TEXT[] DEFAUL
 -- them behind a welcome popup -> review profile -> set rate + confirm sessions, before it unlocks.
 -- Cleared by /mentor/complete-onboarding. Server-derived, so the gate survives refresh/new device.
 ALTER TABLE mentors ADD COLUMN IF NOT EXISTS needs_onboarding      BOOLEAN NOT NULL DEFAULT FALSE;
+-- onboarded_at: durable "finished first-login onboarding" marker, stamped by
+-- /mentor/complete-onboarding. The backfill keys on THIS (not hourly_rate - imported mentors can
+-- carry a legacy rate, which previously skipped the gate and old mentors never saw the popup).
+ALTER TABLE mentors ADD COLUMN IF NOT EXISTS onboarded_at          TIMESTAMPTZ;
 
--- Flag every imported mentor that still has no per-hour rate so the first-login flow fires for them.
--- hourly_rate IS NULL guards it: a mentor who already set a rate (mid-onboarding or finished) is never
--- re-flagged, so re-running this setup is safe/idempotent.
-UPDATE mentors SET needs_onboarding = TRUE WHERE legacy_id IS NOT NULL AND hourly_rate IS NULL;
+-- Gate every imported mentor who has never completed the first-login flow (popup -> review profile
+-- -> rate + PPP choice + sessions). Idempotent: a mentor who finished (onboarded_at set) is never
+-- re-flagged by a re-run.
+UPDATE mentors SET needs_onboarding = TRUE
+ WHERE legacy_id IS NOT NULL AND onboarded_at IS NULL AND needs_onboarding = FALSE;
 
 -- ============================================================================
 -- Legacy session history (imported read-only from the old portal's /bookings)

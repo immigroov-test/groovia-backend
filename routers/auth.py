@@ -48,5 +48,8 @@ def sync_account(body: SyncBody = SyncBody(), user: AuthUser = Depends(get_curre
         "linked": bool(mentor),
         "role": "mentor" if mentor else "candidate",
         "mentor_status": mentor.get("status") if mentor else None,
+        # Migrated mentors must pass the first-login flow; the client routes them to /mentor
+        # (where the mandatory welcome popup fires) when this is true.
+        "needs_onboarding": bool(mentor.get("needs_onboarding")) if mentor else False,
         "linked_bookings": linked_bookings,
     }

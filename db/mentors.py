@@ -336,7 +336,7 @@ def link_mentor_by_email(profile_id: str, email: str) -> Optional[dict[str, Any]
     try:
         already = (
             _supabase.table("mentors")
-            .select("id, slug, display_name, status, profile_id")
+            .select("id, slug, display_name, status, profile_id, needs_onboarding")
             .eq("profile_id", profile_id)
             .limit(1)
             .execute()
@@ -346,7 +346,7 @@ def link_mentor_by_email(profile_id: str, email: str) -> Optional[dict[str, Any]
 
         candidates = (
             _supabase.table("mentors")
-            .select("id, slug, display_name, status, profile_id")
+            .select("id, slug, display_name, status, profile_id, needs_onboarding")
             .ilike("email", email)
             .execute()
         )
@@ -563,8 +563,14 @@ def save_mentor_profile_live(mentor_id: str, fields: dict[str, Any]) -> dict[str
 
 def complete_mentor_onboarding(mentor_id: str) -> dict[str, Any]:
     """Clear the migrated-mentor onboarding gate once they've set a rate and confirmed their
-    sessions. After this the hub unlocks and the first-login flow no longer fires."""
-    res = _supabase.table("mentors").update({"needs_onboarding": False}).eq("id", mentor_id).execute()
+    sessions. onboarded_at is the durable completion marker: setup-script re-runs re-gate only
+    mentors who have never finished (onboarded_at IS NULL), never someone who completed."""
+    payload = {"needs_onboarding": False, "onboarded_at": datetime.now(timezone.utc).isoformat()}
+    try:
+        res = _supabase.table("mentors").update(payload).eq("id", mentor_id).execute()
+    except Exception:
+        # onboarded_at column not migrated yet - still clear the gate so the mentor isn't stuck.
+        res = _supabase.table("mentors").update({"needs_onboarding": False}).eq("id", mentor_id).execute()
     if not res.data:
         raise ValueError("Mentor not found")
     return res.data[0]
