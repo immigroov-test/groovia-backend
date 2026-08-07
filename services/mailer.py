@@ -335,6 +335,12 @@ def _booking_confirmed_mentor(d: dict) -> tuple[str, str]:
         ])
         + notes_html
         + (_btn(url, "Join meeting") if url else "")
+        + (
+            '<p style="margin:24px 0 0;font-size:13px;color:#888;line-height:1.6">'
+            "Need to change this session? You can reschedule or cancel it from your "
+            f'<a href="{config.FRONTEND_URL.rstrip("/")}/mentor" style="color:#6b7fff">mentor dashboard</a> '
+            "(Sessions tab).</p>"
+        )
     )
     return f"New booking: {candidate}", _base(body)
 

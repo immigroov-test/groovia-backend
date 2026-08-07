@@ -837,19 +837,22 @@ def get_email_account_status(email: str) -> dict:
     no password) to verify+setup instead of the password login screen."""
     email = (email or "").strip().lower()
     if not email:
-        return {"exists": False, "has_password": False}
+        return {"exists": False, "has_password": False, "confirmed": False}
     try:
         res = _supabase.rpc("email_account_status", {"p_email": email}).execute()
         if not res.data:
-            return {"exists": False, "has_password": False, "providers": [], "oauth_only": False}
+            return {"exists": False, "has_password": False, "providers": [], "oauth_only": False, "confirmed": False}
         row = res.data[0]
         has_pw = bool(row.get("has_password"))
         providers = row.get("providers") or []
+        confirmed = bool(row.get("confirmed"))
         # oauth_only == this account exists, has NO password, and can sign in via Google.
         # The popup uses it to say "continue with Google" instead of emailing an OTP link
         # (which would otherwise let a Google user accidentally add a password).
         oauth_only = (not has_pw) and ("google" in providers)
-        return {"exists": True, "has_password": has_pw, "providers": providers, "oauth_only": oauth_only}
+        # confirmed tells the guest-booking flow whether this is a REAL account (verified / has a
+        # login) or a dangling half-started signup that should not block a guest booking.
+        return {"exists": True, "has_password": has_pw, "providers": providers, "oauth_only": oauth_only, "confirmed": confirmed}
     except Exception:
         # Degrade safely: treat the email as passwordless so the popup emails a
         # verification/magic link (which works for both new and existing accounts)
@@ -857,7 +860,7 @@ def get_email_account_status(email: str) -> dict:
         # profile row: signInWithOtp creates a profile with NO password, so that would
         # trap a mid-signup user on the login screen.
         logger.exception("email_account_status RPC failed; treating email as passwordless (send link)")
-        return {"exists": False, "has_password": False, "providers": [], "oauth_only": False}
+        return {"exists": False, "has_password": False, "providers": [], "oauth_only": False, "confirmed": False}
 
 
 def get_profile_role(profile_id: str) -> Optional[str]:
