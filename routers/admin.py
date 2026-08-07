@@ -25,6 +25,10 @@ class CountryPricingBody(BaseModel):
     tax_pct: float
     tax_label: Optional[str] = None           # e.g. 'GST', 'VAT'
 
+
+class GeneralPricingBody(BaseModel):
+    mentor_commission_pct: float              # global default; per-mentor + referral overrides win
+
 logger = logging.getLogger("immigroov.routers.admin")
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -44,8 +48,8 @@ def get_country_pricing(user: AuthUser = Depends(require_admin)):
 
 @router.post("/country-pricing")
 def save_country_pricing(body: CountryPricingBody, user: AuthUser = Depends(require_admin)):
-    """Upsert a country's platform fee + tax. country_code='DEFAULT' is the fallback for any
-    country without its own row. Customer price = mentor rate x (1 + fee%) x (1 + tax%)."""
+    """Upsert a country's customer platform fee + tax. country_code='DEFAULT' is the fallback for any
+    country without its own row. Customer pays = session price + platform fee + tax(on session+fee)."""
     if not (0 <= body.platform_fee_pct <= 100):
         raise HTTPException(status_code=422, detail="Platform fee must be between 0 and 100")
     if not (0 <= body.tax_pct <= 100):
@@ -54,6 +58,37 @@ def save_country_pricing(body: CountryPricingBody, user: AuthUser = Depends(requ
         return db.set_country_pricing(body.country_code, body.platform_fee_pct, body.tax_pct, body.tax_label)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+
+
+@router.get("/general-pricing")
+def get_general_pricing(user: AuthUser = Depends(require_admin)):
+    """The global INTERNAL mentor commission % (taken out of the mentor's price). A per-mentor override
+    or a referral code can lower it per booking; this is only the default."""
+    raw = db.get_platform_setting("mentor_commission_pct", "30")
+    try:
+        pct = float(raw)
+    except (TypeError, ValueError):
+        pct = 30.0
+    return {"mentor_commission_pct": pct}
+
+
+@router.post("/general-pricing")
+def save_general_pricing(body: GeneralPricingBody, user: AuthUser = Depends(require_admin)):
+    """Set the global default mentor commission %. Per-mentor overrides and referral codes still win
+    on a given booking."""
+    if not (0 <= body.mentor_commission_pct <= 100):
+        raise HTTPException(status_code=422, detail="Commission must be between 0 and 100")
+    db.set_platform_setting("mentor_commission_pct", str(body.mentor_commission_pct))
+    return {"mentor_commission_pct": body.mentor_commission_pct}
+
+
+@router.get("/audit")
+def get_audit(booking_id: Optional[str] = None, entity_type: Optional[str] = None,
+              limit: int = 200, user: AuthUser = Depends(require_admin)):
+    """Unified platform activity trail (newest first), optionally filtered by a booking id or an
+    entity type (booking / payment / payout / ledger / commission / pricing / settings)."""
+    limit = max(1, min(limit, 1000))
+    return {"events": db.list_audit_events(booking_id, entity_type, limit)}
 
 
 @router.get("/mentors/pending")

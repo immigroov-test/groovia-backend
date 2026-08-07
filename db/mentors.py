@@ -103,8 +103,13 @@ def list_active_mentors(
                 and s.get("set_price") is not None]
         if not svcs:
             continue
-        cheapest = min(svcs, key=lambda s: float(s["set_price"]))
-        r["min_price"] = float(cheapest["set_price"])
+        # "Starting from" = cheapest PAID session; a free intro session must never become the headline
+        # price (it would always win as the minimum). Track a free session separately so the card can
+        # show it as a small badge below the price.
+        paid = [s for s in svcs if float(s["set_price"]) > 0]
+        r["has_free_session"] = any(float(s["set_price"]) == 0 for s in svcs)
+        cheapest = min(paid, key=lambda s: float(s["set_price"])) if paid else svcs[0]
+        r["min_price"] = float(cheapest["set_price"]) if paid else 0.0
         r["price_currency"] = cheapest.get("set_currency") or r.get("currency") or "USD"
         # What the mentor actually helps with = the categories of the sessions they configured. This
         # is the user-facing filter facet (not the self-declared expertise_categories), so browse
@@ -1010,6 +1015,42 @@ def set_country_pricing(country_code: str, platform_fee_pct: float, tax_pct: flo
     if not res.data:
         raise ValueError("Could not save country pricing")
     return res.data[0]
+
+
+def get_platform_setting(key: str, default: Optional[str] = None) -> Optional[str]:
+    """Read a single platform_settings value (e.g. the global mentor commission %)."""
+    try:
+        res = _supabase.table("platform_settings").select("value").eq("key", key).limit(1).execute()
+        if res.data and res.data[0].get("value") is not None:
+            return res.data[0]["value"]
+    except Exception:
+        logger.warning("get_platform_setting(%s) failed", key)
+    return default
+
+
+def set_platform_setting(key: str, value: str) -> None:
+    """Upsert a single platform_settings value without disturbing its description. Update-first so a
+    brand-new key still inserts."""
+    now = datetime.now(timezone.utc).isoformat()
+    res = _supabase.table("platform_settings").update({"value": value, "updated_at": now}).eq("key", key).execute()
+    if not res.data:
+        _supabase.table("platform_settings").insert({"key": key, "value": value}).execute()
+
+
+def list_audit_events(booking_id: Optional[str] = None, entity_type: Optional[str] = None,
+                      limit: int = 200) -> list[dict[str, Any]]:
+    """Unified platform activity trail (newest first), optionally scoped to one booking or entity
+    type. Reads through the admin-only admin_audit_events RPC (service-role)."""
+    try:
+        res = _supabase.rpc("admin_audit_events", {
+            "p_booking_id": booking_id or None,
+            "p_entity_type": (entity_type or None),
+            "p_limit": limit,
+        }).execute()
+        return res.data or []
+    except Exception:
+        logger.warning("list_audit_events failed (audit trail not migrated yet?)")
+        return []
 
 
 def set_mentor_initial_rate(mentor_id: str, hourly_rate: float, currency: str,

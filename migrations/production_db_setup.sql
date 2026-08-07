@@ -393,6 +393,7 @@ CREATE TABLE IF NOT EXISTS platform_settings (
 
 INSERT INTO platform_settings (key, value, description) VALUES
   ('immigroov_commission_pct', '15', 'Default Immigroov commission %; used at service_create to seed services.platform_fee'),
+  ('mentor_commission_pct', '30', 'Default INTERNAL commission % taken OUT of the mentor''s session price (mentor nets the rest). Never shown to the customer; distinct from the customer-facing country_pricing.platform_fee_pct.'),
   ('default_currency', 'USD', 'Fallback currency for the platform')
 ON CONFLICT (key) DO NOTHING;
 -- Retire the legacy global-markup setting (superseded by country_pricing + the revenue-split model).
@@ -2422,16 +2423,18 @@ CREATE TABLE IF NOT EXISTS booking_pricing (
   calculated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
--- ── Per-country commission + tax ─────────────────────────────────────────────
--- Revenue-split model: the mentor's rate IS the customer-facing price. platform_fee_pct is
--- Immigroov's COMMISSION, taken OUT of that price (the mentor nets the rest) - it is NOT added on
--- top. The customer pays price + tax; the commission is internal and shown to ADMIN ONLY. Both %s
--- are keyed to the CUSTOMER's country and admin-editable; a live per-mentor commission override
--- still wins. Default commission 15%, tax 0 except where set (India GST 18%). 'DEFAULT' is the
--- fallback row used when a country has no explicit entry.
+-- ── Per-country platform fee + tax ───────────────────────────────────────────
+-- MARKUP model: the customer pays  session price + platform fee + tax.
+--   * platform_fee_pct = the CUSTOMER-FACING platform fee, ADDED ON TOP of the mentor's session
+--     price and shown to the customer as its own line item.
+--   * tax_pct is charged on the (session price + platform fee) base.
+-- Both %s are keyed to the CUSTOMER's country and admin-editable. This is entirely separate from the
+-- INTERNAL mentor commission (mentor_commission_pct / mentors.commission_pct), which is taken OUT of
+-- the mentor's price to size their payout and is never shown to the customer. Default platform fee
+-- 15%, tax 0 except where set (India GST 18%). 'DEFAULT' is the fallback row.
 CREATE TABLE IF NOT EXISTS country_pricing (
   country_code     TEXT PRIMARY KEY,            -- ISO-2 (uppercase), or 'DEFAULT'
-  platform_fee_pct NUMERIC NOT NULL DEFAULT 15, -- Immigroov commission %, taken OUT of the price
+  platform_fee_pct NUMERIC NOT NULL DEFAULT 15, -- customer-facing platform fee %, ADDED ON TOP
   tax_pct          NUMERIC NOT NULL DEFAULT 0,
   tax_label        TEXT,                         -- e.g. 'GST', 'VAT'
   updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
@@ -2442,6 +2445,7 @@ INSERT INTO country_pricing (country_code, platform_fee_pct, tax_pct, tax_label)
   ('IN',      15, 18, 'GST')
 ON CONFLICT (country_code) DO NOTHING;
 
+-- The CUSTOMER-FACING platform fee % for a customer country (added on top of the session price).
 CREATE OR REPLACE FUNCTION country_platform_fee_pct(p_cc TEXT)
 RETURNS NUMERIC LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
   SELECT COALESCE(
@@ -2460,35 +2464,52 @@ RETURNS NUMERIC LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS
 $$;
 GRANT EXECUTE ON FUNCTION country_tax_pct(TEXT) TO anon, authenticated;
 
--- The commission % for a booking (taken out of the mentor's price): a live per-mentor override
--- wins (special deals), else the customer country's commission.
-CREATE OR REPLACE FUNCTION effective_platform_fee_pct(p_mentor_id UUID, p_customer_country TEXT)
+-- The INTERNAL mentor commission % for a booking (taken OUT of the mentor's session price to size the
+-- payout; never shown to the customer): a live per-mentor override wins (special deals), else the
+-- global 'mentor_commission_pct' setting, else 30.
+CREATE OR REPLACE FUNCTION mentor_commission_pct(p_mentor_id UUID)
 RETURNS NUMERIC LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
   SELECT COALESCE(
     (SELECT commission_pct FROM mentors
        WHERE id = p_mentor_id AND commission_pct IS NOT NULL
          AND (commission_expires_at IS NULL OR commission_expires_at > NOW())),
-    country_platform_fee_pct(p_customer_country));
+    (SELECT NULLIF(value, '')::numeric FROM platform_settings WHERE key = 'mentor_commission_pct'),
+    30);
+$$;
+GRANT EXECUTE ON FUNCTION mentor_commission_pct(UUID) TO anon, authenticated;
+
+-- Back-compat shim: older callers of effective_platform_fee_pct(mentor, country) now get the
+-- customer-facing platform fee (the mentor commission moved to mentor_commission_pct()).
+CREATE OR REPLACE FUNCTION effective_platform_fee_pct(p_mentor_id UUID, p_customer_country TEXT)
+RETURNS NUMERIC LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT country_platform_fee_pct(p_customer_country);
 $$;
 GRANT EXECUTE ON FUNCTION effective_platform_fee_pct(UUID, TEXT) TO anon, authenticated;
 
 -- The single pricing engine. Returns the canonical BookingPrice as jsonb.
 -- Raises FX_UNAVAILABLE if rates are missing/stale.
--- REVENUE-SPLIT model: the mentor's localised rate IS the customer's price. Immigroov's commission
--- (effective_platform_fee_pct) is taken OUT of that price -> the mentor nets the rest. Tax is added
--- on top for the customer. The commission (fee_pct / fee_amount / net_mentor) is admin-only and
--- never returned to the customer's browser (see _PUBLIC_QUOTE_FIELDS).
+-- MARKUP model (v5): the customer pays  session price + platform fee + tax.
+--   * session price  = the mentor's localised rate (subtotal / mentor_amount) - customer-facing.
+--   * platform fee   = country_platform_fee_pct of the session price, ADDED ON TOP - customer-facing
+--                      (platform_fee / platform_fee_pct).
+--   * tax            = country_tax_pct on (session price + platform fee) - customer-facing.
+--   * gross_customer = session price + platform fee + tax  (the amount actually charged).
+-- Separately and INTERNALLY, the mentor commission (mentor_commission_pct) is taken OUT of the
+-- session price to size the mentor payout: fee_pct / fee_amount / net_customer / net_mentor. Those
+-- commission fields are admin-only and never returned to the customer's browser (see
+-- _PUBLIC_QUOTE_FIELDS); platform_fee / platform_fee_pct ARE customer-facing.
 CREATE OR REPLACE FUNCTION compute_booking_price(p_service_id UUID, p_customer_country TEXT)
 RETURNS JSONB LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
 DECLARE
-  v_pricing_version CONSTANT INT := 4;   -- v4: revenue split - commission taken OUT of the mentor's price
+  v_pricing_version CONSTANT INT := 5;   -- v5: customer platform fee added ON TOP + internal mentor commission
   v_ppp_version     CONSTANT INT := 1;
   v_provider        CONSTANT TEXT := 'frankfurter';
   v_mentor_id UUID; v_set NUMERIC; v_set_offer NUMERIC; v_ment_ccy TEXT; v_is_ppp BOOLEAN;
-  v_prices JSONB; v_fee_pct NUMERIC; v_tax_pct NUMERIC; v_mentor_country TEXT;
+  v_prices JSONB; v_pfee_pct NUMERIC; v_tax_pct NUMERIC; v_comm_pct NUMERIC; v_mentor_country TEXT;
   v_cust_ccy TEXT; v_ppp NUMERIC := 1; v_source TEXT; v_explicit NUMERIC; v_base NUMERIC; v_mentor_amt NUMERIC;
   v_fx_mc NUMERIC; v_fx_c_inr NUMERIC; v_fx_m_inr NUMERIC;
-  v_gross NUMERIC; v_fee NUMERIC; v_subtotal NUMERIC; v_tax_amt NUMERIC; v_net_cust NUMERIC; v_net_mentor NUMERIC;
+  v_gross NUMERIC; v_platform_fee NUMERIC; v_commission NUMERIC; v_subtotal NUMERIC;
+  v_tax_amt NUMERIC; v_net_cust NUMERIC; v_net_mentor NUMERIC;
 BEGIN
   SELECT s.mentor_id, s.set_price, s.set_offer_price, COALESCE(s.set_currency, 'USD'), s.is_ppp,
          COALESCE(s.currency_prices, '[]'::jsonb), m.country
@@ -2497,9 +2518,11 @@ BEGIN
   WHERE s.id = p_service_id AND s.is_active AND s.status = 'approved';
   IF v_set IS NULL THEN RAISE EXCEPTION 'Service not available' USING errcode = 'P0001'; END IF;
 
-  -- Commission + tax by the CUSTOMER's country (a live per-mentor commission override wins).
-  v_fee_pct  := effective_platform_fee_pct(v_mentor_id, p_customer_country);
+  -- Customer-facing platform fee % + tax % by the CUSTOMER's country; INTERNAL mentor commission %
+  -- (per-mentor override wins) sizes the payout only.
+  v_pfee_pct := country_platform_fee_pct(p_customer_country);
   v_tax_pct  := country_tax_pct(p_customer_country);
+  v_comm_pct := mentor_commission_pct(v_mentor_id);
   v_cust_ccy := currency_for_country(p_customer_country);
 
   -- 1. Is there an explicit MENTOR rate for the customer's currency (primary, or a currency_prices row)?
@@ -2532,26 +2555,33 @@ BEGIN
     v_net_mentor := v_base;                            -- mentor's full rate in mentor ccy; commission applied below
   END IF;
 
-  -- Revenue split: v_mentor_amt (the mentor's localised rate) IS the customer's price. Immigroov's
-  -- commission comes OUT of it; the mentor nets the rest. Tax is added on top for the customer.
-  -- Customer-facing: price (subtotal) + tax = gross. The commission (fee) is internal, admin-only.
-  v_subtotal := v_mentor_amt;                                       -- price the customer sees (pre-tax)
-  v_fee      := ROUND(v_mentor_amt * v_fee_pct / 100.0, 2);         -- Immigroov commission (out of the price)
-  v_tax_amt  := ROUND(v_mentor_amt * v_tax_pct / 100.0, 2);         -- tax on the price
-  v_gross    := ROUND(v_mentor_amt * (1 + v_tax_pct / 100.0), 2);   -- total the customer pays
-  v_net_cust := ROUND(v_mentor_amt - v_fee, 2);                     -- mentor take-home, customer currency
-  v_net_mentor := CASE WHEN v_net_mentor IS NOT NULL                -- mentor take-home, mentor currency
-                       THEN ROUND(v_net_mentor * (1 - v_fee_pct / 100.0), 2) ELSE NULL END;
+  -- Markup model. v_mentor_amt (the mentor's localised rate) is the SESSION PRICE the customer sees.
+  -- The platform fee is ADDED ON TOP; tax is charged on (session + platform fee); the three sum to the
+  -- gross the customer is charged. Separately, the INTERNAL mentor commission comes OUT of the session
+  -- price to size the payout (fee_pct / fee_amount / net_*), and is never shown to the customer.
+  v_subtotal     := v_mentor_amt;                                              -- session price (customer-facing)
+  v_platform_fee := ROUND(v_mentor_amt * v_pfee_pct / 100.0, 2);               -- platform fee, added on top (customer)
+  v_tax_amt      := ROUND((v_mentor_amt + v_platform_fee) * v_tax_pct / 100.0, 2);  -- tax on session + fee
+  v_gross        := ROUND(v_mentor_amt + v_platform_fee + v_tax_amt, 2);       -- total the customer pays
+  v_commission   := ROUND(v_mentor_amt * v_comm_pct / 100.0, 2);               -- internal mentor commission (out)
+  v_net_cust     := ROUND(v_mentor_amt - v_commission, 2);                     -- mentor take-home, customer currency
+  v_net_mentor := CASE WHEN v_net_mentor IS NOT NULL                           -- mentor take-home, mentor currency
+                       THEN ROUND(v_net_mentor * (1 - v_comm_pct / 100.0), 2) ELSE NULL END;
 
   RETURN jsonb_build_object(
     'pricing_version', v_pricing_version, 'ppp_version', v_ppp_version, 'fx_provider', v_provider,
     'service_id', p_service_id, 'mentor_id', v_mentor_id, 'customer_country', UPPER(COALESCE(p_customer_country, '')),
     'mentor_currency', v_ment_ccy, 'customer_currency', v_cust_ccy,
     'pricing_source', v_source, 'set_price', v_set, 'ppp_multiplier', v_ppp,
-    'markup_pct', v_fee_pct, 'mentor_amount', v_mentor_amt,
+    'markup_pct', v_pfee_pct, 'mentor_amount', v_mentor_amt,
     'fx_mentor_customer', v_fx_mc, 'fx_customer_inr', v_fx_c_inr, 'fx_mentor_inr', v_fx_m_inr,
-    'gross_customer', v_gross, 'fee_pct', v_fee_pct, 'fee_amount', v_fee,
-    'subtotal', v_subtotal, 'tax_pct', v_tax_pct, 'tax_amount', v_tax_amt,
+    'gross_customer', v_gross, 'subtotal', v_subtotal,
+    'platform_fee_pct', v_pfee_pct, 'platform_fee', v_platform_fee,
+    'tax_pct', v_tax_pct, 'tax_amount', v_tax_amt,
+    -- Internal (admin-only) mentor-commission side; fee_pct/fee_amount are consumed by the payout
+    -- ledger + referral splits (net_customer + fee_amount = session price).
+    'fee_pct', v_comm_pct, 'fee_amount', v_commission,
+    'commission_pct', v_comm_pct, 'commission_amount', v_commission,
     'net_customer', v_net_cust, 'net_mentor', v_net_mentor);
 END; $$;
 GRANT EXECUTE ON FUNCTION compute_booking_price(UUID, TEXT) TO anon, authenticated;
@@ -3878,3 +3908,199 @@ BEGIN
     EXECUTE format('GRANT EXECUTE ON FUNCTION %s TO service_role', fn);
   END LOOP;
 END $$;
+
+
+-- ###########################################################################
+-- Platform activity log (unified audit trail)
+-- One admin-viewable timeline of everything that happens: bookings and their
+-- status changes, customer payments, mentor payouts, money-ledger movements,
+-- referral commissions, and pricing / commission config changes. Filled by
+-- AFTER triggers, so capture is guaranteed no matter which code path made the
+-- change, and the trigger body can never abort the underlying write (it swallows
+-- its own errors). Reads are admin / service-role only (RLS on, no select policy).
+-- ###########################################################################
+CREATE TABLE IF NOT EXISTS audit_events (
+  id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  occurred_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  entity_type  TEXT NOT NULL,     -- booking | payment | payout | ledger | commission | pricing | settings
+  entity_id    UUID,              -- the changed row's id (null for country/settings rows keyed by text)
+  booking_id   UUID,              -- correlation key for anything tied to a booking
+  action       TEXT NOT NULL,     -- created | updated | status_changed | deleted
+  actor        TEXT,              -- app-set (SET LOCAL app.actor) when available, else 'system'
+  summary      TEXT,              -- short human-readable line
+  details      JSONB NOT NULL DEFAULT '{}'::jsonb
+);
+CREATE INDEX IF NOT EXISTS idx_audit_events_booking ON audit_events(booking_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_events_entity  ON audit_events(entity_type, entity_id, occurred_at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_events_time    ON audit_events(occurred_at DESC);
+ALTER TABLE audit_events ENABLE ROW LEVEL SECURITY;   -- admin / service-role reads only, no select policy
+
+-- The actor for the current statement, if the backend set one via  SET LOCAL app.actor = '...'.
+CREATE OR REPLACE FUNCTION audit_actor()
+RETURNS TEXT LANGUAGE sql STABLE AS $$
+  SELECT COALESCE(NULLIF(current_setting('app.actor', true), ''), 'system');
+$$;
+
+-- Single insert path. SECURITY DEFINER so triggers running as any role can write; the EXCEPTION
+-- guard makes auditing best-effort (a logging failure must never roll back the business write).
+CREATE OR REPLACE FUNCTION log_audit_event(
+  p_entity_type TEXT, p_entity_id UUID, p_booking_id UUID,
+  p_action TEXT, p_summary TEXT, p_details JSONB
+) RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  INSERT INTO audit_events(entity_type, entity_id, booking_id, action, actor, summary, details)
+  VALUES (p_entity_type, p_entity_id, p_booking_id, p_action, audit_actor(), p_summary,
+          COALESCE(p_details, '{}'::jsonb));
+EXCEPTION WHEN OTHERS THEN
+  NULL;   -- auditing is best-effort; never break the underlying write
+END; $$;
+
+-- ── bookings: creation + every status change ─────────────────────────────────
+CREATE OR REPLACE FUNCTION audit_bookings() RETURNS TRIGGER
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    PERFORM log_audit_event('booking', NEW.id, NEW.id, 'created',
+      'Booking created (' || COALESCE(NEW.status, '?') || ')',
+      jsonb_build_object('status', NEW.status, 'service_id', NEW.service_id,
+        'mentor_id', NEW.mentor_id, 'slot_time', NEW.slot_time,
+        'candidate_email', NEW.candidate_email, 'source', NEW.source,
+        'referral_code', NEW.referral_code,
+        'referral_discount_applied_pct', NEW.referral_discount_applied_pct,
+        'customer_currency', NEW.customer_currency));
+  ELSIF TG_OP = 'UPDATE' AND NEW.status IS DISTINCT FROM OLD.status THEN
+    PERFORM log_audit_event('booking', NEW.id, NEW.id, 'status_changed',
+      'Booking ' || COALESCE(OLD.status, '?') || ' -> ' || COALESCE(NEW.status, '?'),
+      jsonb_build_object('from', OLD.status, 'to', NEW.status));
+  END IF;
+  RETURN NULL;
+END; $$;
+DROP TRIGGER IF EXISTS trg_audit_bookings ON bookings;
+CREATE TRIGGER trg_audit_bookings AFTER INSERT OR UPDATE ON bookings
+  FOR EACH ROW EXECUTE FUNCTION audit_bookings();
+
+-- ── customer_payments: creation + payment state changes ──────────────────────
+CREATE OR REPLACE FUNCTION audit_customer_payments() RETURNS TRIGGER
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    PERFORM log_audit_event('payment', NEW.id, NEW.booking_id, 'created',
+      'Payment ' || COALESCE(NEW.state, '?') || ' ' || COALESCE(NEW.amount::text, '') || ' ' || COALESCE(NEW.currency, ''),
+      jsonb_build_object('state', NEW.state, 'amount', NEW.amount, 'currency', NEW.currency, 'provider', NEW.provider));
+  ELSIF TG_OP = 'UPDATE' AND NEW.state IS DISTINCT FROM OLD.state THEN
+    PERFORM log_audit_event('payment', NEW.id, NEW.booking_id, 'status_changed',
+      'Payment ' || COALESCE(OLD.state, '?') || ' -> ' || COALESCE(NEW.state, '?'),
+      jsonb_build_object('from', OLD.state, 'to', NEW.state, 'amount', NEW.amount, 'currency', NEW.currency,
+        'provider_payment_id', NEW.provider_payment_id));
+  END IF;
+  RETURN NULL;
+END; $$;
+DROP TRIGGER IF EXISTS trg_audit_customer_payments ON customer_payments;
+CREATE TRIGGER trg_audit_customer_payments AFTER INSERT OR UPDATE ON customer_payments
+  FOR EACH ROW EXECUTE FUNCTION audit_customer_payments();
+
+-- ── mentor_payouts: creation + payout state changes ──────────────────────────
+CREATE OR REPLACE FUNCTION audit_mentor_payouts() RETURNS TRIGGER
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    PERFORM log_audit_event('payout', NEW.id, NEW.booking_id, 'created',
+      'Payout created (' || COALESCE(NEW.payout_state, 'pending') || ')',
+      jsonb_build_object('payout_state', NEW.payout_state,
+        'net_amount_customer_currency', NEW.net_amount_customer_currency,
+        'net_amount_mentor_currency', NEW.net_amount_mentor_currency,
+        'customer_currency', NEW.customer_currency, 'mentor_currency', NEW.mentor_currency));
+  ELSIF TG_OP = 'UPDATE' AND NEW.payout_state IS DISTINCT FROM OLD.payout_state THEN
+    PERFORM log_audit_event('payout', NEW.id, NEW.booking_id, 'status_changed',
+      'Payout ' || COALESCE(OLD.payout_state, '?') || ' -> ' || COALESCE(NEW.payout_state, '?'),
+      jsonb_build_object('from', OLD.payout_state, 'to', NEW.payout_state,
+        'payout_reference', NEW.payout_reference, 'paid_date', NEW.paid_date));
+  END IF;
+  RETURN NULL;
+END; $$;
+DROP TRIGGER IF EXISTS trg_audit_mentor_payouts ON mentor_payouts;
+CREATE TRIGGER trg_audit_mentor_payouts AFTER INSERT OR UPDATE ON mentor_payouts
+  FOR EACH ROW EXECUTE FUNCTION audit_mentor_payouts();
+
+-- ── booking_ledger: every money movement (charge / refund / credit / penalty / commission) ──
+CREATE OR REPLACE FUNCTION audit_booking_ledger() RETURNS TRIGGER
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  PERFORM log_audit_event('ledger', NEW.id, NEW.booking_id, 'created',
+    initcap(NEW.party) || ' ' || NEW.kind || ' ' || COALESCE(NEW.amount::text, '') || ' ' || COALESCE(NEW.currency, ''),
+    jsonb_build_object('party', NEW.party, 'kind', NEW.kind, 'amount', NEW.amount,
+      'pct', NEW.pct, 'currency', NEW.currency, 'reason', NEW.reason));
+  RETURN NULL;
+END; $$;
+DROP TRIGGER IF EXISTS trg_audit_booking_ledger ON booking_ledger;
+CREATE TRIGGER trg_audit_booking_ledger AFTER INSERT ON booking_ledger
+  FOR EACH ROW EXECUTE FUNCTION audit_booking_ledger();
+
+-- ── commission_ledger: referral commission recorded + status changes ─────────
+CREATE OR REPLACE FUNCTION audit_commission_ledger() RETURNS TRIGGER
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF TG_OP = 'INSERT' THEN
+    PERFORM log_audit_event('commission', NEW.id, NEW.booking_id, 'created',
+      'Referral commission ' || COALESCE(NEW.commission_amount::text, '') || ' ' || COALESCE(NEW.customer_currency, '') || ' (' || COALESCE(NEW.status, '') || ')',
+      jsonb_build_object('affiliate_id', NEW.affiliate_id, 'referral_code', NEW.referral_code,
+        'commission_amount', NEW.commission_amount, 'customer_currency', NEW.customer_currency,
+        'split_snapshot', NEW.split_snapshot, 'status', NEW.status));
+  ELSIF TG_OP = 'UPDATE' AND NEW.status IS DISTINCT FROM OLD.status THEN
+    PERFORM log_audit_event('commission', NEW.id, NEW.booking_id, 'status_changed',
+      'Referral commission ' || COALESCE(OLD.status, '?') || ' -> ' || COALESCE(NEW.status, '?'),
+      jsonb_build_object('from', OLD.status, 'to', NEW.status, 'affiliate_id', NEW.affiliate_id));
+  END IF;
+  RETURN NULL;
+END; $$;
+DROP TRIGGER IF EXISTS trg_audit_commission_ledger ON commission_ledger;
+CREATE TRIGGER trg_audit_commission_ledger AFTER INSERT OR UPDATE ON commission_ledger
+  FOR EACH ROW EXECUTE FUNCTION audit_commission_ledger();
+
+-- ── country_pricing: platform fee / tax config changes ───────────────────────
+CREATE OR REPLACE FUNCTION audit_country_pricing() RETURNS TRIGGER
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF TG_OP = 'UPDATE'
+     AND NEW.platform_fee_pct IS NOT DISTINCT FROM OLD.platform_fee_pct
+     AND NEW.tax_pct IS NOT DISTINCT FROM OLD.tax_pct
+     AND NEW.tax_label IS NOT DISTINCT FROM OLD.tax_label THEN
+    RETURN NULL;   -- nothing pricing-relevant changed
+  END IF;
+  PERFORM log_audit_event('pricing', NULL, NULL, LOWER(TG_OP),
+    'Pricing ' || NEW.country_code || ': fee ' || NEW.platform_fee_pct || '%, tax ' || NEW.tax_pct || '%',
+    jsonb_build_object('country_code', NEW.country_code, 'platform_fee_pct', NEW.platform_fee_pct,
+      'tax_pct', NEW.tax_pct, 'tax_label', NEW.tax_label));
+  RETURN NULL;
+END; $$;
+DROP TRIGGER IF EXISTS trg_audit_country_pricing ON country_pricing;
+CREATE TRIGGER trg_audit_country_pricing AFTER INSERT OR UPDATE ON country_pricing
+  FOR EACH ROW EXECUTE FUNCTION audit_country_pricing();
+
+-- ── platform_settings: any tunable value change (incl. mentor commission %) ──
+CREATE OR REPLACE FUNCTION audit_platform_settings() RETURNS TRIGGER
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+BEGIN
+  IF TG_OP = 'UPDATE' AND NEW.value IS NOT DISTINCT FROM OLD.value THEN
+    RETURN NULL;
+  END IF;
+  PERFORM log_audit_event('settings', NULL, NULL, LOWER(TG_OP),
+    'Setting ' || NEW.key || ' = ' || COALESCE(NEW.value, ''),
+    jsonb_build_object('key', NEW.key, 'from', CASE WHEN TG_OP = 'UPDATE' THEN OLD.value ELSE NULL END, 'to', NEW.value));
+  RETURN NULL;
+END; $$;
+DROP TRIGGER IF EXISTS trg_audit_platform_settings ON platform_settings;
+CREATE TRIGGER trg_audit_platform_settings AFTER INSERT OR UPDATE ON platform_settings
+  FOR EACH ROW EXECUTE FUNCTION audit_platform_settings();
+
+-- Admin-facing reader: newest-first activity, optionally scoped to one booking or entity type.
+CREATE OR REPLACE FUNCTION admin_audit_events(p_booking_id UUID DEFAULT NULL, p_entity_type TEXT DEFAULT NULL, p_limit INT DEFAULT 200)
+RETURNS SETOF audit_events LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT * FROM audit_events
+  WHERE (p_booking_id IS NULL OR booking_id = p_booking_id)
+    AND (p_entity_type IS NULL OR entity_type = p_entity_type)
+  ORDER BY occurred_at DESC, id DESC
+  LIMIT GREATEST(1, LEAST(COALESCE(p_limit, 200), 1000));
+$$;
+REVOKE ALL ON FUNCTION admin_audit_events(UUID, TEXT, INT) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION admin_audit_events(UUID, TEXT, INT) TO service_role;

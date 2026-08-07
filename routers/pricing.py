@@ -45,15 +45,15 @@ FX_QUOTE_MAX_AGE = timedelta(minutes=60)
 
 # ── Binding quote ──────────────────────────────────────────────────────────────
 
-# Fields that go back to the customer's browser. Revenue-split model: the customer sees their price
-# (mentor_amount / subtotal) + tax + total - a clean, transparent checkout. Immigroov's commission is
-# taken OUT of the price, so the commission amount + rate (fee_amount, fee_pct, markup_pct) and the
-# mentor's take (net_mentor) are ADMIN-ONLY and stay redacted, along with the mentor's raw rate
-# (set_price) and fx internals.
+# Fields that go back to the customer's browser. Markup model: the customer sees the full breakdown -
+# session price (mentor_amount / subtotal) + platform fee (platform_fee / platform_fee_pct) + tax +
+# total. The INTERNAL mentor commission (fee_amount, fee_pct, commission_amount, commission_pct,
+# markup_pct) and the mentor's take (net_mentor / net_customer) are ADMIN-ONLY and stay redacted,
+# along with the mentor's raw rate (set_price) and fx internals.
 _PUBLIC_QUOTE_FIELDS = {
     "quote_id", "expires_at", "gross_customer", "customer_currency", "pricing_source",
     "service_id", "customer_country", "pricing_hash",
-    "mentor_amount", "subtotal", "tax_amount", "tax_pct",
+    "mentor_amount", "subtotal", "platform_fee", "platform_fee_pct", "tax_amount", "tax_pct",
 }
 
 
