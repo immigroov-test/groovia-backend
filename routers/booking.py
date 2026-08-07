@@ -278,6 +278,44 @@ def reschedule_slots(
         raise HTTPException(status_code=500, detail="Failed to fetch slots")
 
 
+@router.get("/{booking_id}/proposal-slots")
+def proposal_slots(booking_id: str, user: AuthUser = Depends(get_current_user)):
+    """Real, bookable slots inside the mentor's proposed reschedule range (BUG-085). The old UI
+    let the customer type any time, which almost always failed the availability check on accept.
+    Owner-only. Returns [] when there is no open mentor proposal."""
+    target = db.get_booking_reschedule_target(booking_id)
+    if not target:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    if target.get("candidate_id") != user.id:
+        raise HTTPException(status_code=403, detail="Only the booking owner can view this")
+
+    offer = db.get_active_mentor_proposal(booking_id)
+    if not offer or not offer.get("range_start") or not offer.get("range_end"):
+        return {"slots": [], "offer_id": offer.get("id") if offer else None}
+
+    r_start = _parse_ts(offer["range_start"])
+    r_end = _parse_ts(offer["range_end"])
+    try:
+        all_slots = db.get_available_slots(
+            target["mentor_id"], target["service_id"], str(r_start.date()), str(r_end.date()),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception:
+        logger.exception("proposal_slots failed booking=%s", booking_id)
+        raise HTTPException(status_code=500, detail="Failed to fetch slots")
+
+    # Keep only slots whose start falls inside [range_start, range_end) - these are the times the
+    # mentee can actually accept (mentee_accept_reschedule enforces the same window + availability).
+    in_range = []
+    for s in all_slots:
+        st = _parse_ts(s.get("slot_start"))
+        if st and r_start <= st < r_end:
+            in_range.append(s)
+    return {"slots": in_range, "offer_id": offer.get("id"),
+            "range_start": offer["range_start"], "range_end": offer["range_end"]}
+
+
 # ── Book a session ─────────────────────────────────────────────────────────────
 
 class BookingAnswerItem(BaseModel):
@@ -480,10 +518,11 @@ def accept_reschedule(body: AcceptRescheduleBody, background_tasks: BackgroundTa
         raise HTTPException(status_code=404, detail="Offer not found")
     if principals.get("candidate_id") != user.id:
         raise HTTPException(status_code=403, detail="Only the session's mentee can accept a reschedule offer")
+    old_slot = (db.get_offer_booking(body.offer_id) or {}).get("slot_time")
     try:
         booking = db.mentee_accept_reschedule(body.offer_id, body.slot_time.isoformat())
         if isinstance(booking, dict) and booking.get("id"):
-            background_tasks.add_task(_notify_parties, booking["id"], "rescheduled")
+            background_tasks.add_task(_notify_parties, booking["id"], "rescheduled", old_slot)
         return booking
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -498,8 +537,9 @@ class RequestOtherDateBody(BaseModel):
 
 
 @router.post("/reschedule/request-date")
-def request_other_date(body: RequestOtherDateBody, user: AuthUser = Depends(get_current_user)):
-    """Mentee counter-proposes a different date."""
+def request_other_date(body: RequestOtherDateBody, background_tasks: BackgroundTasks, user: AuthUser = Depends(get_current_user)):
+    """Mentee counter-proposes a different date (the 'Ask another date' branch of Diagram 3).
+    The mentor is notified to re-propose times for that day."""
     principals = db.get_booking_principals(body.booking_id)
     if not principals:
         raise HTTPException(status_code=404, detail="Booking not found")
@@ -507,6 +547,7 @@ def request_other_date(body: RequestOtherDateBody, user: AuthUser = Depends(get_
         raise HTTPException(status_code=403, detail="Only the session's mentee can request a different date")
     try:
         offer_id = db.mentee_request_other_date(body.booking_id, str(body.requested_date))
+        background_tasks.add_task(_notify_parties, body.booking_id, "counter_proposed")
         return {"offer_id": offer_id}
     except Exception:
         logger.exception("request_other_date failed booking=%s", body.booking_id)
@@ -599,10 +640,11 @@ def customer_reschedule(body: CustomerRescheduleBody, background_tasks: Backgrou
         raise HTTPException(status_code=404, detail="Booking not found")
     if principals.get("candidate_id") != user.id:
         raise HTTPException(status_code=403, detail="Only the booking's owner can reschedule")
+    old_slot = (db.get_booking_reschedule_target(body.booking_id) or {}).get("slot_time")
     try:
         result = db.customer_reschedule(body.booking_id, body.slot_time.isoformat())
         if result == "rescheduled":
-            background_tasks.add_task(_notify_parties, body.booking_id, "rescheduled")
+            background_tasks.add_task(_notify_parties, body.booking_id, "rescheduled", old_slot)
         return {"result": result}
     except Exception as e:
         msg = str(e)
@@ -641,7 +683,9 @@ class RejectRescheduleBody(BaseModel):
 
 @router.post("/reschedule/reject")
 def reject_reschedule(body: RejectRescheduleBody, background_tasks: BackgroundTasks, user: AuthUser = Depends(get_current_user)):
-    """Mentee rejects the mentor's proposal - the booking is cancelled."""
+    """Mentee rejects the mentor's proposal - per policy (Diagram 3) this cancels the booking
+    (late: refund 100% + 25% mentor penalty; within: credit 100%). A customer who wants to keep
+    the session but change the time uses 'Ask another date' (request-date), not this."""
     principals = db.get_offer_booking_principals(body.offer_id)
     if not principals:
         raise HTTPException(status_code=404, detail="Offer not found")
@@ -864,7 +908,23 @@ def _send_booking_confirmation(
         logger.warning("booking confirmation email failed booking=%s", booking_id)
 
 
-def _notify_parties(booking_id: str, event: str):
+def _fmt_iso_in_tz(iso: Optional[str], tz_name: Optional[str]) -> str:
+    """Format a UTC timestamp in a party's own IANA timezone, e.g. 'Mon, Aug 11, 2025 at 3:00 PM
+    (Kolkata)'. Used to show the OLD time in the rescheduled email in each recipient's timezone."""
+    dt = _parse_ts(iso)
+    if not dt:
+        return ""
+    try:
+        from zoneinfo import ZoneInfo
+        dt = dt.astimezone(ZoneInfo(tz_name or "UTC"))
+    except Exception:
+        pass
+    stamp = dt.strftime("%a, %b %d, %Y at %I:%M %p").replace(" 0", " ")
+    city = (tz_name or "UTC").split("/")[-1].replace("_", " ")
+    return f"{stamp} ({city})"
+
+
+def _notify_parties(booking_id: str, event: str, old_slot: Optional[str] = None):
     """Dispatch the lifecycle email(s) for a booking event. Runs in a BackgroundTask;
     a mailer failure never affects the action's response. Events mirror the DB's
     notify_booking_event outbox so behaviour stays consistent."""
@@ -875,31 +935,61 @@ def _notify_parties(booking_id: str, event: str):
         session_time = info.get("slot_time") or ""
         m_email, m_name = info.get("mentor_email"), info.get("mentor_name") or "there"
         c_email, c_name = info.get("candidate_email"), info.get("candidate_name") or "there"
+        service_title = info.get("service_title") or "1-on-1 session"
+        meeting_url = f"{config.FRONTEND_URL}/meeting/{booking_id}"
+        session_url = f"{config.FRONTEND_URL}/account/sessions/{booking_id}"
+        mentor_hub = f"{config.FRONTEND_URL}/mentor"
 
-        def send(to, template, recipient_name, other_name):
+        def send(to, template, data):
             if not to:
                 return
-            mailer.send_transactional(to, template, {
-                "recipient_name": recipient_name,
-                "other_name": other_name,
-                "session_time": session_time,
-            })
+            mailer.send_transactional(to, template, data)
 
         if event == "cancelled":
-            send(c_email, "booking_cancelled", c_name, m_name)
-            send(m_email, "booking_cancelled", m_name, c_name)
+            send(c_email, "booking_cancelled", {"recipient_name": c_name, "other_name": m_name, "session_time": session_time})
+            send(m_email, "booking_cancelled", {"recipient_name": m_name, "other_name": c_name, "session_time": session_time})
         elif event == "rescheduled":
-            send(c_email, "booking_rescheduled", c_name, m_name)
-            send(m_email, "booking_rescheduled", m_name, c_name)
+            # BUG-088: the rescheduled email now carries the SAME detail as the booking email -
+            # service, old + new time (each in the recipient's own tz), and the join link.
+            times = db.get_booking_times_display(booking_id) or {}
+
+            def _new(local_key: str, tz_key: str) -> str:
+                local = times.get(local_key)
+                tz = times.get(tz_key) or "UTC"
+                if not local:
+                    return session_time
+                try:
+                    dt = datetime.fromisoformat(str(local).replace("Z", ""))
+                    stamp = dt.strftime("%a, %b %d, %Y at %I:%M %p").replace(" 0", " ")
+                except Exception:
+                    stamp = str(local)
+                return f"{stamp} ({tz.split('/')[-1].replace('_', ' ')})"
+
+            cust_new, mentor_new = _new("customer_local", "customer_tz"), _new("mentor_local", "mentor_tz")
+            send(c_email, "booking_rescheduled", {
+                "recipient_name": c_name, "other_name": m_name, "service_title": service_title,
+                "old_time": _fmt_iso_in_tz(old_slot, times.get("customer_tz")), "new_time": cust_new,
+                "meeting_url": meeting_url, "manage_url": session_url,
+            })
+            send(m_email, "booking_rescheduled", {
+                "recipient_name": m_name, "other_name": c_name, "service_title": service_title,
+                "old_time": _fmt_iso_in_tz(old_slot, times.get("mentor_tz")), "new_time": mentor_new,
+                "meeting_url": meeting_url, "manage_url": mentor_hub,
+            })
         elif event == "proposed":
-            send(c_email, "reschedule_proposed", c_name, m_name)
+            send(c_email, "reschedule_proposed", {"recipient_name": c_name, "other_name": m_name,
+                                                  "session_time": session_time, "session_url": session_url})
+        elif event == "counter_proposed":
+            # Mentee asked for another date (counter-offer). Mentor must re-propose times for that day.
+            send(m_email, "reschedule_counter", {"recipient_name": m_name, "other_name": c_name,
+                                                 "session_time": session_time, "session_url": mentor_hub})
         elif event == "reschedule_requested":
-            send(m_email, "reschedule_requested", m_name, c_name)
+            send(m_email, "reschedule_requested", {"recipient_name": m_name, "other_name": c_name, "session_time": session_time})
         elif event == "cancel_requested":
-            send(m_email, "cancel_requested", m_name, c_name)
+            send(m_email, "cancel_requested", {"recipient_name": m_name, "other_name": c_name, "session_time": session_time})
         elif event == "no_show":
-            send(c_email, "no_show_reported", c_name, m_name)
-            send(m_email, "no_show_reported", m_name, c_name)
+            send(c_email, "no_show_reported", {"recipient_name": c_name, "other_name": m_name, "session_time": session_time})
+            send(m_email, "no_show_reported", {"recipient_name": m_name, "other_name": c_name, "session_time": session_time})
 
         # Admin/ops copy on the money-relevant lifecycle events (cancel, reschedule, no-show).
         if event in ("cancelled", "rescheduled", "no_show"):

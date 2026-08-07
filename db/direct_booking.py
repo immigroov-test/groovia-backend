@@ -121,6 +121,36 @@ def get_booking_reschedule_target(booking_id: str) -> Optional[dict[str, Any]]:
         return None
 
 
+def get_active_mentor_proposal(booking_id: str) -> Optional[dict[str, Any]]:
+    """The still-open reschedule offer the MENTOR proposed (id + range), so the customer can
+    pick a REAL available slot inside it (BUG-085). None if there's no pending mentor proposal."""
+    try:
+        res = (
+            _supabase.table("reschedule_offers")
+            .select("id, range_start, range_end")
+            .eq("booking_id", booking_id).eq("proposed_by", "mentor").eq("status", "pending")
+            .order("created_at", desc=True).limit(1).execute()
+        )
+        rows = res.data or []
+        return rows[0] if rows else None
+    except Exception:
+        return None
+
+
+def get_offer_booking(offer_id: str) -> Optional[dict[str, Any]]:
+    """{booking_id, slot_time} for the booking behind a reschedule offer - lets the router
+    capture the OLD time before an accept so the 'rescheduled' email can show old + new (BUG-088)."""
+    try:
+        res = (_supabase.table("reschedule_offers").select("booking_id").eq("id", offer_id).single().execute())
+        bid = (res.data or {}).get("booking_id")
+        if not bid:
+            return None
+        t = get_booking_reschedule_target(bid) or {}
+        return {"booking_id": bid, "slot_time": t.get("slot_time")}
+    except Exception:
+        return None
+
+
 def get_booking_notify_info(booking_id: str) -> Optional[dict[str, Any]]:
     """Everything needed to email both parties about a booking lifecycle event:
     mentor name/email, candidate name/email, service title, and the slot time."""
@@ -705,7 +735,7 @@ def get_booking_full_detail(booking_id: str) -> Optional[dict[str, Any]]:
     try:
         o = (
             _supabase.table("reschedule_offers")
-            .select("id, proposed_by, status, offer_date, range_start, range_end, selected_time")
+            .select("id, proposed_by, status, offer_date, range_start, range_end, selected_time, requested_date")
             .eq("booking_id", booking_id)
             .in_("status", ["pending", "mentee_selected"])
             .order("created_at", desc=True).limit(1).execute()

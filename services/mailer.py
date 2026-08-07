@@ -519,14 +519,32 @@ def _booking_cancelled(d: dict) -> tuple[str, str]:
 
 
 def _booking_rescheduled(d: dict) -> tuple[str, str]:
+    # BUG-088: the rescheduled email now mirrors the booking-confirmation email - service, the
+    # previous time AND the new time, and the join link - not just a bare "new time" line.
     name = _e(d.get("recipient_name", "there"))
     other = d.get("other_name", "the other party")
+    service = d.get("service_title", "1-on-1 session")
+    url = d.get("meeting_url", "")
+    manage = d.get("manage_url", "")
+    old_time = d.get("old_time", "")
+    new_time = d.get("new_time", "") or d.get("session_time", "")
+    rows: list[tuple[str, str]] = [("What", service)]
+    if old_time:
+        rows.append(("Previous time", old_time))
+    rows.append(("New date & time", new_time))
+    rows.append(("Where", "Video call - use the Join meeting button below"))
     body = (
         '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Your session was rescheduled ✓</h1>'
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {name},</p>'
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
-        f"Your session with <strong>{_e(other)}</strong> has a new time.</p>"
-        + _info_row("New date & time", d.get("session_time", ""))
+        f"Your session with <strong>{_e(other)}</strong> has moved to a new time. Here are the updated details.</p>"
+        + _detail_list(rows)
+        + (_btn(url, "Join meeting") if url else "")
+        + (
+            '<p style="margin:20px 0 0;font-size:14px;color:#444;line-height:1.6">'
+            f'Need to change it again? <a href="{manage}" style="color:#6b7fff">Manage this session</a>.</p>'
+            if manage else ""
+        )
     )
     return f"Rescheduled: your session with {other}", _base(body)
 
@@ -534,13 +552,16 @@ def _booking_rescheduled(d: dict) -> tuple[str, str]:
 def _reschedule_proposed(d: dict) -> tuple[str, str]:
     name = _e(d.get("recipient_name", "there"))
     mentor = d.get("other_name", "your mentor")
+    # BUG-085: link straight to the session so the customer lands on the accept/counter/reject
+    # controls, instead of a generic /account page where the proposal isn't visible.
+    link = d.get("session_url") or (config.FRONTEND_URL + "/account/sessions")
     body = (
         '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Your mentor proposed a new time</h1>'
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {name},</p>'
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
         f"<strong>{_e(mentor)}</strong> proposed a new time range for your session. "
-        "Open your sessions to pick a slot that works, or decline.</p>"
-        + _btn(config.FRONTEND_URL + "/account", "Review proposal")
+        "Open it to pick a time that works, ask for another date, or decline.</p>"
+        + _btn(link, "Review & pick a time")
     )
     return f"{mentor} proposed a new time for your session", _base(body)
 
@@ -557,6 +578,22 @@ def _reschedule_requested(d: dict) -> tuple[str, str]:
         + _btn(config.FRONTEND_URL + "/mentor", "Review request")
     )
     return "A reschedule was requested", _base(body)
+
+
+def _reschedule_counter(d: dict) -> tuple[str, str]:
+    # Mentee used "Ask another date" - the mentor must PROPOSE times for that day (not approve/decline).
+    mentor = _e(d.get("recipient_name", "there"))
+    attendee = d.get("other_name", "An attendee")
+    link = d.get("session_url") or (config.FRONTEND_URL + "/mentor")
+    body = (
+        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Your attendee asked for a different day</h1>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {mentor},</p>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
+        f"<strong>{_e(attendee)}</strong> would like to reschedule but none of your proposed times worked. "
+        "Open the session to propose a new date and time range that suits you.</p>"
+        + _btn(link, "Propose new times")
+    )
+    return "Your attendee asked for a different day", _base(body)
 
 
 def _cancel_requested(d: dict) -> tuple[str, str]:
@@ -653,6 +690,7 @@ _TEMPLATES = {
     "booking_rescheduled": _booking_rescheduled,
     "reschedule_proposed": _reschedule_proposed,
     "reschedule_requested": _reschedule_requested,
+    "reschedule_counter": _reschedule_counter,
     "cancel_requested": _cancel_requested,
     "no_show_reported": _no_show_reported,
 }

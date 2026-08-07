@@ -1677,6 +1677,10 @@ END;
 $$;
 
 -- ── 10. Mentee rejects the mentor's proposal - booking cancelled ──────────────
+-- Per the reschedule policy (Diagram 3): Reject cancels. Late proposal -> full cash refund +
+-- 25% mentor penalty; within-deadline -> wallet credit only (no cash back). The customer who
+-- wants to KEEP the session but change the time uses "Ask another date" (mentee_request_other_date),
+-- not Reject - the UI surfaces that as a distinct option.
 CREATE OR REPLACE FUNCTION mentee_reject_reschedule(p_offer_id UUID)
 RETURNS bookings LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 DECLARE o reschedule_offers; b bookings;
@@ -1685,10 +1689,8 @@ BEGIN
   IF NOT FOUND OR o.status NOT IN ('pending','mentee_selected') OR o.proposed_by <> 'mentor' THEN
     RAISE EXCEPTION 'This proposal is no longer open';
   END IF;
-  UPDATE reschedule_offers SET status = 'rejected' WHERE id = p_offer_id;
+  UPDATE reschedule_offers SET status = 'declined' WHERE id = p_offer_id;
   UPDATE bookings SET status = 'cancelled' WHERE id = o.booking_id RETURNING * INTO b;
-  -- Rejecting the mentor's proposal cancels the booking. Late proposal -> full cash refund +
-  -- 25% mentor penalty; within-deadline -> wallet credit only (no cash back).
   IF o.was_late THEN
     PERFORM settle_booking(o.booking_id, 'Reschedule rejected (late)', p_cust_refund_pct => 100, p_mentor_penalty_pct => 25);
   ELSE
