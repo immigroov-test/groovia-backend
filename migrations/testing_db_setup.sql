@@ -4597,14 +4597,16 @@ BEGIN
 END $$;
 
 
+
 -- ###########################################################################
 -- Platform activity log (unified audit trail)
 -- One admin-viewable timeline of everything that happens: bookings and their
 -- status changes, customer payments, mentor payouts, money-ledger movements,
 -- referral commissions, and pricing / commission config changes. Filled by
 -- AFTER triggers, so capture is guaranteed no matter which code path made the
--- change, and the trigger body can never abort the underlying write (it swallows
--- its own errors). Reads are admin / service-role only (RLS on, no select policy).
+-- change. Every trigger body is wrapped in its own EXCEPTION guard, so a bug in
+-- the auditing can never abort the underlying business write. Reads are admin /
+-- service-role only (RLS on, no select policy).
 -- ###########################################################################
 CREATE TABLE IF NOT EXISTS audit_events (
   id           BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -4629,7 +4631,8 @@ RETURNS TEXT LANGUAGE sql STABLE AS $$
 $$;
 
 -- Single insert path. SECURITY DEFINER so triggers running as any role can write; the EXCEPTION
--- guard makes auditing best-effort (a logging failure must never roll back the business write).
+-- guard makes the write itself best-effort. NOTE: callers ALSO guard their argument-building (enum
+-- casts etc.), because those are evaluated before this function runs.
 CREATE OR REPLACE FUNCTION log_audit_event(
   p_entity_type TEXT, p_entity_id UUID, p_booking_id UUID,
   p_action TEXT, p_summary TEXT, p_details JSONB
@@ -4642,24 +4645,28 @@ EXCEPTION WHEN OTHERS THEN
   NULL;   -- auditing is best-effort; never break the underlying write
 END; $$;
 
--- ── bookings: creation + every status change ─────────────────────────────────
+-- ── bookings: creation + every status change (status is an ENUM -> cast to text) ──
 CREATE OR REPLACE FUNCTION audit_bookings() RETURNS TRIGGER
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 BEGIN
-  IF TG_OP = 'INSERT' THEN
-    PERFORM log_audit_event('booking', NEW.id, NEW.id, 'created',
-      'Booking created (' || COALESCE(NEW.status, '?') || ')',
-      jsonb_build_object('status', NEW.status, 'service_id', NEW.service_id,
-        'mentor_id', NEW.mentor_id, 'slot_time', NEW.slot_time,
-        'candidate_email', NEW.candidate_email, 'source', NEW.source,
-        'referral_code', NEW.referral_code,
-        'referral_discount_applied_pct', NEW.referral_discount_applied_pct,
-        'customer_currency', NEW.customer_currency));
-  ELSIF TG_OP = 'UPDATE' AND NEW.status IS DISTINCT FROM OLD.status THEN
-    PERFORM log_audit_event('booking', NEW.id, NEW.id, 'status_changed',
-      'Booking ' || COALESCE(OLD.status, '?') || ' -> ' || COALESCE(NEW.status, '?'),
-      jsonb_build_object('from', OLD.status, 'to', NEW.status));
-  END IF;
+  BEGIN
+    IF TG_OP = 'INSERT' THEN
+      PERFORM log_audit_event('booking', NEW.id, NEW.id, 'created',
+        'Booking created (' || COALESCE(NEW.status::text, '?') || ')',
+        jsonb_build_object('status', NEW.status::text, 'service_id', NEW.service_id,
+          'mentor_id', NEW.mentor_id, 'slot_time', NEW.slot_time,
+          'candidate_email', NEW.candidate_email, 'source', NEW.source,
+          'referral_code', NEW.referral_code,
+          'referral_discount_applied_pct', NEW.referral_discount_applied_pct,
+          'customer_currency', NEW.customer_currency));
+    ELSIF TG_OP = 'UPDATE' AND NEW.status IS DISTINCT FROM OLD.status THEN
+      PERFORM log_audit_event('booking', NEW.id, NEW.id, 'status_changed',
+        'Booking ' || COALESCE(OLD.status::text, '?') || ' -> ' || COALESCE(NEW.status::text, '?'),
+        jsonb_build_object('from', OLD.status::text, 'to', NEW.status::text));
+    END IF;
+  EXCEPTION WHEN OTHERS THEN
+    NULL;   -- auditing must never break the booking write
+  END;
   RETURN NULL;
 END; $$;
 DROP TRIGGER IF EXISTS trg_audit_bookings ON bookings;
@@ -4670,16 +4677,20 @@ CREATE TRIGGER trg_audit_bookings AFTER INSERT OR UPDATE ON bookings
 CREATE OR REPLACE FUNCTION audit_customer_payments() RETURNS TRIGGER
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 BEGIN
-  IF TG_OP = 'INSERT' THEN
-    PERFORM log_audit_event('payment', NEW.id, NEW.booking_id, 'created',
-      'Payment ' || COALESCE(NEW.state, '?') || ' ' || COALESCE(NEW.amount::text, '') || ' ' || COALESCE(NEW.currency, ''),
-      jsonb_build_object('state', NEW.state, 'amount', NEW.amount, 'currency', NEW.currency, 'provider', NEW.provider));
-  ELSIF TG_OP = 'UPDATE' AND NEW.state IS DISTINCT FROM OLD.state THEN
-    PERFORM log_audit_event('payment', NEW.id, NEW.booking_id, 'status_changed',
-      'Payment ' || COALESCE(OLD.state, '?') || ' -> ' || COALESCE(NEW.state, '?'),
-      jsonb_build_object('from', OLD.state, 'to', NEW.state, 'amount', NEW.amount, 'currency', NEW.currency,
-        'provider_payment_id', NEW.provider_payment_id));
-  END IF;
+  BEGIN
+    IF TG_OP = 'INSERT' THEN
+      PERFORM log_audit_event('payment', NEW.id, NEW.booking_id, 'created',
+        'Payment ' || COALESCE(NEW.state, '?') || ' ' || COALESCE(NEW.amount::text, '') || ' ' || COALESCE(NEW.currency, ''),
+        jsonb_build_object('state', NEW.state, 'amount', NEW.amount, 'currency', NEW.currency, 'provider', NEW.provider));
+    ELSIF TG_OP = 'UPDATE' AND NEW.state IS DISTINCT FROM OLD.state THEN
+      PERFORM log_audit_event('payment', NEW.id, NEW.booking_id, 'status_changed',
+        'Payment ' || COALESCE(OLD.state, '?') || ' -> ' || COALESCE(NEW.state, '?'),
+        jsonb_build_object('from', OLD.state, 'to', NEW.state, 'amount', NEW.amount, 'currency', NEW.currency,
+          'provider_payment_id', NEW.provider_payment_id));
+    END IF;
+  EXCEPTION WHEN OTHERS THEN
+    NULL;
+  END;
   RETURN NULL;
 END; $$;
 DROP TRIGGER IF EXISTS trg_audit_customer_payments ON customer_payments;
@@ -4690,19 +4701,23 @@ CREATE TRIGGER trg_audit_customer_payments AFTER INSERT OR UPDATE ON customer_pa
 CREATE OR REPLACE FUNCTION audit_mentor_payouts() RETURNS TRIGGER
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 BEGIN
-  IF TG_OP = 'INSERT' THEN
-    PERFORM log_audit_event('payout', NEW.id, NEW.booking_id, 'created',
-      'Payout created (' || COALESCE(NEW.payout_state, 'pending') || ')',
-      jsonb_build_object('payout_state', NEW.payout_state,
-        'net_amount_customer_currency', NEW.net_amount_customer_currency,
-        'net_amount_mentor_currency', NEW.net_amount_mentor_currency,
-        'customer_currency', NEW.customer_currency, 'mentor_currency', NEW.mentor_currency));
-  ELSIF TG_OP = 'UPDATE' AND NEW.payout_state IS DISTINCT FROM OLD.payout_state THEN
-    PERFORM log_audit_event('payout', NEW.id, NEW.booking_id, 'status_changed',
-      'Payout ' || COALESCE(OLD.payout_state, '?') || ' -> ' || COALESCE(NEW.payout_state, '?'),
-      jsonb_build_object('from', OLD.payout_state, 'to', NEW.payout_state,
-        'payout_reference', NEW.payout_reference, 'paid_date', NEW.paid_date));
-  END IF;
+  BEGIN
+    IF TG_OP = 'INSERT' THEN
+      PERFORM log_audit_event('payout', NEW.id, NEW.booking_id, 'created',
+        'Payout created (' || COALESCE(NEW.payout_state, 'pending') || ')',
+        jsonb_build_object('payout_state', NEW.payout_state,
+          'net_amount_customer_currency', NEW.net_amount_customer_currency,
+          'net_amount_mentor_currency', NEW.net_amount_mentor_currency,
+          'customer_currency', NEW.customer_currency, 'mentor_currency', NEW.mentor_currency));
+    ELSIF TG_OP = 'UPDATE' AND NEW.payout_state IS DISTINCT FROM OLD.payout_state THEN
+      PERFORM log_audit_event('payout', NEW.id, NEW.booking_id, 'status_changed',
+        'Payout ' || COALESCE(OLD.payout_state, '?') || ' -> ' || COALESCE(NEW.payout_state, '?'),
+        jsonb_build_object('from', OLD.payout_state, 'to', NEW.payout_state,
+          'payout_reference', NEW.payout_reference, 'paid_date', NEW.paid_date));
+    END IF;
+  EXCEPTION WHEN OTHERS THEN
+    NULL;
+  END;
   RETURN NULL;
 END; $$;
 DROP TRIGGER IF EXISTS trg_audit_mentor_payouts ON mentor_payouts;
@@ -4713,10 +4728,14 @@ CREATE TRIGGER trg_audit_mentor_payouts AFTER INSERT OR UPDATE ON mentor_payouts
 CREATE OR REPLACE FUNCTION audit_booking_ledger() RETURNS TRIGGER
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 BEGIN
-  PERFORM log_audit_event('ledger', NEW.id, NEW.booking_id, 'created',
-    initcap(NEW.party) || ' ' || NEW.kind || ' ' || COALESCE(NEW.amount::text, '') || ' ' || COALESCE(NEW.currency, ''),
-    jsonb_build_object('party', NEW.party, 'kind', NEW.kind, 'amount', NEW.amount,
-      'pct', NEW.pct, 'currency', NEW.currency, 'reason', NEW.reason));
+  BEGIN
+    PERFORM log_audit_event('ledger', NEW.id, NEW.booking_id, 'created',
+      initcap(NEW.party) || ' ' || NEW.kind || ' ' || COALESCE(NEW.amount::text, '') || ' ' || COALESCE(NEW.currency, ''),
+      jsonb_build_object('party', NEW.party, 'kind', NEW.kind, 'amount', NEW.amount,
+        'pct', NEW.pct, 'currency', NEW.currency, 'reason', NEW.reason));
+  EXCEPTION WHEN OTHERS THEN
+    NULL;
+  END;
   RETURN NULL;
 END; $$;
 DROP TRIGGER IF EXISTS trg_audit_booking_ledger ON booking_ledger;
@@ -4727,17 +4746,21 @@ CREATE TRIGGER trg_audit_booking_ledger AFTER INSERT ON booking_ledger
 CREATE OR REPLACE FUNCTION audit_commission_ledger() RETURNS TRIGGER
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 BEGIN
-  IF TG_OP = 'INSERT' THEN
-    PERFORM log_audit_event('commission', NEW.id, NEW.booking_id, 'created',
-      'Referral commission ' || COALESCE(NEW.commission_amount::text, '') || ' ' || COALESCE(NEW.customer_currency, '') || ' (' || COALESCE(NEW.status, '') || ')',
-      jsonb_build_object('affiliate_id', NEW.affiliate_id, 'referral_code', NEW.referral_code,
-        'commission_amount', NEW.commission_amount, 'customer_currency', NEW.customer_currency,
-        'split_snapshot', NEW.split_snapshot, 'status', NEW.status));
-  ELSIF TG_OP = 'UPDATE' AND NEW.status IS DISTINCT FROM OLD.status THEN
-    PERFORM log_audit_event('commission', NEW.id, NEW.booking_id, 'status_changed',
-      'Referral commission ' || COALESCE(OLD.status, '?') || ' -> ' || COALESCE(NEW.status, '?'),
-      jsonb_build_object('from', OLD.status, 'to', NEW.status, 'affiliate_id', NEW.affiliate_id));
-  END IF;
+  BEGIN
+    IF TG_OP = 'INSERT' THEN
+      PERFORM log_audit_event('commission', NEW.id, NEW.booking_id, 'created',
+        'Referral commission ' || COALESCE(NEW.commission_amount::text, '') || ' ' || COALESCE(NEW.customer_currency, '') || ' (' || COALESCE(NEW.status, '') || ')',
+        jsonb_build_object('affiliate_id', NEW.affiliate_id, 'referral_code', NEW.referral_code,
+          'commission_amount', NEW.commission_amount, 'customer_currency', NEW.customer_currency,
+          'split_snapshot', NEW.split_snapshot, 'status', NEW.status));
+    ELSIF TG_OP = 'UPDATE' AND NEW.status IS DISTINCT FROM OLD.status THEN
+      PERFORM log_audit_event('commission', NEW.id, NEW.booking_id, 'status_changed',
+        'Referral commission ' || COALESCE(OLD.status, '?') || ' -> ' || COALESCE(NEW.status, '?'),
+        jsonb_build_object('from', OLD.status, 'to', NEW.status, 'affiliate_id', NEW.affiliate_id));
+    END IF;
+  EXCEPTION WHEN OTHERS THEN
+    NULL;
+  END;
   RETURN NULL;
 END; $$;
 DROP TRIGGER IF EXISTS trg_audit_commission_ledger ON commission_ledger;
@@ -4748,16 +4771,20 @@ CREATE TRIGGER trg_audit_commission_ledger AFTER INSERT OR UPDATE ON commission_
 CREATE OR REPLACE FUNCTION audit_country_pricing() RETURNS TRIGGER
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 BEGIN
-  IF TG_OP = 'UPDATE'
-     AND NEW.platform_fee_pct IS NOT DISTINCT FROM OLD.platform_fee_pct
-     AND NEW.tax_pct IS NOT DISTINCT FROM OLD.tax_pct
-     AND NEW.tax_label IS NOT DISTINCT FROM OLD.tax_label THEN
-    RETURN NULL;   -- nothing pricing-relevant changed
-  END IF;
-  PERFORM log_audit_event('pricing', NULL, NULL, LOWER(TG_OP),
-    'Pricing ' || NEW.country_code || ': fee ' || NEW.platform_fee_pct || '%, tax ' || NEW.tax_pct || '%',
-    jsonb_build_object('country_code', NEW.country_code, 'platform_fee_pct', NEW.platform_fee_pct,
-      'tax_pct', NEW.tax_pct, 'tax_label', NEW.tax_label));
+  BEGIN
+    IF TG_OP = 'UPDATE'
+       AND NEW.platform_fee_pct IS NOT DISTINCT FROM OLD.platform_fee_pct
+       AND NEW.tax_pct IS NOT DISTINCT FROM OLD.tax_pct
+       AND NEW.tax_label IS NOT DISTINCT FROM OLD.tax_label THEN
+      RETURN NULL;   -- nothing pricing-relevant changed
+    END IF;
+    PERFORM log_audit_event('pricing', NULL, NULL, LOWER(TG_OP),
+      'Pricing ' || NEW.country_code || ': fee ' || NEW.platform_fee_pct || '%, tax ' || NEW.tax_pct || '%',
+      jsonb_build_object('country_code', NEW.country_code, 'platform_fee_pct', NEW.platform_fee_pct,
+        'tax_pct', NEW.tax_pct, 'tax_label', NEW.tax_label));
+  EXCEPTION WHEN OTHERS THEN
+    NULL;
+  END;
   RETURN NULL;
 END; $$;
 DROP TRIGGER IF EXISTS trg_audit_country_pricing ON country_pricing;
@@ -4768,12 +4795,16 @@ CREATE TRIGGER trg_audit_country_pricing AFTER INSERT OR UPDATE ON country_prici
 CREATE OR REPLACE FUNCTION audit_platform_settings() RETURNS TRIGGER
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 BEGIN
-  IF TG_OP = 'UPDATE' AND NEW.value IS NOT DISTINCT FROM OLD.value THEN
-    RETURN NULL;
-  END IF;
-  PERFORM log_audit_event('settings', NULL, NULL, LOWER(TG_OP),
-    'Setting ' || NEW.key || ' = ' || COALESCE(NEW.value, ''),
-    jsonb_build_object('key', NEW.key, 'from', CASE WHEN TG_OP = 'UPDATE' THEN OLD.value ELSE NULL END, 'to', NEW.value));
+  BEGIN
+    IF TG_OP = 'UPDATE' AND NEW.value IS NOT DISTINCT FROM OLD.value THEN
+      RETURN NULL;
+    END IF;
+    PERFORM log_audit_event('settings', NULL, NULL, LOWER(TG_OP),
+      'Setting ' || NEW.key || ' = ' || COALESCE(NEW.value, ''),
+      jsonb_build_object('key', NEW.key, 'from', CASE WHEN TG_OP = 'UPDATE' THEN OLD.value ELSE NULL END, 'to', NEW.value));
+  EXCEPTION WHEN OTHERS THEN
+    NULL;
+  END;
   RETURN NULL;
 END; $$;
 DROP TRIGGER IF EXISTS trg_audit_platform_settings ON platform_settings;
