@@ -211,6 +211,27 @@ class BankDetailsBody(BaseModel):
     bank_address: Optional[str] = None      # swift (optional)
 
 
+class ServedCountry(BaseModel):
+    """A country (besides the mentor's current one) they can advise on, with years lived there."""
+    code: str
+    years: Optional[int] = None
+
+    @field_validator("code")
+    @classmethod
+    def validate_code(cls, v: str) -> str:
+        v = (v or "").strip().upper()
+        if len(v) != 2 or not v.isalpha():
+            raise ValueError("Country code must be a 2-letter ISO code")
+        return v
+
+    @field_validator("years")
+    @classmethod
+    def validate_years(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and (v < 0 or v > 60):
+            raise ValueError("Years must be between 0 and 60")
+        return v
+
+
 class MentorSignupBody(BaseModel):
     display_name: str
     headline: Optional[str] = None
@@ -218,7 +239,8 @@ class MentorSignupBody(BaseModel):
     phone: Optional[str] = None
     bio: Optional[str] = None
     country: Optional[str] = None
-    home_country_code: Optional[str] = None
+    home_country_code: Optional[str] = None   # legacy/back-compat; no longer collected at signup
+    served_countries: list[ServedCountry] = []   # other countries they can advise on (max 2), with years
     city: Optional[str] = None
     timezone: str = "UTC"
     languages: list[str] = []
@@ -253,19 +275,20 @@ class MentorSignupBody(BaseModel):
             raise ValueError("Years must be between 0 and 60")
         return v
 
-    @field_validator("expertise_country_codes")
+    @field_validator("served_countries")
     @classmethod
-    def validate_expertise_countries(cls, v: list[str]) -> list[str]:
+    def validate_served_countries(cls, v: list[ServedCountry]) -> list[ServedCountry]:
         if len(v) > 2:
-            raise ValueError("You can select a maximum of 2 countries of expertise")
+            raise ValueError("You can add at most 2 other countries")
         return v
 
 
-def _derive_expertise(country: Optional[str], home_country: Optional[str]) -> list[str]:
-    """The countries a mentee can browse a mentor by = the two they actually know: their
-    current country (destination) and home country (origin). Deduped, order-preserving.
-    We derive this instead of asking for it, so it can never drift from home/current."""
-    codes = [(country or "").strip().upper(), (home_country or "").strip().upper()]
+def _derive_expertise(country: Optional[str], extra_codes: list[str] | None = None) -> list[str]:
+    """The countries a mentee can browse a mentor by = their current country plus the other countries
+    they can advise on (served_countries). Deduped, order-preserving. Derived, not asked for, so it can
+    never drift from the inputs."""
+    codes = [(country or "").strip().upper()]
+    codes += [(c or "").strip().upper() for c in (extra_codes or [])]
     return list(dict.fromkeys(c for c in codes if c))
 
 
@@ -281,8 +304,6 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
         raise HTTPException(status_code=400, detail="You must accept the mentor agreement")
     if not body.languages:
         raise HTTPException(status_code=400, detail="Select at least one language")
-    if not (body.home_country_code or "").strip():
-        raise HTTPException(status_code=400, detail="Select your home country")
     if not (body.country or "").strip():
         raise HTTPException(status_code=400, detail="Select your current country")
     if body.years_professional_experience is None:
@@ -311,12 +332,13 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
         bio=(body.bio or "").strip() or None,
         country=(body.country or "").strip() or None,
         home_country_code=(body.home_country_code or "").strip() or None,
+        served_countries=[s.model_dump() for s in body.served_countries],
         city=(body.city or "").strip() or None,
         timezone_name=body.timezone,
         languages=body.languages,
         social_links=[s.model_dump() for s in body.social_links],
         public_notes=(body.public_notes or "").strip() or None,
-        expertise_country_codes=_derive_expertise(body.country, body.home_country_code),
+        expertise_country_codes=_derive_expertise(body.country, [s.code for s in body.served_countries]),
         expertise_categories=body.expertise_categories,
         years_lived_experience=body.years_lived_experience,
         years_professional_experience=body.years_professional_experience,
@@ -443,6 +465,7 @@ class ProfileUpdateBody(BaseModel):
     bio: Optional[str] = None
     country: Optional[str] = None
     home_country_code: Optional[str] = None
+    served_countries: Optional[list[ServedCountry]] = None
     city: Optional[str] = None
     timezone: Optional[str] = None
     languages: Optional[list[str]] = None
@@ -502,12 +525,20 @@ def update_profile(body: ProfileUpdateBody, user: AuthUser = Depends(get_current
         fields["country"] = body.country.strip() or None
     if body.home_country_code is not None:
         fields["home_country_code"] = (body.home_country_code.strip().upper() or None)
-    # Expertise (browse) countries are always derived from home + current, never sent by the
-    # client. Re-derive whenever either changes, using the incoming value or the existing row.
-    if body.country is not None or body.home_country_code is not None:
+    if body.served_countries is not None:
+        fields["served_countries"] = [s.model_dump() for s in body.served_countries]
+    # Expertise (browse) countries are always derived from current + served (+ any legacy home),
+    # never sent by the client. Re-derive whenever the current country or the served list changes,
+    # using the incoming values or the existing row.
+    if body.country is not None or body.served_countries is not None or body.home_country_code is not None:
         new_country = fields["country"] if "country" in fields else mentor.get("country")
+        served = (fields["served_countries"] if "served_countries" in fields
+                  else (mentor.get("served_countries") or []))
+        extra = [c.get("code") for c in served if c.get("code")]
         new_home = fields["home_country_code"] if "home_country_code" in fields else mentor.get("home_country_code")
-        derived = _derive_expertise(new_country, new_home)
+        if new_home:
+            extra.append(new_home)
+        derived = _derive_expertise(new_country, extra)
         if derived:
             fields["expertise_country_codes"] = derived
     if body.city is not None:

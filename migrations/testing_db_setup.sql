@@ -317,6 +317,11 @@ ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS currency_rates JSONB NOT NULL DEFA
 -- existing DB, so they MUST also be ALTERed in (or the mentor-list SELECT breaks on old databases).
 ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS home_country_code CHAR(2);
 ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS years_professional_experience INTEGER;
+-- Other countries the mentor can advise on (besides their current one), each with years lived there:
+-- [{"code":"DE","years":5}, ...] (max 2). Their codes feed expertise_country_codes (browse facets).
+-- years_lived_experience is now "years in the current country". home_country_code is retained for
+-- back-compat with already-migrated mentors but is no longer collected at signup.
+ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS served_countries JSONB NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS legacy_id TEXT UNIQUE;
 ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS legacy_data JSONB;
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS candidate_phone TEXT;
