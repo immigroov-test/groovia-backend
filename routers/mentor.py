@@ -308,6 +308,11 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
         raise HTTPException(status_code=400, detail="Select your current country")
     if body.years_professional_experience is None:
         raise HTTPException(status_code=400, detail="Years of professional experience is required")
+    # BUG-059: free is reserved for a single Introductory-call-style slot, not something any
+    # service can be priced down to - the catalogue UI already enforces this, but a request built
+    # directly against the API must be checked too.
+    if sum(1 for svc in body.services if svc.set_price == 0) > 1:
+        raise HTTPException(status_code=400, detail="Only one session can be free.")
     # Bank details are mandatory. Validate them BEFORE creating the mentor row so a missing/invalid
     # payout method never leaves a half-created mentor (which would 409 any retry).
     if body.bank is None:
@@ -668,7 +673,14 @@ def update_profile(body: ProfileUpdateBody, background_tasks: BackgroundTasks, u
         # in place and resubmit the whole application for review.
         if mentor.get("status") == "approved":
             return _apply_approved_profile_edit(mentor, fields, background_tasks)
-        return db.save_mentor_profile_edit(mentor["id"], fields)
+        # changes_requested/rejected: resubmitting the whole application for review. BUG-076: this
+        # path never notified admin (only the approved-mentor path did), so a fixed-up resubmission
+        # could sit in pending_review unnoticed. Same old -> new diff email as the approved path.
+        changes = _profile_change_rows(mentor, fields)
+        row = db.save_mentor_profile_edit(mentor["id"], fields)
+        mentor_name = mentor.get("display_name") or "A mentor"
+        background_tasks.add_task(_email_admins_change, "admin_mentor_change_request", mentor_name, changes)
+        return row
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
     except ValueError as e:

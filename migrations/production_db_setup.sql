@@ -1634,6 +1634,17 @@ BEGIN
     RETURN NULL;
   END IF;
   IF p_end <= p_start THEN RAISE EXCEPTION 'Range end must be after start'; END IF;
+  -- BUG-085: the range was previously accepted with zero regard for the mentor's actual calendar,
+  -- so the mentee's proposal-slots view (which DOES check real availability) routinely came back
+  -- empty and "Accept this time" stayed permanently disabled with no way out but Reject. Refuse a
+  -- range that has no open slot in it at propose time instead, so the mentor finds out immediately.
+  IF NOT EXISTS (
+    SELECT 1 FROM get_available_slots(b.mentor_id, b.service_id,
+                                       (p_start AT TIME ZONE 'UTC')::DATE, (p_end AT TIME ZONE 'UTC')::DATE)
+    WHERE slot_start >= p_start AND slot_start < p_end
+  ) THEN
+    RAISE EXCEPTION 'No open times in that range on your calendar - pick a range that includes some availability.';
+  END IF;
   UPDATE reschedule_offers SET status = 'superseded'
     WHERE booking_id = p_booking_id AND status IN ('pending','mentee_selected');
   INSERT INTO reschedule_offers(booking_id, proposed_by, offer_date, range_start, range_end,
@@ -1751,9 +1762,10 @@ BEGIN
     PERFORM force_autocancel(p_booking_id, 'user');
     RETURN NULL;
   END IF;
-  IF booking_deadline_state(b.slot_time) = 'buffer' THEN
-    RAISE EXCEPTION 'Within 2 hours of the session - cannot reschedule.';
-  END IF;
+  -- BUG-084: this is a REQUEST needing mentor approval (unlike customer_reschedule's instant pick,
+  -- which stays buffer-blocked below) - there's no reason a customer inside the 2h buffer can't ask,
+  -- only no guarantee the mentor can accommodate it in time. Cancellation stays hard-blocked in the
+  -- buffer (cancel_booking); this is the alternative the customer is offered instead.
   UPDATE booking_requests SET status = 'withdrawn', resolved_at = NOW()
     WHERE booking_id = p_booking_id AND status = 'pending';
   INSERT INTO booking_requests(booking_id, kind, initiated_by, status, respond_by, note)

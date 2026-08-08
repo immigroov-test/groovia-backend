@@ -90,6 +90,25 @@ def list_active_mentors(
         rows = build("id, set_price, set_currency, is_active, category")
         has_status = False
 
+    # BUG-057: services can legitimately sit in different currencies (a migrated mentor's
+    # per-service currency comes from legacy data; see scripts/migrate_mentors.py), so comparing
+    # raw set_price numbers picks whichever currency happens to have the smallest face value, not
+    # the actually-cheapest service ("random" price on the card). Normalize every paid service to
+    # a common pivot (USD) via the EUR-pivot fx_rates table before comparing; the DISPLAYED price
+    # still uses the winning service's own set_price/set_currency, only the comparison is normalized.
+    try:
+        fx_rows = _supabase.table("fx_rates").select("quote, rate").eq("base", "EUR").execute().data or []
+        fx_eur = {row["quote"].upper(): float(row["rate"]) for row in fx_rows if row.get("rate")}
+    except Exception:
+        fx_eur = {}
+
+    def _to_usd(amount: float, currency: str) -> float:
+        ccy = (currency or "USD").upper()
+        if ccy == "USD" or not fx_eur.get("USD") or not fx_eur.get(ccy):
+            return amount  # best-effort fallback: can't normalize, compare as-is
+        amount_eur = amount / fx_eur[ccy]
+        return amount_eur * fx_eur["USD"]
+
     # Collapse the mentor's bookable services into a single "starting from" price for the
     # card (cheapest active, admin-approved when status exists), then drop the raw list.
     # A mentor with no bookable service is a dead-end profile (nothing a mentee can book),
@@ -108,7 +127,8 @@ def list_active_mentors(
         # show it as a small badge below the price.
         paid = [s for s in svcs if float(s["set_price"]) > 0]
         r["has_free_session"] = any(float(s["set_price"]) == 0 for s in svcs)
-        cheapest = min(paid, key=lambda s: float(s["set_price"])) if paid else svcs[0]
+        cheapest = (min(paid, key=lambda s: _to_usd(float(s["set_price"]), s.get("set_currency")))
+                    if paid else svcs[0])
         r["min_price"] = float(cheapest["set_price"]) if paid else 0.0
         r["price_currency"] = cheapest.get("set_currency") or r.get("currency") or "USD"
         # The cheapest PAID service's id, so the card can localize its price through the SAME engine
@@ -497,7 +517,8 @@ _CRITICAL_MENTOR_FIELDS = {
 # need re-approval; they are intentionally not here.
 _EDITABLE_PROFILE_FIELDS = {
     "display_name", "headline", "bio", "photo_url",
-    "phone", "city", "country", "home_country_code", "social_links", "public_notes", "languages", "timezone",
+    "phone", "city", "country", "home_country_code", "served_countries",
+    "social_links", "public_notes", "languages", "timezone",
     "expertise_country_codes", "expertise_categories", "years_lived_experience",
     "years_professional_experience", "professional_domains", "specializations",
     "hourly_rate", "currency", "currency_rates", "smart_pricing",
@@ -1166,6 +1187,13 @@ def reprice_mentor_services(mentor_id: str) -> int:
                 cprices.append({"currency": rc, "base_price": round(rr * dur / 60.0, 2)})
         try:
             _supabase.table("services").update({
+                # BUG-101: compute_booking_price/display_service_prices both read
+                # COALESCE(set_offer_price, set_price) for the primary currency, so a stale
+                # set_offer_price from an earlier (now-outdated) rate silently outlives every
+                # future rate change and keeps winning over the freshly-derived set_price - the
+                # customer sees an old absolute figure instead of today's rate. Since prices here
+                # are always derived (never hand-set), any leftover offer price no longer applies
+                # once the base rate has moved and must be cleared, not left to shadow it.
                 "set_price": set_price, "set_currency": currency, "currency_prices": cprices,
                 # Derived pricing has NO separate offer price. Clear any stale one (migrated rows had
                 # set_offer_price set), otherwise the engine's COALESCE(set_offer_price, set_price) keeps

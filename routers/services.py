@@ -76,6 +76,10 @@ def list_services(mentor: dict = Depends(require_mentor)):
 def create_service(body: ServiceCreateBody, mentor: dict = Depends(require_mentor)):
     mentor_id = mentor["id"]
     primary_ccy = (mentor.get("currency") or "USD").upper()
+    # BUG-059: free is reserved for a single Introductory-call-style slot - reject a second
+    # zero-priced service server-side too, since the frontend check alone can be bypassed.
+    if body.set_price == 0 and any(float(s.get("set_price") or 0) == 0 for s in db.list_services(mentor_id)):
+        raise HTTPException(status_code=422, detail="You already have a free session. Only one is allowed.")
     try:
         currency_prices = pricing_input.validate_currency_prices(primary_ccy, body.currency_prices)
     except ValueError as e:
