@@ -937,7 +937,9 @@ def _notify_parties(booking_id: str, event: str, old_slot: Optional[str] = None)
         c_email, c_name = info.get("candidate_email"), info.get("candidate_name") or "there"
         service_title = info.get("service_title") or "1-on-1 session"
         meeting_url = f"{config.FRONTEND_URL}/meeting/{booking_id}"
-        session_url = f"{config.FRONTEND_URL}/account/sessions/{booking_id}"
+        # The customer session-detail page is /session/{id} (there is NO /account/sessions/{id} page,
+        # only the reschedule sub-route), so linking to the latter 404'd (BUG-096 + the BUG-085 email).
+        session_url = f"{config.FRONTEND_URL}/session/{booking_id}"
         mentor_hub = f"{config.FRONTEND_URL}/mentor"
 
         def send(to, template, data):
