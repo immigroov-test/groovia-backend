@@ -105,6 +105,29 @@ class ConvertPricesBody(BaseModel):
     items: list[ConvertItem]
 
 
+class DisplayPricesBody(BaseModel):
+    country: Optional[str] = None
+    service_ids: list[str]
+
+
+@router.post("/display")
+def display_prices(body: DisplayPricesBody, request: Request):
+    """Session-price-only display pricing for the cards + booking page. Uses the SAME per-service
+    engine as the binding quote (explicit currency + PPP), so the session price shown equals the
+    checkout session line and the only difference at checkout is the disclosed platform fee + tax
+    (BUG-077). Public; soft FX (falls back to the mentor currency, never fails)."""
+    # Same trusted edge country as the binding quote, so display and charge agree.
+    country = resolve_pricing_country(request, body.country)
+    ids = [s for s in (body.service_ids or []) if s][:200]
+    if not ids:
+        return {"prices": []}
+    try:
+        return {"prices": db.display_service_prices(country, ids)}
+    except Exception:
+        logger.exception("display_prices failed country=%s", country)
+        raise HTTPException(status_code=500, detail="Failed to compute display prices")
+
+
 @router.post("/convert")
 def convert_prices(body: ConvertPricesBody, request: Request):
     """Soft, no-fee display conversion for browse/list pages — never fails on

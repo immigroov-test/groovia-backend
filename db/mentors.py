@@ -83,11 +83,11 @@ def list_active_mentors(
     # services.status isn't present in every environment; fall back without it so the
     # query (and the agent's mentor lookup) never crashes on a missing column.
     try:
-        rows = build("set_price, set_currency, is_active, status, category")
+        rows = build("id, set_price, set_currency, is_active, status, category")
         has_status = True
     except Exception:
         logger.warning("list_active_mentors: services.status missing; retrying without it")
-        rows = build("set_price, set_currency, is_active, category")
+        rows = build("id, set_price, set_currency, is_active, category")
         has_status = False
 
     # Collapse the mentor's bookable services into a single "starting from" price for the
@@ -111,6 +111,9 @@ def list_active_mentors(
         cheapest = min(paid, key=lambda s: float(s["set_price"])) if paid else svcs[0]
         r["min_price"] = float(cheapest["set_price"]) if paid else 0.0
         r["price_currency"] = cheapest.get("set_currency") or r.get("currency") or "USD"
+        # The cheapest PAID service's id, so the card can localize its price through the SAME engine
+        # as checkout (display_service_prices) and never show a figure that jumps at checkout (BUG-077).
+        r["min_price_service_id"] = cheapest.get("id") if paid else None
         # What the mentor actually helps with = the categories of the sessions they configured. This
         # is the user-facing filter facet (not the self-declared expertise_categories), so browse
         # filters/tags reflect what's really bookable.

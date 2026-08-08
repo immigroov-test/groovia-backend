@@ -2648,6 +2648,62 @@ BEGIN
 END; $$;
 GRANT EXECUTE ON FUNCTION convert_prices(TEXT, JSONB) TO anon, authenticated;
 
+-- Display SESSION price per service, using the SAME per-service engine as the binding quote
+-- (compute_booking_price): explicit per-currency price when the mentor set one, else the base rate
+-- localized with FX, with PPP gated on the mentor's fair-pricing flag. This is what the cards and the
+-- booking page show, so the session price displayed EXACTLY equals the session line at checkout
+-- (BUG-077) - only the platform fee + tax are added at checkout. No fee/tax here (session only).
+-- Soft FX: when a rate is missing it shows the mentor-currency price (fx_ok=false) instead of failing.
+--   you  = session price WITH PPP (what the customer is charged for the session)
+--   you0 = session price WITHOUT PPP (for the struck-through "original" on fair-pricing cards)
+CREATE OR REPLACE FUNCTION display_service_prices(p_customer_country TEXT, p_service_ids UUID[])
+RETURNS TABLE(key TEXT, you NUMERIC, you0 NUMERIC, customer_currency TEXT, fx_ok BOOLEAN)
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  sid UUID; v_mentor_id UUID; v_set NUMERIC; v_set_offer NUMERIC; v_ment_ccy TEXT; v_is_ppp BOOLEAN;
+  v_prices JSONB; v_mentor_country TEXT; v_cust TEXT; v_explicit NUMERIC; v_ppp NUMERIC; v_fx NUMERIC; v_base NUMERIC;
+BEGIN
+  v_cust := currency_for_country(p_customer_country);
+  FOREACH sid IN ARRAY COALESCE(p_service_ids, ARRAY[]::UUID[]) LOOP
+    SELECT s.mentor_id, s.set_price, s.set_offer_price, COALESCE(s.set_currency, 'USD'), s.is_ppp,
+           COALESCE(s.currency_prices, '[]'::jsonb), m.country
+      INTO v_mentor_id, v_set, v_set_offer, v_ment_ccy, v_is_ppp, v_prices, v_mentor_country
+    FROM services s JOIN mentors m ON m.id = s.mentor_id
+    WHERE s.id = sid AND s.is_active AND s.status = 'approved';
+    IF v_set IS NULL THEN CONTINUE; END IF;   -- unknown/inactive/unapproved: skip (card falls back)
+
+    -- Explicit mentor rate for the customer's currency? (identical rule to compute_booking_price)
+    IF v_cust = v_ment_ccy THEN
+      v_explicit := COALESCE(v_set_offer, v_set);
+    ELSE
+      SELECT COALESCE((e->>'offer_price')::numeric, (e->>'base_price')::numeric)
+        INTO v_explicit
+      FROM jsonb_array_elements(v_prices) e
+      WHERE UPPER(e->>'currency') = v_cust AND COALESCE((e->>'base_price')::numeric, 0) > 0
+      LIMIT 1;
+    END IF;
+
+    IF v_explicit IS NOT NULL THEN
+      -- Mentor set this currency's price directly: no FX, no PPP (matches checkout's explicit branch).
+      key := sid::text; you0 := ROUND(v_explicit, 2); you := ROUND(v_explicit, 2);
+      customer_currency := v_cust; fx_ok := true;
+    ELSE
+      v_base := COALESCE(v_set_offer, v_set);
+      v_ppp  := CASE WHEN v_is_ppp THEN ppp_relative(p_customer_country, v_mentor_country) ELSE 1 END;
+      v_fx   := get_fx_or_null(v_ment_ccy, v_cust);   -- SOFT (checkout uses the strict get_fx)
+      IF v_fx IS NULL THEN
+        key := sid::text; you0 := ROUND(v_base, 2); you := ROUND(v_base * v_ppp, 2);
+        customer_currency := UPPER(v_ment_ccy); fx_ok := false;   -- show mentor currency, no charge here
+      ELSE
+        key := sid::text; you0 := ROUND(v_base * v_fx, 2); you := ROUND(v_base * v_ppp * v_fx, 2);
+        customer_currency := v_cust; fx_ok := true;
+      END IF;
+    END IF;
+    RETURN NEXT;
+  END LOOP;
+END; $$;
+GRANT EXECUTE ON FUNCTION display_service_prices(TEXT, UUID[]) TO anon, authenticated;
+
 -- ── Payment tables ───────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS customer_payments (
   id                          UUID PRIMARY KEY DEFAULT gen_random_uuid(),

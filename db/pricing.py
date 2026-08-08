@@ -44,6 +44,18 @@ def convert_prices(customer_country: Optional[str], items: list[dict[str, Any]])
     return res.data or []
 
 
+def display_service_prices(customer_country: Optional[str], service_ids: list[str]) -> list[dict[str, Any]]:
+    """Session-price-only display pricing that uses the SAME per-service engine as the binding quote
+    (explicit currency + PPP), so the session price shown on cards/booking equals the checkout session
+    line (BUG-077). Soft FX (falls back to the mentor currency). Returns [{key, you, you0,
+    customer_currency, fx_ok}] keyed by service id."""
+    res = _supabase.rpc("display_service_prices", {
+        "p_customer_country": customer_country,
+        "p_service_ids": service_ids,
+    }).execute()
+    return res.data or []
+
+
 # ── FX refresh (fetches EUR-pivot rates from Frankfurter) ────────────────────
 # compute_booking_price hard-fails once fx_rates is >24h stale (fx_max_age_minutes),
 # so a scheduler (jobs/run_due.py) must call refresh_fx_rates periodically.
