@@ -376,6 +376,21 @@ def _session_reminder_1h(d: dict) -> tuple[str, str]:
     return f"Your session with {other} starts in 1 hour", _base(body)
 
 
+def _session_reminder_30min(d: dict) -> tuple[str, str]:
+    recipient = _e(d.get("recipient_name", ""))
+    other = d.get("other_party_name", "your mentor")
+    url = d.get("meeting_url", "")
+    body = (
+        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Your session starts in 30 minutes</h1>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {recipient},</p>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
+        f"Your session with <strong>{_e(other)}</strong> starts in about 30 minutes. Make sure you're ready!"
+        "</p>"
+        + (_btn(url, "Join meeting") if url else "")
+    )
+    return f"Your session with {other} starts in 30 minutes", _base(body)
+
+
 def _mentor_attendance_check(d: dict) -> tuple[str, str]:
     mentor = _e(d.get("mentor_name", ""))
     candidate = d.get("candidate_name", "your attendee")
@@ -714,6 +729,7 @@ _TEMPLATES = {
     "booking_confirmed_mentor": _booking_confirmed_mentor,
     "session_reminder_24h": _session_reminder_24h,
     "session_reminder_1h": _session_reminder_1h,
+    "session_reminder_30min": _session_reminder_30min,
     "mentor_attendance_check": _mentor_attendance_check,
     "review_request": _review_request,
     "welcome_candidate": _welcome_candidate,

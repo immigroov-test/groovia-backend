@@ -1,4 +1,4 @@
-"""Scheduled booking notifications: 24h/1h session reminders (to the candidate) and the
+"""Scheduled booking notifications: 24h/30min session reminders (to the candidate) and the
 T-60 "are you available?" nudge (to the mentor). Invoked by the dispatcher each tick.
 
 Each item is claimed atomically (db.claim_reminder) before sending, so overlapping ticks
@@ -18,8 +18,8 @@ logger = logging.getLogger("immigroov.services.notifications")
 # tick so a session is never skipped between ticks; the per-(booking,kind) claim prevents
 # repeats within the window.
 _REMINDER_WINDOWS = {
-    "24h": (23 * 60 + 45, 24 * 60 + 15),
-    "1h":  (45, 75),
+    "24h":   (23 * 60 + 45, 24 * 60 + 15),
+    "30min": (20, 40),   # BUG-094: second reminder half an hour before (was 1h)
 }
 _ATTEND_WINDOW = (45, 75)   # mentor nudge, same ~1h-out window
 
@@ -42,7 +42,7 @@ def _fmt_time(times: dict | None, local_key: str, tz_key: str) -> str:
 
 
 def send_session_reminders() -> dict:
-    """24h + 1h reminders to the candidate."""
+    """24h + 30min reminders to the candidate (BUG-094)."""
     sent = 0
     for kind, (lo, hi) in _REMINDER_WINDOWS.items():
         for bid in db.due_unreminded_bookings(kind, lo, hi):
