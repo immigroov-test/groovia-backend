@@ -500,7 +500,7 @@ _EDITABLE_PROFILE_FIELDS = {
     "phone", "city", "country", "home_country_code", "social_links", "public_notes", "languages", "timezone",
     "expertise_country_codes", "expertise_categories", "years_lived_experience",
     "years_professional_experience", "professional_domains", "specializations",
-    "hourly_rate", "currency", "currency_rates",
+    "hourly_rate", "currency", "currency_rates", "smart_pricing",
 }
 
 
@@ -557,10 +557,32 @@ def save_mentor_profile_edit(mentor_id: str, fields: dict[str, Any]) -> dict[str
     return res.data[0]
 
 
+def stage_mentor_approval_edit(mentor_id: str, fields: dict[str, Any]) -> Optional[dict[str, Any]]:
+    """Stage APPROVAL-required profile fields (name / country) for admin review without touching the
+    live row (BUG-075). Merges into any existing pending_changes and stamps pending_submitted_at.
+    Returns the row, or None when there is nothing stageable."""
+    safe = {k: v for k, v in fields.items() if k in _EDITABLE_PROFILE_FIELDS}
+    if not safe:
+        return None
+    now = datetime.now(timezone.utc).isoformat()
+    cur = _supabase.table("mentors").select("pending_changes").eq("id", mentor_id).limit(1).execute()
+    if not cur.data:
+        raise ValueError(f"Mentor {mentor_id!r} not found")
+    existing = cur.data[0].get("pending_changes") or {}
+    res = _supabase.table("mentors").update({
+        "pending_changes": {**existing, **safe},
+        "pending_submitted_at": now,
+        "updated_at": now,
+    }).eq("id", mentor_id).execute()
+    if not res.data:
+        raise ValueError(f"Mentor {mentor_id!r} not found")
+    return res.data[0]
+
+
 def save_mentor_profile_live(mentor_id: str, fields: dict[str, Any]) -> dict[str, Any]:
-    """Apply profile edits straight to the live row, with no staging for re-approval. Used only
-    while a migrated mentor is completing first-login onboarding: they are already approved and
-    stay live, so their reviewed/completed details take effect immediately (no admin re-review)."""
+    """Apply profile edits straight to the live row, with no staging for re-approval. Used during a
+    migrated mentor's first-login onboarding AND for an approved mentor's non-approval edits (BUG-075:
+    everything except name/country goes live immediately). Reprices services if a rate field changed."""
     safe = {k: v for k, v in fields.items() if k in _EDITABLE_PROFILE_FIELDS}
     if not safe:
         raise ValueError("No valid profile fields to update")

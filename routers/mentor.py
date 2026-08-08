@@ -480,6 +480,7 @@ class ProfileUpdateBody(BaseModel):
     hourly_rate: Optional[float] = None
     currency: Optional[str] = None
     currency_rates: Optional[list[dict]] = None
+    smart_pricing: Optional[bool] = None
 
     @field_validator("city")
     @classmethod
@@ -501,8 +502,85 @@ class ProfileUpdateBody(BaseModel):
         return round(v, 2) if v is not None else v
 
 
+# BUG-075: only Name + Country need admin approval; every other profile field goes live
+# immediately and admin is just notified (old -> new). Keep this in sync with the hub UI.
+_APPROVAL_PROFILE_FIELDS = {"display_name", "country"}
+_PROFILE_FIELD_LABELS = {
+    "display_name": "Name", "country": "Country", "home_country_code": "Home country",
+    "headline": "Headline", "bio": "About", "city": "City", "timezone": "Timezone",
+    "languages": "Languages", "photo_url": "Photo", "phone": "Phone",
+    "social_links": "Social links", "public_notes": "Public notes", "served_countries": "Additional countries lived",
+    "expertise_country_codes": "Countries of expertise", "expertise_categories": "Focus areas",
+    "years_lived_experience": "Years in current country", "years_professional_experience": "Years of experience",
+    "professional_domains": "Domains", "specializations": "Specializations",
+    "hourly_rate": "Hourly rate", "currency": "Currency", "currency_rates": "Additional currencies",
+    "smart_pricing": "Fair pricing",
+}
+
+
+def _fmt_change_value(v: Any) -> str:
+    if v is None or v == "":
+        return "(empty)"
+    if isinstance(v, list):
+        parts: list[str] = []
+        for x in v:
+            if isinstance(x, dict):
+                parts.append(", ".join(f"{k}: {xx}" for k, xx in x.items() if xx not in (None, "")))
+            else:
+                parts.append(str(x))
+        return "; ".join(p for p in parts if p) or "(empty)"
+    return str(v)
+
+
+def _profile_change_rows(mentor: dict, fields: dict[str, Any]) -> list[dict[str, str]]:
+    """[{label, delta}] for fields whose value actually changed, for the admin email."""
+    rows: list[dict[str, str]] = []
+    for k, new in fields.items():
+        old = mentor.get(k)
+        if str(old) == str(new):
+            continue
+        label = _PROFILE_FIELD_LABELS.get(k, k.replace("_", " ").title())
+        rows.append({"label": label, "delta": f"{_fmt_change_value(old)}  →  {_fmt_change_value(new)}"})
+    return rows
+
+
+def _email_admins_change(template: str, mentor_name: str, changes: list[dict[str, str]]) -> None:
+    if not changes:
+        return
+    try:
+        for admin_email in db.admin_notify_emails():
+            mailer.send_transactional(admin_email, template, {"mentor_name": mentor_name, "changes": changes})
+    except Exception:
+        logger.warning("admin profile-change email failed template=%s", template)
+
+
+def _apply_approved_profile_edit(mentor: dict, fields: dict[str, Any], background_tasks: BackgroundTasks) -> dict[str, Any]:
+    """Approved (live) mentor edit: apply everything except Name/Country immediately, stage those two
+    for approval, and notify admin either way (BUG-075 + BUG-076)."""
+    approval = {k: v for k, v in fields.items() if k in _APPROVAL_PROFILE_FIELDS}
+    info = {k: v for k, v in fields.items() if k not in _APPROVAL_PROFILE_FIELDS}
+    staged_changes = _profile_change_rows(mentor, approval)
+    applied_changes = _profile_change_rows(mentor, info)
+
+    row: Optional[dict[str, Any]] = None
+    if info:
+        row = db.save_mentor_profile_live(mentor["id"], info)      # live now (+ reprice if rate changed)
+    if approval:
+        row = db.stage_mentor_approval_edit(mentor["id"], approval) or row
+    row = row or mentor
+
+    mentor_name = mentor.get("display_name") or "A mentor"
+    background_tasks.add_task(_email_admins_change, "admin_mentor_change_request", mentor_name, staged_changes)
+    background_tasks.add_task(_email_admins_change, "admin_mentor_change_info", mentor_name, applied_changes)
+    return {
+        **row,
+        "staged_for_review": [c["label"] for c in staged_changes],
+        "applied_live": [c["label"] for c in applied_changes],
+    }
+
+
 @router.post("/profile")
-def update_profile(body: ProfileUpdateBody, user: AuthUser = Depends(get_current_user)):
+def update_profile(body: ProfileUpdateBody, background_tasks: BackgroundTasks, user: AuthUser = Depends(get_current_user)):
     """Edit the mentor profile (Phase 2, status-aware). An APPROVED mentor's edits are
     staged for re-approval (pending_changes) while the live profile keeps serving; a
     mentor in changes_requested/rejected edits in place and resubmits for review; a
@@ -572,12 +650,18 @@ def update_profile(body: ProfileUpdateBody, user: AuthUser = Depends(get_current
             fields["currency_rates"] = pricing_input.validate_currency_rates(primary, body.currency_rates)
         except ValueError as e:
             raise HTTPException(status_code=422, detail=str(e))
+    if body.smart_pricing is not None:
+        fields["smart_pricing"] = body.smart_pricing
     try:
         # A migrated mentor reviewing their imported profile during first-login onboarding stays
-        # approved and live, so their edits apply straight to the live row (no re-review). Everyone
-        # else follows the status-aware staging path.
+        # approved and live, so their edits apply straight to the live row (no re-review).
         if mentor.get("needs_onboarding"):
             return db.save_mentor_profile_live(mentor["id"], fields)
+        # BUG-075: a live (approved) mentor's edits go live immediately, except Name/Country which
+        # need approval; admin is notified either way. changes_requested/rejected mentors still edit
+        # in place and resubmit the whole application for review.
+        if mentor.get("status") == "approved":
+            return _apply_approved_profile_edit(mentor, fields, background_tasks)
         return db.save_mentor_profile_edit(mentor["id"], fields)
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))

@@ -501,6 +501,36 @@ def _admin_mentor_application(d: dict) -> tuple[str, str]:
     return f"[Admin] New mentor application: {name}", _base(body)
 
 
+def _admin_mentor_change_request(d: dict) -> tuple[str, str]:
+    """BUG-076/BUG-075: a live mentor changed a field that needs approval (name / country). The live
+    profile is unchanged until an admin approves the staged change."""
+    name = _e(d.get("mentor_name", ""))
+    rows = [(c.get("label", ""), c.get("delta", "")) for c in (d.get("changes") or [])]
+    review_url = d.get("review_url", config.FRONTEND_URL + "/admin")
+    body = (
+        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Mentor changes need approval</h1>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6"><strong>{name}</strong> submitted '
+        "profile changes that need your approval before they go live. Their current profile is unchanged until you approve.</p>"
+        + _detail_list(rows)
+        + _btn(review_url, "Review in admin")
+    )
+    return f"[Admin] {name} submitted changes for approval", _base(body)
+
+
+def _admin_mentor_change_info(d: dict) -> tuple[str, str]:
+    """BUG-075: a live mentor edited fields that do NOT need approval - they are already live. Sent to
+    admin as an informational record (old -> new), no action required."""
+    name = _e(d.get("mentor_name", ""))
+    rows = [(c.get("label", ""), c.get("delta", "")) for c in (d.get("changes") or [])]
+    body = (
+        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Mentor updated their profile</h1>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6"><strong>{name}</strong> updated their '
+        "profile. These changes are already live (no approval needed) and are shared here for your records.</p>"
+        + _detail_list(rows)
+    )
+    return f"[Admin] {name} updated their profile", _base(body)
+
+
 # ── Lifecycle v2 templates (cancel / reschedule / no-show) ──────────────────────
 
 def _booking_cancelled(d: dict) -> tuple[str, str]:
@@ -672,6 +702,8 @@ _TEMPLATES = {
     "contact_form": _contact_form,
     "mentor_application_received": _mentor_application_received,
     "admin_mentor_application": _admin_mentor_application,
+    "admin_mentor_change_request": _admin_mentor_change_request,
+    "admin_mentor_change_info": _admin_mentor_change_info,
     "mentor_approved": _mentor_approved,
     "mentor_rejected": _mentor_rejected,
     "mentor_changes_requested": _mentor_changes_requested,
