@@ -308,6 +308,11 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
         raise HTTPException(status_code=400, detail="Select your current country")
     if body.years_professional_experience is None:
         raise HTTPException(status_code=400, detail="Years of professional experience is required")
+    # BUG-059: free is reserved for a single Introductory-call-style slot, not something any
+    # service can be priced down to - the catalogue UI already enforces this, but a request built
+    # directly against the API must be checked too.
+    if sum(1 for svc in body.services if svc.set_price == 0) > 1:
+        raise HTTPException(status_code=400, detail="Only one session can be free.")
     # Bank details are mandatory. Validate them BEFORE creating the mentor row so a missing/invalid
     # payout method never leaves a half-created mentor (which would 409 any retry).
     if body.bank is None:
