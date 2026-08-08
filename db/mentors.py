@@ -350,7 +350,19 @@ def set_mentor_smart_pricing(mentor_id: str, enabled: bool) -> None:
     """Flip the mentor's smart (PPP) pricing and re-sync is_ppp across all their
     services, so the mentor-level flag is the single source of truth for PPP."""
     _supabase.table("mentors").update({"smart_pricing": enabled}).eq("id", mentor_id).execute()
-    _supabase.table("services").update({"is_ppp": enabled}).eq("mentor_id", mentor_id).execute()
+    _sync_services_ppp(mentor_id, {"smart_pricing": enabled})
+
+
+def _sync_services_ppp(mentor_id: str, written_fields: dict[str, Any]) -> None:
+    """compute_booking_price/display_service_prices key off the per-service is_ppp column, not
+    mentors.smart_pricing directly - any live write of smart_pricing must re-sync is_ppp across the
+    mentor's services too, or PPP silently keeps not applying (the Pricing-tab toggle used to update
+    the mentor flag but never touch existing services)."""
+    if "smart_pricing" not in written_fields:
+        return
+    _supabase.table("services").update(
+        {"is_ppp": bool(written_fields["smart_pricing"])}
+    ).eq("mentor_id", mentor_id).execute()
 
 
 def link_mentor_by_email(profile_id: str, email: str) -> Optional[dict[str, Any]]:
@@ -575,6 +587,8 @@ def save_mentor_profile_edit(mentor_id: str, fields: dict[str, Any]) -> dict[str
     res = _supabase.table("mentors").update(payload).eq("id", mentor_id).execute()
     if not res.data:
         raise ValueError(f"Mentor {mentor_id!r} not found")
+    if status != "approved":   # changes_requested/rejected branch writes straight to the live row
+        _sync_services_ppp(mentor_id, safe)
     return res.data[0]
 
 
@@ -613,6 +627,7 @@ def save_mentor_profile_live(mentor_id: str, fields: dict[str, Any]) -> dict[str
         raise ValueError(f"Mentor {mentor_id!r} not found")
     if any(k in safe for k in _RATE_FIELDS):
         reprice_mentor_services(mentor_id)   # BUG-079: apply the new rate to existing services
+    _sync_services_ppp(mentor_id, safe)
     return res.data[0]
 
 
@@ -664,6 +679,7 @@ def apply_pending_changes(mentor_id: str) -> dict[str, Any]:
         raise ValueError(f"Mentor {mentor_id!r} not found")
     if any(k in safe for k in _RATE_FIELDS):
         reprice_mentor_services(mentor_id)   # BUG-079: staged rate change just went live -> reprice
+    _sync_services_ppp(mentor_id, safe)
     return res.data[0]
 
 
@@ -1219,6 +1235,7 @@ def set_mentor_initial_rate(mentor_id: str, hourly_rate: float, currency: str,
     # BUG-079: flow the new rate through to the mentor's existing services so the customer never
     # sees a stale price. No-op if they have no services yet (created later at the new rate).
     reprice_mentor_services(mentor_id)
+    _sync_services_ppp(mentor_id, payload)
     return res.data[0]
 
 
