@@ -5,6 +5,7 @@ from typing import Optional
 from urllib.parse import quote
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from postgrest.exceptions import APIError
 from pydantic import BaseModel, EmailStr, field_validator
 
 import config
@@ -16,6 +17,19 @@ from services.ics import build_ics
 logger = logging.getLogger("immigroov.routers.booking")
 
 router = APIRouter(prefix="/booking", tags=["booking"])
+
+
+def _raise_booking_error(e: Exception, fallback: str) -> None:
+    """BUG-085: a plain `RAISE EXCEPTION 'text'` in plpgsql (no explicit errcode) defaults to
+    SQLSTATE P0001 - every reschedule/cancel guard in the SQL layer ("Please pick a time inside the
+    proposed range", "This proposal is no longer open", ...) is exactly that: an intentional,
+    user-facing message, not an internal to hide. Surface it as a 400 instead of the generic 500
+    these endpoints used to always return, which left the customer with no idea why an accept/
+    propose/cancel failed. Anything else (constraint violation, connection error) still falls back
+    to `fallback`."""
+    if isinstance(e, APIError) and getattr(e, "code", None) == "P0001":
+        raise HTTPException(status_code=400, detail=getattr(e, "message", None) or str(e))
+    raise HTTPException(status_code=500, detail=fallback)
 
 # Jitsi 1:1 video. The room is revealed only inside [start - 5min, end + 30min], and
 # only to the booking's candidate or mentor. meet.jit.si is the free public server;
@@ -144,8 +158,11 @@ def booking_detail(booking_id: str, user: AuthUser = Depends(get_current_user)):
 
     can_pay = bool(is_candidate and unpaid_hold and not is_past)
     can_join = bool((is_candidate or is_mentor) and join_open)
-    can_reschedule = bool((is_candidate or is_mentor) and active and not is_past and deadline_state != "buffer")
-    can_cancel = bool((is_candidate or is_mentor) and active and not is_past)
+    # BUG-084: inside the 2h buffer, cancel_booking hard-rejects (no refund path left) but
+    # request_reschedule no longer does - a reschedule REQUEST (mentor approval, not an instant
+    # pick) is still possible, so offer that instead of a cancel button that would just error out.
+    can_reschedule = bool((is_candidate or is_mentor) and active and not is_past)
+    can_cancel = bool((is_candidate or is_mentor) and active and not is_past and deadline_state != "buffer")
     can_report_no_show = bool((is_candidate or is_mentor) and active and slot and now > slot + timedelta(minutes=10))
 
     out: dict = {
@@ -462,9 +479,9 @@ def cancel_booking(body: CancelBody, background_tasks: BackgroundTasks, user: Au
         return result
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception:
+    except Exception as e:
         logger.exception("cancel_booking failed id=%s", body.booking_id)
-        raise HTTPException(status_code=500, detail="Cancellation failed")
+        _raise_booking_error(e, "Cancellation failed")
 
 
 # ── Reschedule negotiation ─────────────────────────────────────────────────────
@@ -500,9 +517,9 @@ def propose_reschedule(body: ProposeRescheduleBody, background_tasks: Background
         return {"offer_id": offer_id}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception:
+    except Exception as e:
         logger.exception("propose_reschedule failed booking=%s", body.booking_id)
-        raise HTTPException(status_code=500, detail="Failed to propose reschedule")
+        _raise_booking_error(e, "Failed to propose reschedule")
 
 
 class AcceptRescheduleBody(BaseModel):
@@ -526,9 +543,9 @@ def accept_reschedule(body: AcceptRescheduleBody, background_tasks: BackgroundTa
         return booking
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception:
+    except Exception as e:
         logger.exception("accept_reschedule failed offer=%s", body.offer_id)
-        raise HTTPException(status_code=500, detail="Failed to accept reschedule")
+        _raise_booking_error(e, "Failed to accept reschedule")
 
 
 class RequestOtherDateBody(BaseModel):
@@ -549,9 +566,9 @@ def request_other_date(body: RequestOtherDateBody, background_tasks: BackgroundT
         offer_id = db.mentee_request_other_date(body.booking_id, str(body.requested_date))
         background_tasks.add_task(_notify_parties, body.booking_id, "counter_proposed")
         return {"offer_id": offer_id}
-    except Exception:
+    except Exception as e:
         logger.exception("request_other_date failed booking=%s", body.booking_id)
-        raise HTTPException(status_code=500, detail="Failed to submit date request")
+        _raise_booking_error(e, "Failed to submit date request")
 
 
 class ConfirmRescheduleBody(BaseModel):
@@ -572,9 +589,9 @@ def confirm_reschedule(body: ConfirmRescheduleBody, user: AuthUser = Depends(get
         return booking
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
-    except Exception:
+    except Exception as e:
         logger.exception("confirm_reschedule failed offer=%s", body.offer_id)
-        raise HTTPException(status_code=500, detail="Failed to confirm reschedule")
+        _raise_booking_error(e, "Failed to confirm reschedule")
 
 
 @router.post("/confirm-attendance/{booking_id}")
