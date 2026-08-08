@@ -390,6 +390,11 @@ def book_session(
 
     answers_json = [a.model_dump() for a in body.answers]
     candidate_id = user.id if user else None
+    # A mentor must never book their own session (same account or same email); they can test with a
+    # DIFFERENT email as a normal guest.
+    if db.is_self_booking(body.mentor_id, candidate_id, body.email):
+        raise HTTPException(status_code=403,
+                            detail="You can't book your own session. To test the booking flow, use a different email address.")
     try:
         result = db.book_session(
             mentor_id=body.mentor_id,

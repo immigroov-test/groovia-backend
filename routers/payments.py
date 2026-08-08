@@ -64,6 +64,11 @@ def reserve(body: ReserveBody, user: Optional[AuthUser] = Depends(get_current_us
     before the hold expires."""
     answers_json = [a.model_dump() for a in body.answers]
     candidate_id = user.id if user else None
+    # A mentor must never pay for their own session (same account or same email). They can still test
+    # the flow as a normal guest with a DIFFERENT email.
+    if db.is_self_booking(body.mentor_id, candidate_id, body.email):
+        raise HTTPException(status_code=403,
+                            detail="You can't book your own session. To test the booking flow, use a different email address.")
     try:
         result = db.reserve_booking(
             quote_id=body.quote_id,
