@@ -2339,13 +2339,13 @@ BEGIN
   IF NOT FOUND OR o.status <> 'pending' OR o.proposed_by <> 'mentor' THEN
     RAISE EXCEPTION 'This proposal is no longer open';
   END IF;
-  IF p_slot_time < o.range_start OR p_slot_time >= o.range_end THEN
-    RAISE EXCEPTION 'Please pick a time inside the proposed range';
-  END IF;
+  -- The mentor proposes a preferred time RANGE, but the customer may pick ANY of the mentor's free
+  -- slots (the "see all my available times" option) - the mentor is available for all of them by
+  -- definition (is_slot_available checks their real availability), so we no longer force the range.
   IF p_slot_time <= NOW() THEN RAISE EXCEPTION 'Please pick a future time'; END IF;
   SELECT * INTO b FROM bookings WHERE id = o.booking_id;
   IF NOT is_slot_available(b.mentor_id, b.service_id, p_slot_time) THEN
-    RAISE EXCEPTION 'That time is no longer available - pick another slot inside the range.';
+    RAISE EXCEPTION 'That time is no longer available - please pick another slot.';
   END IF;
   UPDATE reschedule_offers SET status = 'accepted', selected_time = p_slot_time WHERE id = p_offer_id;
   UPDATE bookings SET slot_time = p_slot_time, slot_end = NULL, status = 'rescheduled',
