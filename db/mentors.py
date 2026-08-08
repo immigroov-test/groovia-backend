@@ -1195,6 +1195,9 @@ def reprice_mentor_services(mentor_id: str) -> int:
                 # are always derived (never hand-set), any leftover offer price no longer applies
                 # once the base rate has moved and must be cleared, not left to shadow it.
                 "set_price": set_price, "set_currency": currency, "currency_prices": cprices,
+                # Derived pricing has NO separate offer price. Clear any stale one (migrated rows had
+                # set_offer_price set), otherwise the engine's COALESCE(set_offer_price, set_price) keeps
+                # charging the old offer amount instead of the re-derived base price.
                 "set_offer_price": None,
             }).eq("id", s["id"]).execute()
             repriced += 1

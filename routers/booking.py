@@ -285,9 +285,12 @@ def reschedule_slots(
             deadline = "buffer" if hours < 2 else "late" if hours < 24 else "free"
         except Exception:
             deadline = None
+    # If the MENTOR proposed a reschedule, the page defaults to their proposed time frame (with a
+    # "see all my available times" option). offer = {id, range_start, range_end} or None.
+    offer = db.get_active_mentor_proposal(booking_id)
     try:
         slots = db.get_available_slots(target["mentor_id"], target["service_id"], str(p_from), str(p_to))
-        return {"slots": slots, "current_slot": slot_iso, "deadline_state": deadline}
+        return {"slots": slots, "current_slot": slot_iso, "deadline_state": deadline, "offer": offer}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception:
