@@ -376,6 +376,12 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
         except Exception:
             logger.exception("Service create failed during signup for mentor %s", mentor_id)
             warnings.append(f"Could not save your session type \"{svc.title}\". Please re-add it from your dashboard.")
+    # BUG-079: make sure every stored service price matches the base rate (duration x rate), so the
+    # price the customer sees on the booking page can never drift from the mentor's rate.
+    try:
+        db.reprice_mentor_services(mentor_id)
+    except Exception:
+        logger.warning("Post-signup reprice failed for mentor %s", mentor_id)
     # Booking rules (mandatory) -> stored on the mentor row via avail_set_rules.
     if body.booking_rules:
         try:

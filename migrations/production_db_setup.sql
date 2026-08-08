@@ -2704,6 +2704,20 @@ BEGIN
 END; $$;
 GRANT EXECUTE ON FUNCTION display_service_prices(TEXT, UUID[]) TO anon, authenticated;
 
+-- One-time data correction (BUG-079 follow-up): re-derive every PAID service's stored price from its
+-- mentor's CURRENT base rate. Migrated/legacy services kept their old price even after the mentor set
+-- a new base rate - the onboarding review showed a live-prorated figure (so it looked right), but the
+-- booking page + checkout read the stale stored set_price (e.g. a 30-min session stuck at an old
+-- amount instead of rate/2). Prices are always duration x rate, so this is safe + idempotent; free
+-- intro sessions (set_price 0) stay free. Going forward reprice_mentor_services() keeps them in sync.
+UPDATE services s
+SET set_price = ROUND(m.hourly_rate * s.duration / 60.0, 2),
+    set_currency = UPPER(COALESCE(m.currency, s.set_currency, 'USD'))
+FROM mentors m
+WHERE s.mentor_id = m.id
+  AND m.hourly_rate IS NOT NULL AND m.hourly_rate > 0
+  AND COALESCE(s.set_price, 0) > 0;
+
 -- ── Payment tables ───────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS customer_payments (
   id                          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
