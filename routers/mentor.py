@@ -668,7 +668,14 @@ def update_profile(body: ProfileUpdateBody, background_tasks: BackgroundTasks, u
         # in place and resubmit the whole application for review.
         if mentor.get("status") == "approved":
             return _apply_approved_profile_edit(mentor, fields, background_tasks)
-        return db.save_mentor_profile_edit(mentor["id"], fields)
+        # changes_requested/rejected: resubmitting the whole application for review. BUG-076: this
+        # path never notified admin (only the approved-mentor path did), so a fixed-up resubmission
+        # could sit in pending_review unnoticed. Same old -> new diff email as the approved path.
+        changes = _profile_change_rows(mentor, fields)
+        row = db.save_mentor_profile_edit(mentor["id"], fields)
+        mentor_name = mentor.get("display_name") or "A mentor"
+        background_tasks.add_task(_email_admins_change, "admin_mentor_change_request", mentor_name, changes)
+        return row
     except PermissionError as e:
         raise HTTPException(status_code=403, detail=str(e))
     except ValueError as e:
