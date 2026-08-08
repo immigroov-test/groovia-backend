@@ -12,9 +12,9 @@ T-60 mentor attendance nudge). Each notification is claimed atomically before se
   claim-then-act, or read-only). The dispatcher-wide lease lock
   (services/dispatcher_lock.py) is the blanket backstop for Render starting a
   second container mid-tick if a previous tick overran its interval.
-- Infrequent jobs self-gate: refresh_fx_rates (6h) via fx_rates.fetched_at,
-  reconcile_payments (24h) via job_run_history — registered every tick but only
-  do real work when actually due.
+- Infrequent jobs self-gate: refresh_fx_rates (once per UTC day - prices are frozen per day,
+  BUG-087) via fx_rates.fetched_at, reconcile_payments (24h) via job_run_history — registered
+  every tick but only do real work when actually due.
 - Each job is wrapped in its own try/except: one job's failure (e.g. Frankfurter
   is down) must never prevent the others in the same tick from running.
 
@@ -29,7 +29,9 @@ from services.dispatcher_lock import LockNotAcquired, dispatcher_lock
 
 logger = logging.getLogger("immigroov.jobs.run_due")
 
-_FX_REFRESH_INTERVAL = timedelta(hours=6)
+# FX is frozen per UTC day (BUG-087): the dispatcher checks daily and refresh_fx_rates() itself
+# hard-gates to one fetch per UTC day, so the rate (and every price) is stable within a day.
+_FX_REFRESH_INTERVAL = timedelta(hours=24)
 _RECONCILE_INTERVAL = timedelta(hours=24)
 
 

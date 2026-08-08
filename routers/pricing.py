@@ -1,5 +1,4 @@
 import logging
-from datetime import timedelta
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -35,14 +34,6 @@ def resolve_pricing_country(request: Request, fallback: Optional[str]) -> Option
         return cc
     return None
 
-# Per-quote FX freshness guard. The dispatcher refreshes rates every ~6h, but the
-# price a user commits to should ride on a recent rate, so a quote whose newest
-# rate is older than this triggers a synchronous refresh first. ECB (the free
-# Frankfurter feed) only publishes ~once a business day, so anything tighter buys
-# no extra accuracy — this just caps how stale the committed rate can be.
-FX_QUOTE_MAX_AGE = timedelta(minutes=60)
-
-
 # ── Binding quote ──────────────────────────────────────────────────────────────
 
 # Fields that go back to the customer's browser. Markup model: the customer sees the full breakdown -
@@ -69,15 +60,14 @@ def get_quote(request: Request, service_id: str, country: Optional[str] = Query(
     # The binding country comes from the trusted edge geo (not the client's ?country=),
     # so the amount charged can't be spoofed to unlock a PPP discount.
     country = resolve_pricing_country(request, country)
-    # Refresh FX before pricing if the cached rate is stale, so the amount the user
-    # locks in reflects a current rate. Refresh only when stale (never block on a
-    # healthy cache); if the refresh itself fails, fall through — get_booking_quote
-    # still raises FX_UNAVAILABLE below if the existing rates are too old to use.
+    # BUG-087: FX is frozen per UTC day. refresh_fx_rates() self-gates - it fetches once per day and
+    # is a no-op the rest of the day - so the quote rides the SAME rate the browse/booking pages
+    # already showed, and a price never moves within a day. It only fetches if today's rate is
+    # missing; if that fetch fails, get_booking_quote still raises FX_UNAVAILABLE below.
     try:
-        if db.fx_rates_are_stale(FX_QUOTE_MAX_AGE):
-            db.refresh_fx_rates()
+        db.refresh_fx_rates()
     except Exception:
-        logger.warning("get_quote: FX refresh-if-stale failed; pricing on existing rates", exc_info=True)
+        logger.warning("get_quote: daily FX refresh failed; pricing on existing rates", exc_info=True)
     try:
         return _public_quote(db.get_booking_quote(service_id, country))
     except Exception as e:

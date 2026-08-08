@@ -86,10 +86,34 @@ def fx_rates_are_stale(max_age: timedelta) -> bool:
     return datetime.now(timezone.utc) - fetched_at >= max_age
 
 
-def refresh_fx_rates() -> dict[str, Any]:
+def _fx_already_refreshed_today() -> bool:
+    """True if fx_rates was already refreshed on the current UTC calendar day. Underpins the
+    per-day price freeze (BUG-087): once today's rate is stored, it is not re-fetched until the
+    next UTC day, so a mentor's displayed/charged price cannot drift within a day."""
+    try:
+        res = (_supabase.table("fx_rates").select("fetched_at")
+               .order("fetched_at", desc=True).limit(1).execute())
+        if not res.data:
+            return False
+        fetched = datetime.fromisoformat(res.data[0]["fetched_at"])
+        if fetched.tzinfo is None:
+            fetched = fetched.replace(tzinfo=timezone.utc)
+        return fetched.astimezone(timezone.utc).date() == datetime.now(timezone.utc).date()
+    except Exception:
+        logger.warning("refresh_fx_rates: daily-freeze check failed; will refresh", exc_info=True)
+        return False
+
+
+def refresh_fx_rates(force: bool = False) -> dict[str, Any]:
     """Fetch fresh EUR-pivot rates and upsert into fx_rates; log every run to
     fx_refresh_log. Symbols = the static supported set union every distinct
-    active service's set_currency, plus INR."""
+    active service's set_currency, plus INR.
+
+    FROZEN PER UTC DAY (BUG-087): unless force=True, this is a no-op when rates were already
+    fetched today, so every page and the checkout ride the SAME rate all day; it only moves at the
+    UTC-day rollover. ECB (the free Frankfurter feed) only publishes ~once a business day anyway."""
+    if not force and _fx_already_refreshed_today():
+        return {"ok": True, "skipped": "already refreshed today (frozen per day)"}
     symbols = set(_FX_BASE_SYMBOLS)
     symbols.add("INR")
     try:

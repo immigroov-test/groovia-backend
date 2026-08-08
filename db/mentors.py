@@ -565,6 +565,8 @@ def save_mentor_profile_live(mentor_id: str, fields: dict[str, Any]) -> dict[str
     res = _supabase.table("mentors").update(safe).eq("id", mentor_id).execute()
     if not res.data:
         raise ValueError(f"Mentor {mentor_id!r} not found")
+    if any(k in safe for k in _RATE_FIELDS):
+        reprice_mentor_services(mentor_id)   # BUG-079: apply the new rate to existing services
     return res.data[0]
 
 
@@ -606,6 +608,8 @@ def apply_pending_changes(mentor_id: str) -> dict[str, Any]:
     res = _supabase.table("mentors").update(payload).eq("id", mentor_id).execute()
     if not res.data:
         raise ValueError(f"Mentor {mentor_id!r} not found")
+    if any(k in safe for k in _RATE_FIELDS):
+        reprice_mentor_services(mentor_id)   # BUG-079: staged rate change just went live -> reprice
     return res.data[0]
 
 
@@ -1058,6 +1062,59 @@ def list_audit_events(booking_id: Optional[str] = None, entity_type: Optional[st
         return []
 
 
+_RATE_FIELDS = {"hourly_rate", "currency", "currency_rates"}
+
+
+def reprice_mentor_services(mentor_id: str) -> int:
+    """Re-derive every PAID service's price from the mentor's CURRENT hourly rate + currencies
+    (BUG-079). Service prices are always derived (duration x hourly rate), never hand-set, so a rate
+    or currency change must flow through to the live service rows - otherwise the customer keeps
+    seeing the old price. The free intro (set_price 0) is left free. Returns how many were repriced.
+
+    Mirrors the frontend proration exactly: set_price = round(hourly * duration/60, 2), and one
+    currency_prices entry per additional currency rate (round(rate * duration/60, 2))."""
+    try:
+        m = (_supabase.table("mentors").select("hourly_rate, currency, currency_rates")
+             .eq("id", mentor_id).single().execute()).data or {}
+    except Exception:
+        return 0
+    hourly = m.get("hourly_rate")
+    if hourly is None or float(hourly) <= 0:
+        return 0
+    currency = (m.get("currency") or "USD").upper()
+    rates = m.get("currency_rates") or []
+    svcs = (_supabase.table("services").select("id, duration, set_price")
+            .eq("mentor_id", mentor_id).execute()).data or []
+    repriced = 0
+    for s in svcs:
+        try:
+            if float(s.get("set_price") or 0) <= 0:
+                continue  # free intro stays free
+            dur = int(s.get("duration") or 0)
+        except (TypeError, ValueError):
+            continue
+        if dur <= 0:
+            continue
+        set_price = round(float(hourly) * dur / 60.0, 2)
+        cprices: list[dict[str, Any]] = []
+        for r in rates:
+            try:
+                rc = str((r or {}).get("currency") or "").upper()
+                rr = float((r or {}).get("hourly_rate") or 0)
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if rc and rc != currency and rr > 0:
+                cprices.append({"currency": rc, "base_price": round(rr * dur / 60.0, 2)})
+        try:
+            _supabase.table("services").update({
+                "set_price": set_price, "set_currency": currency, "currency_prices": cprices,
+            }).eq("id", s["id"]).execute()
+            repriced += 1
+        except Exception:
+            logger.exception("reprice_mentor_services: failed for service=%s", s.get("id"))
+    return repriced
+
+
 def set_mentor_initial_rate(mentor_id: str, hourly_rate: float, currency: str,
                             currency_rates: list[dict], smart_pricing: bool) -> dict[str, Any]:
     """First-login rate capture for a migrated mentor: write rate/currency/smart_pricing straight to
@@ -1071,6 +1128,9 @@ def set_mentor_initial_rate(mentor_id: str, hourly_rate: float, currency: str,
     res = _supabase.table("mentors").update(payload).eq("id", mentor_id).execute()
     if not res.data:
         raise ValueError("Mentor not found")
+    # BUG-079: flow the new rate through to the mentor's existing services so the customer never
+    # sees a stale price. No-op if they have no services yet (created later at the new rate).
+    reprice_mentor_services(mentor_id)
     return res.data[0]
 
 
