@@ -296,7 +296,7 @@ def _booking_confirmed_candidate(d: dict) -> tuple[str, str]:
             ("Where", "Video call - use the Join meeting button below"),
         ])
         + '<p style="margin:0;font-size:15px;color:#444;line-height:1.6">'
-        "You'll receive a reminder 24 hours and 1 hour before the session."
+        "You'll receive a reminder 24 hours and 30 minutes before the session."
         "</p>"
         + (guest_block if is_guest else (
             (_btn(url, "Join meeting") if url else "")
