@@ -683,6 +683,55 @@ def _booking_admin_notice(d: dict) -> tuple[str, str]:
     return f"[Admin] {title}: {candidate} × {mentor}", _base(body)
 
 
+def _auth_link_email(title: str, subject: str, lead: str, btn_label: str, expiry_note: str, d: dict) -> tuple[str, str]:
+    url = d.get("action_url", "")
+    body = (
+        f'<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">{_e(title)}</h1>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">{lead}</p>'
+        + _btn(url, btn_label)
+        + f'<p style="margin:20px 0 0;font-size:13px;color:#999;line-height:1.5">{expiry_note} '
+          f'If the button doesn\'t work, copy and paste this link: <br><span style="word-break:break-all">{_e(url)}</span></p>'
+    )
+    return subject, _base(body)
+
+
+# BUG-026: these back the Supabase Auth "Send Email" hook (routers/auth.py:auth_email_hook), so
+# sign-in/signup/recovery emails go out over the same Resend pipeline (and EMAIL_FROM address) as
+# every other Immigroov email, instead of Supabase's own default sender.
+def _auth_signup_confirm(d: dict) -> tuple[str, str]:
+    return _auth_link_email(
+        "Confirm your Immigroov account", "Confirm your Immigroov account",
+        "Click below to confirm your email and finish setting up your account.",
+        "Confirm my account", "This link expires in 24 hours.", d,
+    )
+
+
+def _auth_magic_link(d: dict) -> tuple[str, str]:
+    return _auth_link_email(
+        "Sign in to Immigroov", "Your Immigroov sign-in link",
+        "Click below to sign in. This link is only valid for this device/browser.",
+        "Sign in", "This link expires shortly and can only be used once.", d,
+    )
+
+
+def _auth_recovery(d: dict) -> tuple[str, str]:
+    return _auth_link_email(
+        "Reset your Immigroov password", "Reset your Immigroov password",
+        "Click below to choose a new password. If you didn't request this, you can ignore this email.",
+        "Reset password", "This link expires in 1 hour.", d,
+    )
+
+
+def _auth_generic(d: dict) -> tuple[str, str]:
+    """Fallback for any Supabase auth email type without its own copy (email change, invite,
+    reauthentication, ...) - still branded and sent via Resend rather than silently dropped."""
+    return _auth_link_email(
+        "Confirm this action", "Confirm your Immigroov account action",
+        "Click below to confirm this action on your Immigroov account.",
+        "Confirm", "This link will expire soon.", d,
+    )
+
+
 def _contact_form(d: dict) -> tuple[str, str]:
     """Contact-page submission, delivered to the support inbox."""
     name = _e(f"{d.get('first_name', '')} {d.get('last_name', '')}".strip() or "-")
@@ -725,6 +774,10 @@ _TEMPLATES = {
     "reschedule_counter": _reschedule_counter,
     "cancel_requested": _cancel_requested,
     "no_show_reported": _no_show_reported,
+    "auth_signup_confirm": _auth_signup_confirm,
+    "auth_magic_link": _auth_magic_link,
+    "auth_recovery": _auth_recovery,
+    "auth_generic": _auth_generic,
 }
 
 

@@ -53,6 +53,14 @@ ADMIN_EMAIL    = os.getenv("ADMIN_EMAIL", "")
 # mentee/admin. Set it to the Resend account owner's email so sandbox delivers. Empty = live.
 EMAIL_TEST_REDIRECT = os.getenv("EMAIL_TEST_REDIRECT", "").strip()
 
+# BUG-026: Supabase Auth "Send Email" hook signing secret (Authentication -> Hooks -> Send Email
+# in the Supabase dashboard; the secret is shown once when the hook is enabled, format
+# "v1,whsec_...", but only the "whsec_..." part is needed here). Wiring the hook up is what makes
+# sign-in/signup/recovery emails go out from EMAIL_FROM via Resend instead of Supabase's own
+# sender - until it's set, routers/auth.py's hook endpoint rejects every request (fails closed:
+# an unverifiable hook must never be allowed to silently skip the signature check).
+SUPABASE_AUTH_HOOK_SECRET = os.getenv("SUPABASE_AUTH_HOOK_SECRET", "").strip()
+
 # Mentor bank details are encrypted at rest with this key (Fernet). Generate one with:
 #   python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 # Optional at startup (mentors just can't submit/view bank details until it's set); may hold
@@ -119,6 +127,13 @@ if _missing:
 if not RESEND_API_KEY:
     import warnings
     warnings.warn("[WARN] RESEND_API_KEY not set - transactional emails will be skipped", stacklevel=1)
+if not SUPABASE_AUTH_HOOK_SECRET:
+    import warnings
+    warnings.warn(
+        "[WARN] SUPABASE_AUTH_HOOK_SECRET not set - the Send Email auth hook is disabled, so "
+        "sign-in/signup/recovery emails still come from Supabase's own sender, not Immigroov's",
+        stacklevel=1,
+    )
 
 # Razorpay is optional at startup - set MOCK_SERVICES=true to use the mock confirm
 # endpoint instead of a real gateway (see routers/payments.py).
