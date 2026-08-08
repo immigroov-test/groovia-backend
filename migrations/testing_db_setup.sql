@@ -2760,7 +2760,11 @@ RETURNS TABLE (
     ro.id, ro.proposed_by, ro.status, ro.offer_date, ro.range_start, ro.range_end,
     ro.selected_time, ro.requested_date,
     rq.id, rq.kind, rq.initiated_by, rq.status, rq.respond_by,
-    COALESCE(mp.net_amount_mentor_currency, mp.amount), mp.mentor_currency, mp.payout_state
+    -- BUG-097: mentor "You earn" = base (PPP-adjusted) MINUS commission. Prefer the stored net; if a
+    -- (legacy) row never stored it, derive it from the pre-fee amount minus the commission % - never
+    -- show the pre-commission amount.
+    COALESCE(mp.net_amount_mentor_currency, ROUND(mp.amount * (1 - COALESCE(mp.fee_pct, 0) / 100.0), 2)),
+    mp.mentor_currency, mp.payout_state
   FROM bookings b
   JOIN  mentors  m ON m.id = b.mentor_id
   LEFT JOIN services s ON s.id = b.service_id
@@ -2776,7 +2780,7 @@ RETURNS TABLE (
     ORDER BY created_at DESC LIMIT 1
   ) rq ON TRUE
   LEFT JOIN LATERAL (
-    SELECT amount, net_amount_mentor_currency, mentor_currency, payout_state FROM mentor_payouts
+    SELECT amount, net_amount_mentor_currency, fee_pct, mentor_currency, payout_state FROM mentor_payouts
     WHERE booking_id = b.id ORDER BY created_at DESC LIMIT 1
   ) mp ON TRUE
   WHERE b.mentor_id = p_mentor_id
@@ -3082,6 +3086,15 @@ RETURNS TEXT LANGUAGE sql IMMUTABLE SET search_path = public AS $$
       WHEN 'RO' THEN 'RON' WHEN 'CZ' THEN 'CZK' WHEN 'HU' THEN 'HUF' WHEN 'BG' THEN 'BGN'
       WHEN 'IL' THEN 'ILS' WHEN 'ID' THEN 'IDR' WHEN 'PH' THEN 'PHP' WHEN 'MY' THEN 'MYR'
       WHEN 'TH' THEN 'THB' WHEN 'TR' THEN 'TRY'
+      -- BUG-089: countries that were falling through to USD. All have a seeded fx_rate.
+      WHEN 'AE' THEN 'AED' WHEN 'SA' THEN 'SAR' WHEN 'LK' THEN 'LKR' WHEN 'BD' THEN 'BDT'
+      WHEN 'PK' THEN 'PKR' WHEN 'NP' THEN 'NPR' WHEN 'NG' THEN 'NGN' WHEN 'KE' THEN 'KES'
+      WHEN 'EG' THEN 'EGP' WHEN 'TW' THEN 'TWD' WHEN 'VN' THEN 'VND'
+      -- Remaining eurozone members (were also defaulting to USD).
+      WHEN 'AT' THEN 'EUR' WHEN 'BE' THEN 'EUR' WHEN 'FI' THEN 'EUR' WHEN 'GR' THEN 'EUR'
+      WHEN 'LU' THEN 'EUR' WHEN 'SK' THEN 'EUR' WHEN 'SI' THEN 'EUR' WHEN 'EE' THEN 'EUR'
+      WHEN 'LV' THEN 'EUR' WHEN 'LT' THEN 'EUR' WHEN 'CY' THEN 'EUR' WHEN 'MT' THEN 'EUR'
+      WHEN 'HR' THEN 'EUR'
       ELSE NULL END), 'USD');
 $$;
 GRANT EXECUTE ON FUNCTION currency_for_country(TEXT) TO anon, authenticated;
@@ -3256,7 +3269,7 @@ BEGIN
     v_fx_mc      := get_fx(v_ment_ccy, v_cust_ccy);   -- hard-fails FX_UNAVAILABLE (the charge needs it)
     v_base       := COALESCE(v_set_offer, v_set);
     v_mentor_amt := ROUND(v_base * v_ppp * v_fx_mc, 2);
-    v_net_mentor := v_base;                            -- mentor's full rate in mentor ccy; commission applied below
+    v_net_mentor := v_base * v_ppp;                    -- mentor payout basis (mentor ccy), PPP-adjusted; commission applied below (BUG-097)
   END IF;
 
   -- Markup model. v_mentor_amt (the mentor's localised rate) is the SESSION PRICE the customer sees.
@@ -3465,6 +3478,14 @@ DROP POLICY IF EXISTS mentor_payouts_read ON mentor_payouts;
 -- Owner-scoped: a mentor sees only their own payout rows. Service-role bypasses RLS.
 CREATE POLICY mentor_payouts_read ON mentor_payouts FOR SELECT
   USING (mentor_id IN (SELECT id FROM mentors WHERE profile_id = auth.uid()));
+
+-- One-time correction (BUG-097): the mentor's net earning must be the PPP-adjusted base MINUS the
+-- commission. Re-derive it consistently from the stored pre-fee amount x (1 - commission %), fixing
+-- legacy rows that stored a net without PPP (or none at all). amount already carries PPP + any
+-- referral factor, so net = amount x (1 - fee_pct/100) is correct and idempotent.
+UPDATE mentor_payouts
+SET net_amount_mentor_currency = ROUND(amount * (1 - COALESCE(fee_pct, 0) / 100.0), 2)
+WHERE amount IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS payment_refunds (
   id                          UUID PRIMARY KEY DEFAULT gen_random_uuid(),

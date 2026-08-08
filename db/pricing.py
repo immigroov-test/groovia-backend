@@ -20,6 +20,15 @@ _FX_BASE_SYMBOLS = [
 ]
 _FX_BACKOFF = [1.0, 3.0, 10.0]  # seconds, 3 attempts escalating
 
+# Currencies ECB/Frankfurter does NOT publish, so the daily refresh can't fetch them. We keep stable
+# manual EUR-pivot rates (AED/SAR are effectively USD-pegged; the rest move slowly) and re-stamp them
+# fresh on every refresh so they never go stale - otherwise get_fx_or_null returns NULL and countries
+# mapped to them silently fall back off their local currency (BUG-089: UAE/Saudi/Sri Lanka etc.).
+_MANUAL_FX = {
+    "AED": 3.97, "SAR": 4.05, "LKR": 325.0, "BDT": 118.0, "PKR": 300.0, "NPR": 144.0,
+    "NGN": 1700.0, "KES": 140.0, "EGP": 53.0, "TWD": 35.0, "VND": 27200.0,
+}
+
 
 def get_booking_quote(service_id: str, customer_country: Optional[str]) -> dict[str, Any]:
     """Issue a binding 10-minute price quote (compute_booking_price + a
@@ -146,6 +155,9 @@ def refresh_fx_rates(force: bool = False) -> dict[str, Any]:
         now = datetime.now(timezone.utc).isoformat()
         upsert_rows = [{**r, "fetched_at": now} for r in rows]
         as_of = rows[0]["as_of"] if rows else None
+        # BUG-089: keep the non-Frankfurter currencies fresh so they don't expire and drop to USD.
+        upsert_rows.extend({"base": "EUR", "quote": q, "rate": rate, "as_of": as_of, "fetched_at": now}
+                           for q, rate in _MANUAL_FX.items())
 
         _supabase.table("fx_rates").upsert(upsert_rows, on_conflict="base,quote").execute()
         _supabase.table("fx_refresh_log").insert({
