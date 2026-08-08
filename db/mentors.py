@@ -1167,6 +1167,10 @@ def reprice_mentor_services(mentor_id: str) -> int:
         try:
             _supabase.table("services").update({
                 "set_price": set_price, "set_currency": currency, "currency_prices": cprices,
+                # Derived pricing has NO separate offer price. Clear any stale one (migrated rows had
+                # set_offer_price set), otherwise the engine's COALESCE(set_offer_price, set_price) keeps
+                # charging the old offer amount instead of the re-derived base price.
+                "set_offer_price": None,
             }).eq("id", s["id"]).execute()
             repriced += 1
         except Exception:

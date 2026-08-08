@@ -3422,6 +3422,12 @@ WHERE s.mentor_id = m.id
   AND m.hourly_rate IS NOT NULL AND m.hourly_rate > 0
   AND COALESCE(s.set_price, 0) > 0;
 
+-- Clear stale per-service OFFER prices. Migrated rows carried a set_offer_price, and the pricing
+-- engine prefers COALESCE(set_offer_price, set_price) - so a legacy offer (e.g. a 30-min stuck at an
+-- old amount) kept overriding the correct base price even after a rate change. The derived model has
+-- no offer price, so clear them everywhere; going forward reprice_mentor_services keeps them NULL.
+UPDATE services SET set_offer_price = NULL WHERE set_offer_price IS NOT NULL;
+
 -- ── Payment tables ───────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS customer_payments (
   id                          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
