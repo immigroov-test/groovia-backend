@@ -96,6 +96,7 @@ def create_service(body: ServiceCreateBody, mentor: dict = Depends(require_mento
             is_active=body.is_active,
             is_ppp=body.is_ppp,
             tags=body.tags,
+            set_currency=primary_ccy,   # hub-created services are priced in the mentor's own currency
             set_offer_price=body.set_offer_price,
             currency_prices=currency_prices,
         )

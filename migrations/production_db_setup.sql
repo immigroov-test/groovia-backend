@@ -3300,7 +3300,7 @@ BEGIN
   END IF;
 END $$;
 
--- Dispatcher schedule (24h/1h reminders + T-60 mentor nudge + FX/refund/verify money jobs) is
+-- Dispatcher schedule (24h/30min reminders + T-60 mentor nudge + FX/refund/verify money jobs) is
 -- scheduled MANUALLY, not here: Supabase forbids ALTER DATABASE SET, so the URL + token must be
 -- pasted inline. This is intentionally NOT auto-run so a re-run never clobbers a working job.
 -- One-time setup:

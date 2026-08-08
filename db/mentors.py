@@ -981,6 +981,32 @@ def get_mentor_email(mentor_id: str) -> tuple[Optional[str], Optional[str]]:
     return display_name, email or fallback_email
 
 
+def get_mentor_identity(mentor_id: str) -> Optional[dict[str, Any]]:
+    """{profile_id, email} for a mentor, used to block a mentor from booking/paying for their own
+    session (by account or by email match). None if the mentor can't be resolved."""
+    name, email = get_mentor_email(mentor_id)
+    try:
+        row = (_supabase.table("mentors").select("profile_id").eq("id", mentor_id).limit(1).execute()).data
+    except Exception:
+        return None
+    if not row:
+        return None
+    return {"profile_id": row[0].get("profile_id"), "email": (email or "").strip().lower() or None}
+
+
+def is_self_booking(mentor_id: str, candidate_id: Optional[str], candidate_email: Optional[str]) -> bool:
+    """True if the person booking IS this mentor - by signed-in account OR by using the mentor's own
+    email. A mentor may appear in the directory but must never be able to pay for their own session
+    (they can test with a DIFFERENT email as a normal guest)."""
+    ident = get_mentor_identity(mentor_id)
+    if not ident:
+        return False
+    if candidate_id and ident.get("profile_id") and candidate_id == ident["profile_id"]:
+        return True
+    email = (candidate_email or "").strip().lower()
+    return bool(email and ident.get("email") and email == ident["email"])
+
+
 def get_booking_candidate_info(external_id: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
     """Return (candidate_email, candidate_name, mentor_display_name) for a booking.
     Used to send the post-session review request after MEETING_ENDED."""
