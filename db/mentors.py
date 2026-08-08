@@ -517,7 +517,8 @@ _CRITICAL_MENTOR_FIELDS = {
 # need re-approval; they are intentionally not here.
 _EDITABLE_PROFILE_FIELDS = {
     "display_name", "headline", "bio", "photo_url",
-    "phone", "city", "country", "home_country_code", "social_links", "public_notes", "languages", "timezone",
+    "phone", "city", "country", "home_country_code", "served_countries",
+    "social_links", "public_notes", "languages", "timezone",
     "expertise_country_codes", "expertise_categories", "years_lived_experience",
     "years_professional_experience", "professional_domains", "specializations",
     "hourly_rate", "currency", "currency_rates", "smart_pricing",
