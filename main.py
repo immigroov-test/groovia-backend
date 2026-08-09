@@ -64,6 +64,12 @@ logger = logging.getLogger("immigroov.api")
 
 @asynccontextmanager
 async def lifespan(api: FastAPI):
+    # PPP pricing country comes from the signed edge-geo header; without INTERNAL_GEO_TOKEN the backend
+    # falls back to the CLIENT-supplied country, which anyone can spoof for cheaper pricing. Warn loudly
+    # so this is never silently missing in a real deploy (must be set on BOTH the backend and the BFF).
+    if not config.INTERNAL_GEO_TOKEN:
+        logger.warning("INTERNAL_GEO_TOKEN is not set: PPP pricing trusts the client-supplied country "
+                       "and is spoofable. Set it on the backend AND the frontend (Vercel) before going live.")
     from ai import init_agent, shutdown_agent
     await init_agent()
     try:

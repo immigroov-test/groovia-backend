@@ -964,55 +964,9 @@ GRANT EXECUTE ON FUNCTION
   mentor_confirm_reschedule(UUID)
 TO authenticated;
 
--- ============================================================================
--- mentor_sessions (from 015)
--- ============================================================================
--- DROP first: the lifecycle-v2 block further down redefines this with a different
--- TABLE return type. CREATE OR REPLACE cannot change a return type, so re-running
--- the setup on an existing DB needs an explicit drop here.
-DROP FUNCTION IF EXISTS mentor_sessions(UUID);
-CREATE OR REPLACE FUNCTION mentor_sessions(p_mentor_id UUID)
-RETURNS TABLE (
-  id                  UUID,
-  status              TEXT,
-  slot_time           TIMESTAMPTZ,
-  meeting_url         TEXT,
-  service_title       TEXT,
-  service_duration    INTEGER,
-  mentee_name         TEXT,
-  mentee_email        TEXT,
-  mentor_tz           TEXT,
-  mentor_confirmed_at TIMESTAMPTZ,
-  offer_id            UUID,
-  offer_by            TEXT,
-  offer_date          DATE,
-  range_start         TIMESTAMPTZ,
-  range_end           TIMESTAMPTZ,
-  requested_date      DATE
-) LANGUAGE sql SECURITY DEFINER SET search_path = public AS $$
-  SELECT
-    b.id, b.status::TEXT, b.slot_time, b.meeting_url,
-    s.title, s.duration,
-    COALESCE(p.display_name, p.full_name, b.candidate_email),
-    COALESCE(b.candidate_email, p.email),
-    COALESCE(m.app_timezone, 'UTC'), b.mentor_confirmed_at,
-    ro.id, ro.proposed_by, ro.offer_date, ro.range_start, ro.range_end, ro.requested_date
-  FROM bookings b
-  LEFT JOIN services  s ON s.id = b.service_id
-  JOIN  mentors       m ON m.id = b.mentor_id
-  LEFT JOIN profiles  p ON p.id = b.candidate_id
-  LEFT JOIN LATERAL (
-    SELECT * FROM reschedule_offers
-    WHERE booking_id = b.id AND status IN ('pending', 'mentee_selected')
-    ORDER BY created_at DESC LIMIT 1
-  ) ro ON TRUE
-  WHERE b.mentor_id = p_mentor_id
-    AND b.status NOT IN ('cancelled', 'completed', 'no_show')
-    AND b.slot_time IS NOT NULL
-  ORDER BY b.slot_time;
-$$;
-
-GRANT EXECUTE ON FUNCTION mentor_sessions(UUID) TO authenticated;
+-- mentor_sessions() is defined ONCE, in the lifecycle-v2 block further down (search "Mentor view").
+-- The earlier duplicate definition that lived here was dead - it was dropped and recreated below with
+-- a wider return type - so it has been removed to avoid drift.
 
 -- ============================================================================
 -- booking_times_display (from 015)
@@ -2575,7 +2529,7 @@ DECLARE
   v_cust_ccy TEXT; v_ppp NUMERIC := 1; v_source TEXT; v_explicit NUMERIC; v_base NUMERIC; v_mentor_amt NUMERIC;
   v_fx_mc NUMERIC; v_fx_c_inr NUMERIC; v_fx_m_inr NUMERIC;
   v_gross NUMERIC; v_platform_fee NUMERIC; v_commission NUMERIC; v_subtotal NUMERIC;
-  v_tax_amt NUMERIC; v_net_cust NUMERIC; v_net_mentor NUMERIC;
+  v_tax_amt NUMERIC; v_net_cust NUMERIC; v_net_mentor NUMERIC; v_mentor_base NUMERIC;
 BEGIN
   SELECT s.mentor_id, s.set_price, s.set_offer_price, COALESCE(s.set_currency, 'USD'), s.is_ppp,
          COALESCE(s.currency_prices, '[]'::jsonb), m.country
@@ -2615,8 +2569,16 @@ BEGIN
     -- Fallback: localise the primary rate to the customer currency (+ PPP).
     v_source     := 'converted';
     v_ppp        := CASE WHEN v_is_ppp THEN ppp_relative(p_customer_country, v_mentor_country) ELSE 1 END;
-    v_fx_mc      := get_fx(v_ment_ccy, v_cust_ccy);   -- hard-fails FX_UNAVAILABLE (the charge needs it)
+    v_fx_mc      := get_fx_or_null(v_ment_ccy, v_cust_ccy);   -- SOFT (see fallback below)
     v_base       := COALESCE(v_set_offer, v_set);
+    IF v_fx_mc IS NULL THEN
+      -- No fresh FX for this pair. Charge in the mentor's OWN currency - exactly what the card showed
+      -- (display_service_prices returns fx_ok=false with the mentor-currency price) - so the displayed
+      -- price equals the charge instead of the checkout hard-failing (F2). Fee/tax stay by customer country.
+      v_cust_ccy := v_ment_ccy;
+      v_fx_mc    := 1;
+      v_fx_c_inr := v_fx_m_inr;
+    END IF;
     v_mentor_amt := ROUND(v_base * v_ppp * v_fx_mc, 2);
     v_net_mentor := v_base * v_ppp;                    -- mentor payout basis (mentor ccy), PPP-adjusted; commission applied below (BUG-097)
   END IF;
@@ -2631,6 +2593,7 @@ BEGIN
   v_gross        := ROUND(v_mentor_amt + v_platform_fee + v_tax_amt, 2);       -- total the customer pays
   v_commission   := ROUND(v_mentor_amt * v_comm_pct / 100.0, 2);               -- internal mentor commission (out)
   v_net_cust     := ROUND(v_mentor_amt - v_commission, 2);                     -- mentor take-home, customer currency
+  v_mentor_base := v_net_mentor;                                               -- PRE-commission mentor-ccy payout basis (explicit: explicit/fx; converted: base x ppp)
   v_net_mentor := CASE WHEN v_net_mentor IS NOT NULL                           -- mentor take-home, mentor currency
                        THEN ROUND(v_net_mentor * (1 - v_comm_pct / 100.0), 2) ELSE NULL END;
 
@@ -2648,7 +2611,7 @@ BEGIN
     -- ledger + referral splits (net_customer + fee_amount = session price).
     'fee_pct', v_comm_pct, 'fee_amount', v_commission,
     'commission_pct', v_comm_pct, 'commission_amount', v_commission,
-    'net_customer', v_net_cust, 'net_mentor', v_net_mentor);
+    'net_customer', v_net_cust, 'net_mentor', v_net_mentor, 'mentor_base', v_mentor_base);
 END; $$;
 GRANT EXECUTE ON FUNCTION compute_booking_price(UUID, TEXT) TO anon, authenticated;
 
@@ -2824,12 +2787,13 @@ CREATE POLICY mentor_payouts_read ON mentor_payouts FOR SELECT
   USING (mentor_id IN (SELECT id FROM mentors WHERE profile_id = auth.uid()));
 
 -- One-time correction (BUG-097): the mentor's net earning must be the PPP-adjusted base MINUS the
--- commission. Re-derive it consistently from the stored pre-fee amount x (1 - commission %), fixing
--- legacy rows that stored a net without PPP (or none at all). amount already carries PPP + any
--- referral factor, so net = amount x (1 - fee_pct/100) is correct and idempotent.
+-- commission. Backfill it only where it was never stored (legacy/manual rows), deriving net = amount
+-- x (1 - commission %). NULL-guarded on purpose: reserve_booking already stores the correct net for new
+-- bookings, and a referred session's net is overwritten by process_referral_commissions to the referral
+-- split - re-running this must NOT clobber those correct values with a plain amount x (1 - fee).
 UPDATE mentor_payouts
 SET net_amount_mentor_currency = ROUND(amount * (1 - COALESCE(fee_pct, 0) / 100.0), 2)
-WHERE amount IS NOT NULL;
+WHERE amount IS NOT NULL AND net_amount_mentor_currency IS NULL;
 
 CREATE TABLE IF NOT EXISTS payment_refunds (
   id                          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -3136,7 +3100,10 @@ BEGIN
   v_fee_amount := (s->>'fee_amount')::numeric;
   v_net_customer := (s->>'net_customer')::numeric;
   v_net_mentor := (s->>'net_mentor')::numeric;
-  v_amount := ROUND((s->>'set_price')::numeric * (s->>'ppp_multiplier')::numeric, 2);
+  -- Pre-fee mentor-currency payout basis. Prefer the engine's mentor_base (correct for explicit
+  -- per-currency prices, where set_price is the primary base, not the sold price); fall back to the
+  -- old set_price x ppp formula for pre-existing quotes issued before mentor_base existed.
+  v_amount := ROUND(COALESCE((s->>'mentor_base')::numeric, (s->>'set_price')::numeric * (s->>'ppp_multiplier')::numeric), 2);
 
   -- Referral code (optional): validated server-side; its discount scales what the customer pays.
   -- The commission SPLIT for a referred first session is applied later at completion.
