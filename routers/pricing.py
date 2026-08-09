@@ -146,3 +146,22 @@ def convert_prices(body: ConvertPricesBody, request: Request):
     except Exception:
         logger.exception("convert_prices failed country=%s", country)
         raise HTTPException(status_code=500, detail="Failed to convert prices")
+
+
+class PricePreviewBody(BaseModel):
+    amount: float
+    currency: str = "INR"
+    smart_pricing: bool = True
+
+
+@router.post("/preview")
+def price_preview(body: PricePreviewBody):
+    """BUG-62: mentor-facing preview of what a customer in each key market (India, Australia, Singapore,
+    Saudi, UAE, US) would see for a base rate. Pure FX + PPP math on the mentor's own inputs (no stored
+    data), so it's public. PPP is anchored to the base currency and only applied when smart_pricing."""
+    try:
+        amt = round(max(0.0, float(body.amount or 0)), 2)
+        return {"markets": db.pricing_preview(amt, (body.currency or "INR").strip().upper(), bool(body.smart_pricing))}
+    except Exception:
+        logger.exception("price_preview failed currency=%s", body.currency)
+        raise HTTPException(status_code=500, detail="Failed to compute preview")

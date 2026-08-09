@@ -218,7 +218,7 @@ CREATE TABLE IF NOT EXISTS services (
   description  TEXT,
   type         service_type NOT NULL DEFAULT 'video',
   duration     INTEGER NOT NULL CHECK (duration > 0),
-  is_ppp       BOOLEAN NOT NULL DEFAULT FALSE,
+  is_ppp       BOOLEAN NOT NULL DEFAULT TRUE,
   is_active    BOOLEAN NOT NULL DEFAULT TRUE,
   set_price    NUMERIC(10,2) NOT NULL DEFAULT 0,        -- base price in the mentor's PRIMARY currency
   set_currency TEXT NOT NULL DEFAULT 'USD',             -- the primary currency (mentor payout currency)
@@ -308,7 +308,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_bookings_idempotency
 -- and per-service search tags. service_create below derives is_ppp from the mentor's
 -- smart_pricing toggle and stores tags.
 ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS hourly_rate NUMERIC;
-ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS smart_pricing BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS smart_pricing BOOLEAN NOT NULL DEFAULT TRUE;
+-- BUG-62: Smart Pricing is ON by default for everyone. ADD COLUMN IF NOT EXISTS is a no-op once the
+-- column exists, so also set the default explicitly for already-created DBs.
+ALTER TABLE mentors  ALTER COLUMN smart_pricing SET DEFAULT TRUE;
+ALTER TABLE services ALTER COLUMN is_ppp        SET DEFAULT TRUE;
 -- Additional-currency base rates [{currency, hourly_rate}]; the primary is (currency, hourly_rate).
 -- Each service's currency_prices are derived from these by duration.
 ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS currency_rates JSONB NOT NULL DEFAULT '[]';
@@ -2206,32 +2210,75 @@ INSERT INTO platform_settings (key, value, description) VALUES
   ('ppp_floor', '0.40', 'Minimum PPP factor (never price below this fraction of base)')
 ON CONFLICT (key) DO NOTHING;
 
--- get_ppp_factor: countries NOT in ppp_factors get 1.0; countries IN get
--- GREATEST(their factor, ppp_floor). The floor dominates seeded-low rows
--- (IN=0.30 -> effective 0.40) by design.
+-- get_ppp_factor: a country's price level (World Bank), or 1.0 when we have no data for it. No floor.
 CREATE OR REPLACE FUNCTION get_ppp_factor(p_country_code TEXT)
 RETURNS NUMERIC LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
-  SELECT GREATEST(
-    COALESCE((SELECT factor FROM ppp_factors WHERE country_code = UPPER(p_country_code)), 1.0),
-    COALESCE((SELECT value::numeric FROM platform_settings WHERE key = 'ppp_floor'), 0.40)
-  );
+  SELECT COALESCE((SELECT factor FROM ppp_factors WHERE country_code = UPPER(p_country_code)), 1.0);
 $$;
 GRANT EXECUTE ON FUNCTION get_ppp_factor(TEXT) TO anon, authenticated;
 
--- Relative PPP: the CUSTOMER's purchasing-power factor divided by the MENTOR's, so a mentor's local
--- price is re-based to the customer's country - a NL customer viewing an India-priced mentor pays
--- MORE (uplift), an India customer viewing a US mentor pays less. Raw factors drive the ratio; the
--- result is floored at ppp_floor so the discount side never drops below that fraction of the FX
--- price. Unknown/absent countries default to factor 1.0 (no adjustment).
-CREATE OR REPLACE FUNCTION ppp_relative(p_customer TEXT, p_mentor TEXT)
+-- Relative PPP: the CUSTOMER's price level divided by the ANCHOR's (the country the price is set in -
+-- the mentor's PRICING currency, not their residence). Re-bases a price to the customer's market: a US
+-- customer viewing an India-anchored price pays MORE (uplift), an India customer viewing a US-anchored
+-- price pays less. Raw ratio - NO floor or ceiling (both removed by request; revisit later). Unknown/
+-- absent countries default to factor 1.0 (no adjustment).
+DROP FUNCTION IF EXISTS ppp_relative(TEXT, TEXT);   -- 2nd param renamed p_mentor -> p_anchor
+CREATE OR REPLACE FUNCTION ppp_relative(p_customer TEXT, p_anchor TEXT)
 RETURNS NUMERIC LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
-  SELECT GREATEST(
-    COALESCE((SELECT factor FROM ppp_factors WHERE country_code = UPPER(p_customer)), 1.0)
-    / COALESCE((SELECT factor FROM ppp_factors WHERE country_code = UPPER(p_mentor)), 1.0),
-    COALESCE((SELECT value::numeric FROM platform_settings WHERE key = 'ppp_floor'), 0.40)
-  );
+  SELECT COALESCE((SELECT factor FROM ppp_factors WHERE country_code = UPPER(p_customer)), 1.0)
+       / COALESCE((SELECT factor FROM ppp_factors WHERE country_code = UPPER(p_anchor)), 1.0);
 $$;
 GRANT EXECUTE ON FUNCTION ppp_relative(TEXT, TEXT) TO anon, authenticated;
+
+-- The country a currency anchors PPP to = the mentor's PRICE currency's home, not their residence. A
+-- rupee price anchors to India, a dollar price to the US, etc., so an India-priced service scales from
+-- Indian buying power for every foreign customer. EUR uses Germany as a representative eurozone anchor;
+-- anything unmapped falls back to the US (factor 1.0 = no adjustment).
+CREATE OR REPLACE FUNCTION currency_anchor_country(p_ccy TEXT)
+RETURNS TEXT LANGUAGE sql IMMUTABLE SET search_path = public AS $$
+  SELECT CASE UPPER(COALESCE(p_ccy, ''))
+    WHEN 'INR' THEN 'IN' WHEN 'USD' THEN 'US' WHEN 'GBP' THEN 'GB' WHEN 'EUR' THEN 'DE'
+    WHEN 'AUD' THEN 'AU' WHEN 'NZD' THEN 'NZ' WHEN 'SGD' THEN 'SG' WHEN 'HKD' THEN 'HK'
+    WHEN 'CAD' THEN 'CA' WHEN 'AED' THEN 'AE' WHEN 'SAR' THEN 'SA' WHEN 'QAR' THEN 'QA'
+    WHEN 'JPY' THEN 'JP' WHEN 'KRW' THEN 'KR' WHEN 'CNY' THEN 'CN' WHEN 'CHF' THEN 'CH'
+    WHEN 'SEK' THEN 'SE' WHEN 'NOK' THEN 'NO' WHEN 'DKK' THEN 'DK' WHEN 'ZAR' THEN 'ZA'
+    WHEN 'LKR' THEN 'LK' WHEN 'PKR' THEN 'PK' WHEN 'BDT' THEN 'BD' WHEN 'NPR' THEN 'NP'
+    WHEN 'IDR' THEN 'ID' WHEN 'PHP' THEN 'PH' WHEN 'MYR' THEN 'MY' WHEN 'THB' THEN 'TH'
+    WHEN 'VND' THEN 'VN' WHEN 'BRL' THEN 'BR' WHEN 'MXN' THEN 'MX' WHEN 'TRY' THEN 'TR'
+    WHEN 'PLN' THEN 'PL' WHEN 'RON' THEN 'RO' WHEN 'NGN' THEN 'NG' WHEN 'KES' THEN 'KE'
+    WHEN 'EGP' THEN 'EG' WHEN 'TWD' THEN 'TW'
+    ELSE 'US' END;
+$$;
+GRANT EXECUTE ON FUNCTION currency_anchor_country(TEXT) TO anon, authenticated;
+
+-- BUG-62: mentor-facing price preview. For a base amount in the mentor's own currency, show what a
+-- customer in each of our key markets (India, Australia, Singapore, Saudi, UAE, US) would see: the
+-- FX-converted price, plus PPP re-based to the pricing currency when smart pricing is on (FX only when
+-- off). The market whose currency IS the base currency is skipped (the caller shows that as the base).
+-- fx_ok=false = no fresh rate, price falls back to the base currency.
+CREATE OR REPLACE FUNCTION pricing_preview(p_amount NUMERIC, p_currency TEXT, p_smart_pricing BOOLEAN)
+RETURNS TABLE(country_code TEXT, currency TEXT, price NUMERIC, fx_ok BOOLEAN)
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_base_ccy TEXT := UPPER(COALESCE(p_currency, 'INR'));
+  v_anchor   TEXT := currency_anchor_country(UPPER(COALESCE(p_currency, 'INR')));
+  v_amt      NUMERIC := COALESCE(p_amount, 0);
+  m RECORD; v_ccy TEXT; v_fx NUMERIC; v_ppp NUMERIC;
+BEGIN
+  FOR m IN SELECT cc FROM (VALUES ('IN'),('AU'),('SG'),('SA'),('AE'),('US')) AS t(cc) LOOP
+    v_ccy := currency_for_country(m.cc);
+    IF v_ccy = v_base_ccy THEN CONTINUE; END IF;           -- skip the base currency's own market
+    v_ppp := CASE WHEN p_smart_pricing THEN ppp_relative(m.cc, v_anchor) ELSE 1 END;
+    v_fx  := get_fx_or_null(v_base_ccy, v_ccy);
+    IF v_fx IS NULL THEN
+      country_code := m.cc; currency := v_base_ccy; price := ROUND(v_amt * v_ppp, 2);        fx_ok := FALSE;
+    ELSE
+      country_code := m.cc; currency := v_ccy;      price := ROUND(v_amt * v_ppp * v_fx, 2); fx_ok := TRUE;
+    END IF;
+    RETURN NEXT;
+  END LOOP;
+END; $$;
+GRANT EXECUTE ON FUNCTION pricing_preview(NUMERIC, TEXT, BOOLEAN) TO anon, authenticated;
 
 -- Per-mentor commission override: the % taken OUT of the mentor's price (revenue-split). When set
 -- and not expired it WINS over the country/DEFAULT commission (effective_platform_fee_pct); NULL =
@@ -2582,7 +2629,7 @@ BEGIN
   ELSE
     -- Fallback: localise the primary rate to the customer currency (+ PPP).
     v_source     := 'converted';
-    v_ppp        := CASE WHEN v_is_ppp THEN ppp_relative(p_customer_country, v_mentor_country) ELSE 1 END;
+    v_ppp        := CASE WHEN v_is_ppp THEN ppp_relative(p_customer_country, currency_anchor_country(v_ment_ccy)) ELSE 1 END;
     v_fx_mc      := get_fx_or_null(v_ment_ccy, v_cust_ccy);   -- SOFT (see fallback below)
     v_base       := COALESCE(v_set_offer, v_set);
     IF v_fx_mc IS NULL THEN
@@ -2660,7 +2707,7 @@ BEGIN
     v_amt := COALESCE((it->>'amount')::numeric, 0);
     v_from := COALESCE(it->>'from', 'USD');
     v_ppp_on := COALESCE((it->>'is_ppp')::boolean, false);
-    v_ppp := CASE WHEN v_ppp_on THEN ppp_relative(p_customer_country, it->>'mentor_country') ELSE 1 END;
+    v_ppp := CASE WHEN v_ppp_on THEN ppp_relative(p_customer_country, currency_anchor_country(v_from)) ELSE 1 END;
     -- Revenue split: the mentor's rate IS the customer price; the commission is taken OUT of it, so
     -- it never changes what the customer sees. Only tax is added on top, so the displayed price
     -- (mentor rate + tax) equals what's charged.
@@ -2719,7 +2766,7 @@ BEGIN
       customer_currency := v_cust; fx_ok := true;
     ELSE
       v_base := COALESCE(v_set_offer, v_set);
-      v_ppp  := CASE WHEN v_is_ppp THEN ppp_relative(p_customer_country, v_mentor_country) ELSE 1 END;
+      v_ppp  := CASE WHEN v_is_ppp THEN ppp_relative(p_customer_country, currency_anchor_country(v_ment_ccy)) ELSE 1 END;
       v_fx   := get_fx_or_null(v_ment_ccy, v_cust);   -- SOFT (checkout uses the strict get_fx)
       IF v_fx IS NULL THEN
         key := sid::text; you0 := ROUND(v_base, 2); you := ROUND(v_base * v_ppp, 2);

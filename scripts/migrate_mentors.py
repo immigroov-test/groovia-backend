@@ -228,7 +228,7 @@ def transform_mentor(raw: dict, services: list[dict], weekly: list[dict]) -> dic
             "description": sv.get("description") or None,
             "type": stype,
             "duration": int(sv.get("duration") or 30),
-            "is_ppp": False,   # imported PPP-off; the mentor opts in during first-login onboarding
+            "is_ppp": True,    # BUG-62: Smart Pricing is on by default for everyone now
             "is_active": bool(sv.get("is_active")),
             "set_price": sell_p,
             "set_currency": (pricing.get("currency") or raw.get("currency") or "USD").upper(),
@@ -269,9 +269,9 @@ def transform_mentor(raw: dict, services: list[dict], weekly: list[dict]) -> dic
         "timezone": raw.get("app_timezone") or "UTC",
         "app_timezone": raw.get("app_timezone") or "UTC",
         "currency": (raw.get("currency") or "USD").upper(),
-        # PPP is the mentor-level smart_pricing toggle. Imported mentors start with it OFF; each
-        # mentor chooses to enable/disable fair pricing during the first-login onboarding flow.
-        "smart_pricing": False,
+        # PPP is the mentor-level smart_pricing toggle. On by default for everyone now (BUG-62); the
+        # mentor can turn it off in onboarding or on the Profile tab.
+        "smart_pricing": True,
         "languages": languages,
         "social_links": socials,
         "expertise_country_codes": expertise_countries,

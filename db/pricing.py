@@ -65,6 +65,18 @@ def display_service_prices(customer_country: Optional[str], service_ids: list[st
     return res.data or []
 
 
+def pricing_preview(amount: float, currency: str, smart_pricing: bool) -> list[dict[str, Any]]:
+    """BUG-62 mentor-facing preview: what a customer in each key market sees for a base amount in the
+    mentor's currency (FX, plus PPP anchored to the pricing currency when smart pricing is on). Returns
+    [{country_code, currency, price, fx_ok}], one per market except the base currency's own."""
+    res = _supabase.rpc("pricing_preview", {
+        "p_amount": amount,
+        "p_currency": currency,
+        "p_smart_pricing": smart_pricing,
+    }).execute()
+    return res.data or []
+
+
 # ── FX refresh (fetches EUR-pivot rates from Frankfurter) ────────────────────
 # compute_booking_price hard-fails once fx_rates is >24h stale (fx_max_age_minutes),
 # so a scheduler (jobs/run_due.py) must call refresh_fx_rates periodically.
