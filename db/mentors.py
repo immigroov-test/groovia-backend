@@ -1231,10 +1231,28 @@ def derive_rate_prefill(mentor: dict[str, Any]) -> dict[str, Any]:
     priced = [s for s in (res.data or [])
               if (s.get("set_price") or 0) > 0 and (s.get("duration") or 0) > 0 and s.get("set_currency")]
     if priced:
-        top = max(priced, key=lambda s: float(s["set_price"]) * 60.0 / float(s["duration"]))
+        # Some mentors price different sessions in different currencies, so comparing raw numbers picks
+        # whichever currency has the smallest face value (INR 1998/hr "beats" AUD 53/hr, which is really
+        # ~INR 3050/hr). Normalize to the EUR pivot before taking the max, same as list_active_mentors.
+        fx: dict[str, float] = {}
+        try:
+            rows = _supabase.table("fx_rates").select("quote, rate").eq("base", "EUR").execute().data or []
+            fx = {r["quote"].upper(): float(r["rate"]) for r in rows if r.get("rate")}
+        except Exception:
+            logger.exception("derive_rate_prefill: FX unavailable, comparing session prices unnormalized")
+        fx["EUR"] = 1.0
+
+        def hourly(s: dict[str, Any]) -> float:
+            return float(s["set_price"]) * 60.0 / float(s["duration"])
+
+        def hourly_eur(s: dict[str, Any]) -> float:
+            rate = fx.get(str(s["set_currency"]).upper())
+            return hourly(s) / rate if rate else hourly(s)
+
+        top = max(priced, key=hourly_eur)
         return {
             "currency": str(top["set_currency"]).upper(),
-            "hourly_rate": round(float(top["set_price"]) * 60.0 / float(top["duration"]), 2),
+            "hourly_rate": round(hourly(top), 2),
             "source": "sessions",
         }
     # No priced session to derive from, and the stored rate is no more trustworthy here (serviceless
