@@ -551,18 +551,65 @@ def _admin_mentor_change_request(d: dict) -> tuple[str, str]:
     return f"[Admin] {name} submitted changes for approval", _base(body)
 
 
-def _admin_mentor_change_info(d: dict) -> tuple[str, str]:
-    """BUG-075: a live mentor edited fields that do NOT need approval - they are already live. Sent to
-    admin as an informational record (old -> new), no action required."""
-    name = _e(d.get("mentor_name", ""))
-    rows = [(c.get("label", ""), c.get("delta", "")) for c in (d.get("changes") or [])]
-    body = (
-        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Mentor updated their profile</h1>'
-        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6"><strong>{name}</strong> updated their '
-        "profile. These changes are already live (no approval needed) and are shared here for your records.</p>"
-        + _detail_list(rows)
+def _approval_change_row(c: dict) -> str:
+    """One 'requires approval' row: label + old -> new. Photo renders as two thumbnails instead of
+    raw URLs so the admin can actually see whether the new photo is acceptable."""
+    label, old, new = c.get("label", ""), c.get("old", ""), c.get("new", "")
+    if label == "Photo":
+        def _thumb(url: str) -> str:
+            if not url or url == "(empty)":
+                return '<span style="font-size:13px;color:#999">No photo</span>'
+            return (f'<img src="{_e(url)}" alt="" style="width:64px;height:64px;border-radius:8px;'
+                     'object-fit:cover;vertical-align:middle;border:1px solid #e8e8e8">')
+        value_html = f'{_thumb(old)}&nbsp;&nbsp;<span style="color:#999">→</span>&nbsp;&nbsp;{_thumb(new)}'
+    else:
+        value_html = f'{_e(old)} <span style="color:#999">→</span> {_e(new)}'
+    return (
+        '<tr><td style="padding:0 0 16px">'
+        f'<p style="margin:0 0 3px;font-size:11px;font-weight:600;color:#8a8a8a;text-transform:uppercase;letter-spacing:.7px">{_e(label)}</p>'
+        f'<p style="margin:0;font-size:15px;font-weight:600;color:#0a0a0a;line-height:1.4">{value_html}</p>'
+        "</td></tr>"
     )
-    return f"[Admin] {name} updated their profile", _base(body)
+
+
+def _admin_mentor_changes_submitted(d: dict) -> tuple[str, str]:
+    """Retest feedback (profile-approval optimization): ONE consolidated email per mentor submission
+    - never one per field. Only sent when at least one approval-gated field (Name/Phone/Photo/Service
+    Country) actually changed; any auto-approved (already-live) fields from the same submission are
+    listed as information only, with no action needed."""
+    name = _e(d.get("mentor_name", ""))
+    approval_changes = d.get("approval_changes") or []
+    info_changes = d.get("info_changes") or []
+    review_url = d.get("review_url", config.FRONTEND_URL + "/admin")
+
+    approval_html = (
+        '<table cellpadding="0" cellspacing="0" role="presentation" style="width:100%;margin:12px 0 20px">'
+        + "".join(_approval_change_row(c) for c in approval_changes)
+        + "</table>"
+    )
+    info_html = ""
+    if info_changes:
+        items = "".join(
+            f'<li style="margin:0 0 6px;font-size:14px;color:#555">{_e(c.get("label", ""))}: Changed</li>'
+            for c in info_changes
+        )
+        info_html = (
+            '<p style="margin:24px 0 8px;font-size:12px;font-weight:600;color:#999;text-transform:uppercase;letter-spacing:.6px">'
+            "Information only - no approval required</p>"
+            f'<ul style="margin:0 0 8px;padding-left:20px">{items}</ul>'
+            '<p style="margin:0;font-size:13px;color:#999">These have already been automatically approved.</p>'
+        )
+
+    body = (
+        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Mentor profile changes awaiting approval</h1>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6"><strong>{name}</strong> submitted '
+        "profile changes for review. Their live profile is unchanged for these fields until you approve.</p>"
+        '<p style="margin:24px 0 8px;font-size:12px;font-weight:600;color:#999;text-transform:uppercase;letter-spacing:.6px">'
+        "Requires approval</p>"
+        + approval_html + info_html
+        + _btn(review_url, "Review in admin")
+    )
+    return f"[Admin] {name} submitted changes for approval", _base(body)
 
 
 # ── Lifecycle v2 templates (cancel / reschedule / no-show) ──────────────────────
@@ -786,7 +833,7 @@ _TEMPLATES = {
     "mentor_application_received": _mentor_application_received,
     "admin_mentor_application": _admin_mentor_application,
     "admin_mentor_change_request": _admin_mentor_change_request,
-    "admin_mentor_change_info": _admin_mentor_change_info,
+    "admin_mentor_changes_submitted": _admin_mentor_changes_submitted,
     "mentor_approved": _mentor_approved,
     "mentor_rejected": _mentor_rejected,
     "mentor_changes_requested": _mentor_changes_requested,
