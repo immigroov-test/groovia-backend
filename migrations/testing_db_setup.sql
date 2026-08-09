@@ -3448,42 +3448,14 @@ BEGIN
 END; $$;
 GRANT EXECUTE ON FUNCTION display_service_prices(TEXT, UUID[]) TO anon, authenticated;
 
--- Seed a base rate for migrated mentors who have none (hourly_rate NULL/0), from their EXISTING
--- session pricing: the highest per-hour equivalent across their sessions (using set_offer_price too,
--- since some migrated rows carried the real amount there). Without a base rate their sessions priced
--- at duration x 0 = 0 and showed as free on the cards. They confirm/adjust it in the first-login
--- popup. MUST run before the reprice below (it reads set_price/set_offer_price) and before the clear.
-UPDATE mentors m
-SET hourly_rate = sub.max_hourly
-FROM (
-  SELECT s.mentor_id,
-         MAX(ROUND(GREATEST(COALESCE(s.set_price, 0), COALESCE(s.set_offer_price, 0)) * 60.0
-                   / NULLIF(s.duration, 0), 0)) AS max_hourly
-  FROM services s
-  WHERE COALESCE(s.duration, 0) > 0
-  GROUP BY s.mentor_id
-  HAVING MAX(GREATEST(COALESCE(s.set_price, 0), COALESCE(s.set_offer_price, 0))) > 0
-) sub
-WHERE m.id = sub.mentor_id AND (m.hourly_rate IS NULL OR m.hourly_rate <= 0);
-
--- One-time data correction (BUG-079 follow-up): re-derive every PAID service's stored price from its
--- mentor's base rate. Also fixes rows stuck at set_price 0 that carry a real offer price ("broken-0")
--- - the OR below includes them; truly-free sessions (both price and offer 0) stay free. Prices are
--- always duration x rate, so this is safe + idempotent. Going forward reprice_mentor_services() keeps
--- them in sync.
-UPDATE services s
-SET set_price = ROUND(m.hourly_rate * s.duration / 60.0, 2),
-    set_currency = UPPER(COALESCE(m.currency, s.set_currency, 'USD'))
-FROM mentors m
-WHERE s.mentor_id = m.id
-  AND m.hourly_rate IS NOT NULL AND m.hourly_rate > 0
-  AND (COALESCE(s.set_price, 0) > 0 OR COALESCE(s.set_offer_price, 0) > 0);
-
--- Clear stale per-service OFFER prices. Migrated rows carried a set_offer_price, and the pricing
--- engine prefers COALESCE(set_offer_price, set_price) - so a legacy offer (e.g. a 30-min stuck at an
--- old amount) kept overriding the correct base price even after a rate change. The derived model has
--- no offer price, so clear them everywhere; going forward reprice_mentor_services keeps them NULL.
-UPDATE services SET set_offer_price = NULL WHERE set_offer_price IS NOT NULL;
+-- Migrated mentors keep their imported per-SESSION prices (services.set_price = the price the customer
+-- pays) exactly as the old portal had them. We do NOT re-derive them from a per-hour rate here - an
+-- earlier version of this block did, and it overwrote real prices (a 399 INR session became ~10). Each
+-- mentor's hourly_rate is seeded at import (scripts/migrate_mentors.py) purely as the first-login popup
+-- default; their sessions are re-priced only when they confirm/change that rate in onboarding or on the
+-- Profile tab, via reprice_mentor_services(). For an already-migrated DB whose set_price was corrupted
+-- by the old block, restore the real prices from the raw export once with:
+--     python -m scripts.reimport_migrated_prices
 
 -- ── Payment tables ───────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS customer_payments (

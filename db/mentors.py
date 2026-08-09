@@ -635,14 +635,9 @@ def complete_mentor_onboarding(mentor_id: str) -> dict[str, Any]:
     """Clear the migrated-mentor onboarding gate once they've set a rate and confirmed their
     sessions. onboarded_at is the durable completion marker: setup-script re-runs re-gate only
     mentors who have never finished (onboarded_at IS NULL), never someone who completed."""
-    # BUG-079 follow-up: a migrated mentor's PRE-EXISTING services kept their old (legacy) price even
-    # after the mentor set a new base rate - the review screen showed a live-prorated figure, so it
-    # looked right, but the booking page + checkout read the stale stored set_price. Re-derive every
-    # service from the final base rate here so old and new services all match (duration x rate).
-    try:
-        reprice_mentor_services(mentor_id)
-    except Exception:
-        logger.warning("complete_mentor_onboarding: reprice failed for mentor %s", mentor_id)
+    # Do NOT reprice here. Migrated mentors keep their real per-session prices unless they explicitly
+    # click "Update my session prices" (which reprices via set_mentor_initial_rate(reprice=True)).
+    # Finishing onboarding must not silently collapse a cheap intro + pricier session into one rate.
     payload = {"needs_onboarding": False, "onboarded_at": datetime.now(timezone.utc).isoformat()}
     try:
         res = _supabase.table("mentors").update(payload).eq("id", mentor_id).execute()
@@ -1223,9 +1218,15 @@ def reprice_mentor_services(mentor_id: str) -> int:
 
 
 def set_mentor_initial_rate(mentor_id: str, hourly_rate: float, currency: str,
-                            currency_rates: list[dict], smart_pricing: bool) -> dict[str, Any]:
+                            currency_rates: list[dict], smart_pricing: bool,
+                            reprice: bool = False) -> dict[str, Any]:
     """First-login rate capture for a migrated mentor: write rate/currency/smart_pricing straight to
-    the live row (not staged), so they become priceable immediately."""
+    the live row (not staged), so they become priceable immediately.
+
+    reprice: only when the mentor explicitly asks to apply the rate to their sessions (the "Update my
+    session prices" button). Migrated mentors arrive with their real per-SESSION prices restored (a
+    cheap 15-min intro alongside a pricier 30-min), which a single per-hour rate can't reproduce; the
+    seeded rate is just the popup default, so saving it must NOT silently overwrite those prices."""
     payload = {
         "hourly_rate": hourly_rate,
         "currency": currency,
@@ -1235,9 +1236,8 @@ def set_mentor_initial_rate(mentor_id: str, hourly_rate: float, currency: str,
     res = _supabase.table("mentors").update(payload).eq("id", mentor_id).execute()
     if not res.data:
         raise ValueError("Mentor not found")
-    # BUG-079: flow the new rate through to the mentor's existing services so the customer never
-    # sees a stale price. No-op if they have no services yet (created later at the new rate).
-    reprice_mentor_services(mentor_id)
+    if reprice:
+        reprice_mentor_services(mentor_id)   # derive every session from the new rate (duration x rate)
     _sync_services_ppp(mentor_id, payload)
     return res.data[0]
 

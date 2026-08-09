@@ -98,6 +98,7 @@ class InitialRateBody(BaseModel):
     currency: str = "INR"
     currency_rates: list[dict] = []      # additional-currency base rates [{currency, hourly_rate}]
     smart_pricing: bool = False
+    apply_to_sessions: bool = False      # True only from the "Update my session prices" button
 
 
 @router.post("/setup-rate")
@@ -124,6 +125,7 @@ def setup_rate(body: InitialRateBody, user: AuthUser = Depends(get_current_user)
         currency=(body.currency or "INR").strip().upper(),
         currency_rates=validated_rates,
         smart_pricing=body.smart_pricing,
+        reprice=body.apply_to_sessions,
     )
 
 
