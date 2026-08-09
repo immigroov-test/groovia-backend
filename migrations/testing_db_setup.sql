@@ -2928,8 +2928,10 @@ UPDATE mentors SET needs_onboarding = TRUE
  WHERE legacy_id IS NOT NULL AND onboarded_at IS NULL AND needs_onboarding = FALSE;
 
 -- Yokesh is our end-to-end test mentor. Force him back into the first-login flow on every setup run,
--- clearing any rate a previous test set, so the onboarding popup is always reproducible for him.
-UPDATE mentors SET needs_onboarding = TRUE, hourly_rate = NULL, onboarded_at = NULL
+-- clearing any rate a previous test set, so the onboarding popup is always reproducible for him. Also
+-- give him 0h minimum booking notice so we can book a slot and join it immediately when testing.
+UPDATE mentors SET needs_onboarding = TRUE, hourly_rate = NULL, onboarded_at = NULL,
+                   app_minimum_notice = INTERVAL '0'
  WHERE slug = 'yokesh-dhanabal';
 
 -- ============================================================================
