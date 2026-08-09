@@ -570,7 +570,11 @@ def _email_admins_change(template: str, mentor_name: str, changes: list[dict[str
 def _apply_approved_profile_edit(mentor: dict, fields: dict[str, Any], background_tasks: BackgroundTasks) -> dict[str, Any]:
     """Approved (live) mentor edit: apply everything except Name/Country immediately, stage those two
     for approval, and notify admin either way (BUG-075 + BUG-076)."""
-    approval = {k: v for k, v in fields.items() if k in _APPROVAL_PROFILE_FIELDS}
+    # Only stage approval fields that ACTUALLY changed. The edit form always submits Name/Country, so
+    # staging them unconditionally stamped pending_submitted_at (and lit the "awaiting review" banner)
+    # on every save, even edits that touched nothing approval-gated (BUG-111).
+    approval = {k: v for k, v in fields.items()
+                if k in _APPROVAL_PROFILE_FIELDS and str(mentor.get(k)) != str(v)}
     info = {k: v for k, v in fields.items() if k not in _APPROVAL_PROFILE_FIELDS}
     staged_changes = _profile_change_rows(mentor, approval)
     applied_changes = _profile_change_rows(mentor, info)

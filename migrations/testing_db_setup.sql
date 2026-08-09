@@ -982,8 +982,11 @@ RETURNS TABLE (
 ) LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
   SELECT
     b.slot_time,
-    COALESCE(m.app_timezone, 'UTC'),
-    b.slot_time AT TIME ZONE COALESCE(m.app_timezone, 'UTC'),
+    -- BUG-114: many mentors have app_timezone stuck at 'UTC' while their real IANA tz is in
+    -- mentors.timezone; prefer a non-UTC app_timezone, else the profile timezone, so emails show the
+    -- mentor's own time instead of UTC.
+    COALESCE(NULLIF(m.app_timezone, 'UTC'), m.timezone, 'UTC'),
+    b.slot_time AT TIME ZONE COALESCE(NULLIF(m.app_timezone, 'UTC'), m.timezone, 'UTC'),
     COALESCE(b.attendee_timezone, p.timezone, 'UTC'),
     b.slot_time AT TIME ZONE COALESCE(b.attendee_timezone, p.timezone, 'UTC')
   FROM bookings b
