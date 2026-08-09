@@ -822,7 +822,7 @@ def list_pending_revisions(limit: int = 100) -> list[dict[str, Any]]:
     The live profile keeps serving until an admin applies the revision."""
     rows = (
         _supabase.table("mentors")
-        .select("id, slug, display_name, headline, photo_url, status, submission_count, "
+        .select("id, slug, display_name, headline, photo_url, phone, country, status, submission_count, "
                 "created_at, profile_id, pending_changes, pending_submitted_at")
         .eq("status", "approved")
         .not_.is_("pending_changes", "null")
