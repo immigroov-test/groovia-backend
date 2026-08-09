@@ -515,11 +515,18 @@ class ProfileUpdateBody(BaseModel):
         return round(v, 2) if v is not None else v
 
 
-# Retest feedback (profile-approval optimization): only Name, Phone, Photo and Service Country need
-# admin approval; every other profile field goes live immediately with no admin email at all (fully
-# auto-approved). "Email" is also an approval-gated field per spec, but there is currently no UI path
-# for a mentor to edit their account email through this form (it lives in Supabase Auth, not here), so
-# it can never actually appear in `fields` - listed here only so the gate is correct if that ever ships.
+# Retest feedback (profile-approval optimization): Name, Phone, Photo and Service Country need admin
+# approval; every other profile field goes live immediately with no admin email at all (fully
+# auto-approved).
+#
+# "email" IS listed per spec - it is a spec-required approval-gated field - but mentor email-change is
+# EXPLICITLY OUT OF SCOPE for this release: there is no UI anywhere for a mentor to edit their account
+# email (it's their Supabase Auth login identity, not an ordinary profile field), so nothing can ever
+# land in `fields["email"]` and this entry is currently a no-op. This is a deliberate, acknowledged gap,
+# not an oversight: a real email-change needs its own re-verification flow (confirm on the new address,
+# handle a pending-unconfirmed state, guard against lockout) and deserves a dedicated ticket rather than
+# being rushed into this one. Do NOT remove "email" from this set when that ships - wire the new flow to
+# route through `_apply_approved_profile_edit` the same way every other gated field already does.
 _APPROVAL_PROFILE_FIELDS = {"display_name", "phone", "photo_url", "country", "email"}
 _PROFILE_FIELD_LABELS = {
     "display_name": "Name", "country": "Service Country", "home_country_code": "Home country",
