@@ -1237,11 +1237,11 @@ def derive_rate_prefill(mentor: dict[str, Any]) -> dict[str, Any]:
             "hourly_rate": round(float(top["set_price"]) * 60.0 / float(top["duration"]), 2),
             "source": "sessions",
         }
-    return {
-        "currency": (mentor.get("currency") or "INR").upper(),
-        "hourly_rate": float(mentor["hourly_rate"]) if mentor.get("hourly_rate") else None,
-        "source": "mentor",
-    }
+    # No priced session to derive from, and the stored rate is no more trustworthy here (serviceless
+    # migrated mentors carry rows like "INR 80", a USD-magnitude number mislabelled INR). Open on our
+    # default currency with the amount BLANK rather than inventing one: a prefilled number tends to be
+    # accepted as-is, and "Finish setup" is already gated on the mentor entering a valid rate.
+    return {"currency": "INR", "hourly_rate": None, "source": "default"}
 
 
 def set_mentor_initial_rate(mentor_id: str, hourly_rate: float, currency: str,
