@@ -2934,6 +2934,14 @@ UPDATE mentors SET needs_onboarding = TRUE, hourly_rate = NULL, onboarded_at = N
                    app_minimum_notice = INTERVAL '0'
  WHERE slug = 'yokesh-dhanabal';
 
+-- ...and full 24/7 availability so a bookable "now" slot always exists for end-to-end testing.
+DELETE FROM weekly_availability WHERE mentor_id = (SELECT id FROM mentors WHERE slug = 'yokesh-dhanabal');
+INSERT INTO weekly_availability (mentor_id, weekday, start_time, end_time, timezone, is_active)
+SELECT m.id, d.day, TIME '00:00', TIME '23:59:59', 'UTC', TRUE
+FROM mentors m
+CROSS JOIN (VALUES ('Monday'),('Tuesday'),('Wednesday'),('Thursday'),('Friday'),('Saturday'),('Sunday')) AS d(day)
+WHERE m.slug = 'yokesh-dhanabal';
+
 -- ============================================================================
 -- Legacy session history (imported read-only from the old portal's /bookings)
 -- ============================================================================
