@@ -3533,6 +3533,7 @@ CREATE INDEX IF NOT EXISTS idx_payment_reconciliation_log_booking ON payment_rec
 -- Booking columns the reserve/confirm flow needs.
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS payment_hold_expires_at TIMESTAMPTZ;  -- 10-min reservation hold
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS customer_currency TEXT;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS notes TEXT;  -- customer's "what should my mentor prepare" note (BUG-113)
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS fx_customer_inr NUMERIC;  -- INR per 1 customer-currency unit
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS fx_mentor_inr   NUMERIC;  -- INR per 1 mentor-currency unit
 

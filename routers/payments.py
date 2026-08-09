@@ -85,10 +85,11 @@ def reserve(body: ReserveBody, user: Optional[AuthUser] = Depends(get_current_us
         )
         try:
             db.set_booking_phone(result["booking_id"], body.phone)
+            db.set_booking_notes(result["booking_id"], body.notes)   # BUG-113
             if candidate_id:
                 db.set_profile_phone_if_empty(candidate_id, body.phone)
         except Exception:
-            logger.warning("could not save phone for reserved booking %s", result.get("booking_id"))
+            logger.warning("could not save phone/notes for reserved booking %s", result.get("booking_id"))
         return result
     except Exception as e:
         msg = str(e)

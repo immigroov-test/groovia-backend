@@ -267,6 +267,28 @@ def _mentor_row(name: str, photo: str, subtitle: str = "") -> str:
     )
 
 
+def _prep_block(notes: str, answers: list, heading: str) -> str:
+    """The customer's free-text prep note + their answers to the mentor's intake questions (BUG-113).
+    Returns '' when there's nothing to show."""
+    rows = ""
+    if notes:
+        rows += f'<p style="margin:6px 0 0;font-size:14px;color:#444;line-height:1.6">{_e(notes)}</p>'
+    for a in (answers or []):
+        q = _e(str(a.get("question", "") or ""))
+        ans = _e(str(a.get("answer", "") or ""))
+        if not ans:
+            continue
+        rows += (f'<p style="margin:8px 0 0;font-size:14px;color:#444;line-height:1.6">'
+                 f'<strong>{q}</strong><br>{ans}</p>')
+    if not rows:
+        return ""
+    return (
+        '<div style="margin:16px 0 0;padding:14px 16px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:12px">'
+        f'<p style="margin:0;font-size:13px;font-weight:600;color:#475569">{_e(heading)}</p>'
+        + rows + '</div>'
+    )
+
+
 def _booking_confirmed_candidate(d: dict) -> tuple[str, str]:
     candidate = _e(d.get("candidate_name", ""))
     mentor = d.get("mentor_name", "your mentor")
@@ -295,7 +317,8 @@ def _booking_confirmed_candidate(d: dict) -> tuple[str, str]:
             ("Who", f"{mentor} (mentor) and you"),
             ("Where", "Video call - use the Join meeting button below"),
         ])
-        + '<p style="margin:0;font-size:15px;color:#444;line-height:1.6">'
+        + _prep_block(d.get("notes", ""), d.get("answers"), "What you shared with your mentor")
+        + '<p style="margin:16px 0 0;font-size:15px;color:#444;line-height:1.6">'
         "You'll receive a reminder 24 hours and 30 minutes before the session."
         "</p>"
         + (guest_block if is_guest else (
@@ -314,11 +337,7 @@ def _booking_confirmed_mentor(d: dict) -> tuple[str, str]:
     candidate_email = d.get("candidate_email", "")
     service = d.get("service_title", "1-on-1 session")
     url = d.get("meeting_url", "")
-    notes = d.get("notes", "")
-    notes_html = (
-        f'<p style="margin:16px 0 0;font-size:14px;color:#444;line-height:1.6">'
-        f"<strong>What to prepare (from {_e(candidate)}):</strong><br>{_e(notes)}</p>"
-    ) if notes else ""
+    notes_html = _prep_block(d.get("notes", ""), d.get("answers"), f"What to prepare (from {candidate})")
     who = f"{candidate}" + (f" ({candidate_email})" if candidate_email else "")
     body = (
         f'<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">New booking from {_e(candidate)}</h1>'

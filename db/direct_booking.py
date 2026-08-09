@@ -157,7 +157,7 @@ def get_booking_notify_info(booking_id: str) -> Optional[dict[str, Any]]:
     try:
         res = (
             _supabase.table("bookings")
-            .select("mentor_id, candidate_id, candidate_email, candidate_name, slot_time, "
+            .select("mentor_id, candidate_id, candidate_email, candidate_name, slot_time, notes, "
                     "service_id, services(title), mentors(display_name, photo_url)")
             .eq("id", booking_id)
             .single()
@@ -187,10 +187,46 @@ def get_booking_notify_info(booking_id: str) -> Optional[dict[str, Any]]:
             "candidate_email": cand_email,
             "service_title":   svc.get("title") if isinstance(svc, dict) else None,
             "slot_time":       b.get("slot_time"),
+            "notes":           (b.get("notes") or "").strip() or None,   # BUG-113
+            "answers":         get_booking_answers(booking_id),           # BUG-113
         }
     except Exception:
         logger.exception("get_booking_notify_info failed booking=%s", booking_id)
         return None
+
+
+def get_booking_answers(booking_id: str) -> list[dict[str, str]]:
+    """The customer's answers to the mentor's intake questions for a booking: [{question, answer}].
+    Two plain reads (no PostgREST embedding) so a missing FK relationship can't break it."""
+    try:
+        qa = (_supabase.table("booking_question_answers")
+              .select("question_id, answer_text").eq("booking_id", booking_id).execute().data or [])
+        qa = [a for a in qa if (a.get("answer_text") or "").strip()]
+        if not qa:
+            return []
+        qids = [a["question_id"] for a in qa if a.get("question_id")]
+        qtext: dict[str, str] = {}
+        if qids:
+            qs = (_supabase.table("service_questions")
+                  .select("id, question_text").in_("id", qids).execute().data or [])
+            qtext = {q["id"]: q.get("question_text") for q in qs}
+        return [{"question": qtext.get(a.get("question_id")) or "Question", "answer": a["answer_text"]}
+                for a in qa]
+    except Exception:
+        logger.exception("get_booking_answers failed booking=%s", booking_id)
+        return []
+
+
+def set_booking_notes(booking_id: str, notes: Optional[str]) -> None:
+    """Store the customer's free-text 'what should my mentor prepare' note on the booking (BUG-113).
+    Called right after book_session / reserve_booking so the note persists for the email + dashboard."""
+    n = (notes or "").strip()
+    if not n:
+        return
+    try:
+        _supabase.table("bookings").update({"notes": n}).eq("id", booking_id).execute()
+    except Exception:
+        logger.exception("set_booking_notes failed booking=%s", booking_id)
 
 
 def get_service_mentor_id(service_id: str) -> Optional[str]:
@@ -706,7 +742,7 @@ def get_booking_full_detail(booking_id: str) -> Optional[dict[str, Any]]:
         res = (
             _supabase.table("bookings")
             .select(
-                "id, status, slot_time, slot_end, reschedule_count, no_show_by, "
+                "id, status, slot_time, slot_end, reschedule_count, no_show_by, notes, "
                 "candidate_id, candidate_name, candidate_email, candidate_phone, attendee_timezone, "
                 "mentor_id, service_id, "
                 "mentors(profile_id, display_name, photo_url, app_timezone, slug, country, cancel_notice_hours), "
