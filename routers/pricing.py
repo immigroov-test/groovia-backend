@@ -146,3 +146,41 @@ def convert_prices(body: ConvertPricesBody, request: Request):
     except Exception:
         logger.exception("convert_prices failed country=%s", country)
         raise HTTPException(status_code=500, detail="Failed to convert prices")
+
+
+# ── Regional preview (rate editor, before any service exists) ──────────────────
+
+class RegionalPreviewBody(BaseModel):
+    base_currency: str = Field(..., min_length=3, max_length=3)
+    base_price: float
+    smart_pricing: bool = False
+    mentor_country: Optional[str] = Field(None, min_length=2, max_length=2)
+
+    @field_validator("base_price")
+    @classmethod
+    def validate_price(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError("base_price must be >= 0")
+        return v
+
+    @field_validator("base_currency")
+    @classmethod
+    def validate_currency(cls, v: str) -> str:
+        return v.strip().upper()
+
+
+@router.post("/preview-regions")
+def preview_regions(body: RegionalPreviewBody):
+    """BUG-103: 'what will customers in major markets see' preview for the mentor's rate editor
+    (registration, onboarding, profile edit). Public — no auth needed, purely a stateless
+    calculator over the values the mentor already typed in. Same PPP+FX engine as the real
+    checkout, just fee/tax-free (session price only) and keyed by featured region, not a service."""
+    try:
+        regions = db.preview_regional_prices(
+            body.base_currency, body.base_price, body.smart_pricing,
+            (body.mentor_country or "").upper() or None,
+        )
+        return {"regions": regions}
+    except Exception:
+        logger.exception("preview_regions failed currency=%s", body.base_currency)
+        raise HTTPException(status_code=500, detail="Failed to compute regional preview")

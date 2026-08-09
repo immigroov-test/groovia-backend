@@ -2729,6 +2729,36 @@ BEGIN
 END; $$;
 GRANT EXECUTE ON FUNCTION display_service_prices(TEXT, UUID[]) TO anon, authenticated;
 
+-- BUG-103/FEAT: mentor-facing "what will customers in major markets see" preview, shown on the rate
+-- editor during registration/onboarding/profile edit (before any service exists, so it can't reuse
+-- display_service_prices which needs service_ids). Same PPP+FX shape as display_service_prices (no
+-- fee/tax - session price only), applied to the mentor's typed-in base rate for 7 featured regions.
+-- "Europe" isn't a real ISO country, so its PPP factor is read from Germany (a representative
+-- mid-Eurozone economy) while the CURRENCY shown is still plain EUR.
+CREATE OR REPLACE FUNCTION preview_regional_prices(
+  p_base_currency TEXT, p_base_price NUMERIC, p_is_ppp BOOLEAN, p_mentor_country TEXT
+) RETURNS TABLE(region_code TEXT, currency TEXT, price NUMERIC, price_no_ppp NUMERIC, fx_ok BOOLEAN)
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  r RECORD; v_ppp_country TEXT; v_ppp NUMERIC; v_fx NUMERIC; v_base NUMERIC := GREATEST(COALESCE(p_base_price, 0), 0);
+BEGIN
+  FOR r IN SELECT * FROM (VALUES
+    ('US', 'USD'), ('EU', 'EUR'), ('IN', 'INR'), ('SA', 'SAR'), ('AE', 'AED'), ('AU', 'AUD'), ('SG', 'SGD')
+  ) AS t(code, ccy) LOOP
+    v_ppp_country := CASE WHEN r.code = 'EU' THEN 'DE' ELSE r.code END;
+    v_ppp := CASE WHEN p_is_ppp THEN ppp_relative(v_ppp_country, p_mentor_country) ELSE 1 END;
+    v_fx  := get_fx_or_null(p_base_currency, r.ccy);   -- soft: falls back, never fails the preview
+    region_code := r.code; currency := r.ccy;
+    IF v_fx IS NULL THEN
+      price := ROUND(v_base * v_ppp, 2); price_no_ppp := ROUND(v_base, 2); fx_ok := false;
+    ELSE
+      price := ROUND(v_base * v_ppp * v_fx, 2); price_no_ppp := ROUND(v_base * v_fx, 2); fx_ok := true;
+    END IF;
+    RETURN NEXT;
+  END LOOP;
+END; $$;
+GRANT EXECUTE ON FUNCTION preview_regional_prices(TEXT, NUMERIC, BOOLEAN, TEXT) TO anon, authenticated;
+
 -- One-time data correction (BUG-079 follow-up): re-derive every PAID service's stored price from its
 -- mentor's CURRENT base rate. Migrated/legacy services kept their old price even after the mentor set
 -- a new base rate - the onboarding review showed a live-prorated figure (so it looked right), but the
