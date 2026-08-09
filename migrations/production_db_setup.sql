@@ -951,7 +951,10 @@ BEGIN
     WHERE id = p_offer_id AND status = 'mentee_selected';
   IF NOT FOUND THEN RAISE EXCEPTION 'Offer not found or not awaiting mentor confirmation'; END IF;
   UPDATE reschedule_offers SET status = 'accepted' WHERE id = p_offer_id;
-  UPDATE bookings SET slot_time = o.selected_time, slot_end = NULL, status = 'rescheduled'
+  -- Same-booking move: reset attendance/no-show/room so the new slot starts clean.
+  UPDATE bookings SET slot_time = o.selected_time, slot_end = NULL, status = 'rescheduled',
+                      candidate_joined_at = NULL, mentor_joined_at = NULL,
+                      mentor_confirmed_at = NULL, no_show_by = NULL, meeting_room = NULL
     WHERE id = o.booking_id RETURNING * INTO b;
   RETURN b;
 END;
@@ -1633,8 +1636,13 @@ BEGIN
     RAISE EXCEPTION 'That time is no longer available - please pick another slot.';
   END IF;
   UPDATE reschedule_offers SET status = 'accepted', selected_time = p_slot_time WHERE id = p_offer_id;
+  -- Reschedule moves the SAME booking to a new slot (so /meeting/{id} stays valid), but the new slot is
+  -- a CLEAN slate: clear attendance + no-show + the meeting room so no-show detection only reflects the
+  -- current slot and a fresh room is generated on next join.
   UPDATE bookings SET slot_time = p_slot_time, slot_end = NULL, status = 'rescheduled',
-                      reschedule_count = reschedule_count + 1
+                      reschedule_count = reschedule_count + 1,
+                      candidate_joined_at = NULL, mentor_joined_at = NULL,
+                      mentor_confirmed_at = NULL, no_show_by = NULL, meeting_room = NULL
     WHERE id = o.booking_id RETURNING * INTO b;
   DELETE FROM booking_reminders WHERE booking_id = o.booking_id;
   -- A reschedule the mentor proposed late (was_late) penalizes the mentor 25%; no customer charge.
@@ -1694,8 +1702,11 @@ BEGIN
   IF NOT is_slot_available(b.mentor_id, b.service_id, p_slot_time) THEN
     RAISE EXCEPTION 'That time is not available - pick another slot.';
   END IF;
+  -- Same-booking move (see mentee_accept_reschedule): reset attendance/no-show/room for the new slot.
   UPDATE bookings SET slot_time = p_slot_time, slot_end = NULL, status = 'rescheduled',
-                      reschedule_count = reschedule_count + 1
+                      reschedule_count = reschedule_count + 1,
+                      candidate_joined_at = NULL, mentor_joined_at = NULL,
+                      mentor_confirmed_at = NULL, no_show_by = NULL, meeting_room = NULL
     WHERE id = p_booking_id;
   DELETE FROM booking_reminders WHERE booking_id = p_booking_id;
   UPDATE booking_requests SET status = 'completed', resolved_at = NOW()
