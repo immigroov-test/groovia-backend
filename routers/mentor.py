@@ -98,6 +98,7 @@ class InitialRateBody(BaseModel):
     currency: str = "INR"
     currency_rates: list[dict] = []      # additional-currency base rates [{currency, hourly_rate}]
     smart_pricing: bool = False
+    apply_to_sessions: bool = False      # True only from the "Update my session prices" button
 
 
 @router.post("/setup-rate")
@@ -124,6 +125,7 @@ def setup_rate(body: InitialRateBody, user: AuthUser = Depends(get_current_user)
         currency=(body.currency or "INR").strip().upper(),
         currency_rates=validated_rates,
         smart_pricing=body.smart_pricing,
+        reprice=body.apply_to_sessions,
     )
 
 
@@ -568,7 +570,11 @@ def _email_admins_change(template: str, mentor_name: str, changes: list[dict[str
 def _apply_approved_profile_edit(mentor: dict, fields: dict[str, Any], background_tasks: BackgroundTasks) -> dict[str, Any]:
     """Approved (live) mentor edit: apply everything except Name/Country immediately, stage those two
     for approval, and notify admin either way (BUG-075 + BUG-076)."""
-    approval = {k: v for k, v in fields.items() if k in _APPROVAL_PROFILE_FIELDS}
+    # Only stage approval fields that ACTUALLY changed. The edit form always submits Name/Country, so
+    # staging them unconditionally stamped pending_submitted_at (and lit the "awaiting review" banner)
+    # on every save, even edits that touched nothing approval-gated (BUG-111).
+    approval = {k: v for k, v in fields.items()
+                if k in _APPROVAL_PROFILE_FIELDS and str(mentor.get(k)) != str(v)}
     info = {k: v for k, v in fields.items() if k not in _APPROVAL_PROFILE_FIELDS}
     staged_changes = _profile_change_rows(mentor, approval)
     applied_changes = _profile_change_rows(mentor, info)
@@ -619,14 +625,14 @@ def update_profile(body: ProfileUpdateBody, background_tasks: BackgroundTasks, u
     # Expertise (browse) countries are always derived from current + served (+ any legacy home),
     # never sent by the client. Re-derive whenever the current country or the served list changes,
     # using the incoming values or the existing row.
-    if body.country is not None or body.served_countries is not None or body.home_country_code is not None:
+    # Expertise = current country + served countries only. NOT the home country: a mentor guides people
+    # to where they now live plus the places they can advise on, never their origin (BUG-110 - "Vinoth
+    # shows Netherlands and India but I'm not guiding to move to India").
+    if body.country is not None or body.served_countries is not None:
         new_country = fields["country"] if "country" in fields else mentor.get("country")
         served = (fields["served_countries"] if "served_countries" in fields
                   else (mentor.get("served_countries") or []))
         extra = [c.get("code") for c in served if c.get("code")]
-        new_home = fields["home_country_code"] if "home_country_code" in fields else mentor.get("home_country_code")
-        if new_home:
-            extra.append(new_home)
         derived = _derive_expertise(new_country, extra)
         if derived:
             fields["expertise_country_codes"] = derived
@@ -640,7 +646,7 @@ def update_profile(body: ProfileUpdateBody, background_tasks: BackgroundTasks, u
         fields["social_links"] = [s.model_dump() for s in body.social_links]
     if body.public_notes is not None:
         fields["public_notes"] = body.public_notes.strip() or None
-    # (expertise_country_codes is derived from home + current above; any client value is ignored)
+    # (expertise_country_codes is derived from current country + served countries above; client-ignored)
     if body.expertise_categories is not None:
         fields["expertise_categories"] = body.expertise_categories
     if body.years_lived_experience is not None:

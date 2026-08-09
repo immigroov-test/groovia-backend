@@ -163,7 +163,11 @@ def booking_detail(booking_id: str, user: AuthUser = Depends(get_current_user)):
     # pick) is still possible, so offer that instead of a cancel button that would just error out.
     can_reschedule = bool((is_candidate or is_mentor) and active and not is_past)
     can_cancel = bool((is_candidate or is_mentor) and active and not is_past and deadline_state != "buffer")
-    can_report_no_show = bool((is_candidate or is_mentor) and active and slot and now > slot + timedelta(minutes=10))
+    # BUG-099: the no-show button is live only in a sensible window - from 10 min after the start until
+    # 24h after the end - and never once a no-show is already recorded or the session isn't active.
+    no_show_reported = bool(d.get("no_show_by"))
+    no_show_open = bool(slot and end and (slot + timedelta(minutes=10)) < now < (end + timedelta(hours=24)))
+    can_report_no_show = bool((is_candidate or is_mentor) and active and not no_show_reported and no_show_open)
 
     out: dict = {
         "id": d["id"],
@@ -181,6 +185,7 @@ def booking_detail(booking_id: str, user: AuthUser = Depends(get_current_user)):
         "no_show_by": d.get("no_show_by"),
         "deadline_state": deadline_state,
         "opens_at": opens_at.isoformat() if opens_at else None,
+        "closes_at": closes_at.isoformat() if closes_at else None,   # BUG-105: joinable until the END (+grace)
         "join_open": join_open,
         "offer": d.get("offer"),
         "request": d.get("request"),
@@ -195,6 +200,8 @@ def booking_detail(booking_id: str, user: AuthUser = Depends(get_current_user)):
         "can_reschedule": can_reschedule,
         "can_cancel": can_cancel,
         "can_report_no_show": can_report_no_show,
+        "notes": d.get("notes"),                       # BUG-113: customer's "what to prepare" note
+        "answers": db.get_booking_answers(d["id"]),    # BUG-113: intake-question answers
     }
 
     # Candidate's contact details are for the mentor + admin only.
@@ -436,10 +443,11 @@ def book_session(
                 # (no commission is generated). The paid path applies the discount in reserve.
                 db.attribute_booking_referral(booking_id, body.referral_code)
             db.set_booking_phone(booking_id, body.phone)
+            db.set_booking_notes(booking_id, body.notes)   # BUG-113: persist for email + dashboard
             if candidate_id:
                 db.set_profile_phone_if_empty(candidate_id, body.phone)
             background_tasks.add_task(
-                _send_booking_confirmation, booking_id, body.mentor_id, body.email, body.name, body.notes
+                _send_booking_confirmation, booking_id, body.mentor_id, body.email, body.name
             )
         return result[0] if result else {"booking_id": None, "status": "unknown"}
     except Exception as e:
@@ -826,13 +834,16 @@ def list_requests(booking_id: str, user: AuthUser = Depends(get_current_user)):
 
 def _send_booking_confirmation(
     booking_id: str, mentor_id: str, candidate_email: str, candidate_name: Optional[str],
-    notes: Optional[str] = None,
 ):
     """Notify both parties that a session was booked. Runs in a BackgroundTask so a
     mailer failure never affects the booking response."""
     try:
         times = db.get_booking_times_display(booking_id)
         info = db.get_booking_notify_info(booking_id) or {}
+        # BUG-113: the customer's prep note + question answers, read from the DB so they reach BOTH the
+        # instant-book path AND the paid path (whose email fires later at payment-confirm, not booking).
+        notes = info.get("notes")
+        answers = info.get("answers") or []
         mentor_name = info.get("mentor_name")
         mentor_email = info.get("mentor_email")
         mentor_photo = info.get("mentor_photo")
@@ -894,6 +905,8 @@ def _send_booking_confirmation(
                 "meeting_url": meeting_url,
                 "is_guest": is_guest,
                 "signup_url": signup_url,
+                "notes": notes or "",
+                "answers": answers,
             },
             attachments=ics_att,
         )
@@ -910,6 +923,7 @@ def _send_booking_confirmation(
                     "candidate_time": candidate_time,
                     "mentor_time": mentor_time,
                     "notes": notes or "",
+                    "answers": answers,
                     "meeting_url": meeting_url,
                 },
                 attachments=ics_att,

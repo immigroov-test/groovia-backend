@@ -218,7 +218,7 @@ CREATE TABLE IF NOT EXISTS services (
   description  TEXT,
   type         service_type NOT NULL DEFAULT 'video',
   duration     INTEGER NOT NULL CHECK (duration > 0),
-  is_ppp       BOOLEAN NOT NULL DEFAULT FALSE,
+  is_ppp       BOOLEAN NOT NULL DEFAULT TRUE,
   is_active    BOOLEAN NOT NULL DEFAULT TRUE,
   set_price    NUMERIC(10,2) NOT NULL DEFAULT 0,        -- base price in the mentor's PRIMARY currency
   set_currency TEXT NOT NULL DEFAULT 'USD',             -- the primary currency (mentor payout currency)
@@ -309,7 +309,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_bookings_idempotency
 -- and per-service search tags. service_create below derives is_ppp from the mentor's
 -- smart_pricing toggle and stores tags.
 ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS hourly_rate NUMERIC;
-ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS smart_pricing BOOLEAN NOT NULL DEFAULT FALSE;
+ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS smart_pricing BOOLEAN NOT NULL DEFAULT TRUE;
+-- BUG-62: Smart Pricing is ON by default for everyone. ADD COLUMN IF NOT EXISTS is a no-op once the
+-- column exists, so also set the default explicitly for already-created DBs (new mentors/services get
+-- it on; existing rows are enabled by the one-time scripts/enable_smart_pricing helper).
+ALTER TABLE mentors  ALTER COLUMN smart_pricing SET DEFAULT TRUE;
+ALTER TABLE services ALTER COLUMN is_ppp        SET DEFAULT TRUE;
 -- Additional-currency base rates [{currency, hourly_rate}]; the primary is (currency, hourly_rate).
 -- Each service's currency_prices are derived from these by duration.
 ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS currency_rates JSONB NOT NULL DEFAULT '[]';
@@ -952,7 +957,10 @@ BEGIN
     WHERE id = p_offer_id AND status = 'mentee_selected';
   IF NOT FOUND THEN RAISE EXCEPTION 'Offer not found or not awaiting mentor confirmation'; END IF;
   UPDATE reschedule_offers SET status = 'accepted' WHERE id = p_offer_id;
-  UPDATE bookings SET slot_time = o.selected_time, slot_end = NULL, status = 'rescheduled'
+  -- Same-booking move: reset attendance/no-show/room so the new slot starts clean.
+  UPDATE bookings SET slot_time = o.selected_time, slot_end = NULL, status = 'rescheduled',
+                      candidate_joined_at = NULL, mentor_joined_at = NULL,
+                      mentor_confirmed_at = NULL, no_show_by = NULL, meeting_room = NULL
     WHERE id = o.booking_id RETURNING * INTO b;
   RETURN b;
 END;
@@ -965,55 +973,9 @@ GRANT EXECUTE ON FUNCTION
   mentor_confirm_reschedule(UUID)
 TO authenticated;
 
--- ============================================================================
--- mentor_sessions (from 015)
--- ============================================================================
--- DROP first: the lifecycle-v2 block further down redefines this with a different
--- TABLE return type. CREATE OR REPLACE cannot change a return type, so re-running
--- the setup on an existing DB needs an explicit drop here.
-DROP FUNCTION IF EXISTS mentor_sessions(UUID);
-CREATE OR REPLACE FUNCTION mentor_sessions(p_mentor_id UUID)
-RETURNS TABLE (
-  id                  UUID,
-  status              TEXT,
-  slot_time           TIMESTAMPTZ,
-  meeting_url         TEXT,
-  service_title       TEXT,
-  service_duration    INTEGER,
-  mentee_name         TEXT,
-  mentee_email        TEXT,
-  mentor_tz           TEXT,
-  mentor_confirmed_at TIMESTAMPTZ,
-  offer_id            UUID,
-  offer_by            TEXT,
-  offer_date          DATE,
-  range_start         TIMESTAMPTZ,
-  range_end           TIMESTAMPTZ,
-  requested_date      DATE
-) LANGUAGE sql SECURITY DEFINER SET search_path = public AS $$
-  SELECT
-    b.id, b.status::TEXT, b.slot_time, b.meeting_url,
-    s.title, s.duration,
-    COALESCE(p.display_name, p.full_name, b.candidate_email),
-    COALESCE(b.candidate_email, p.email),
-    COALESCE(m.app_timezone, 'UTC'), b.mentor_confirmed_at,
-    ro.id, ro.proposed_by, ro.offer_date, ro.range_start, ro.range_end, ro.requested_date
-  FROM bookings b
-  LEFT JOIN services  s ON s.id = b.service_id
-  JOIN  mentors       m ON m.id = b.mentor_id
-  LEFT JOIN profiles  p ON p.id = b.candidate_id
-  LEFT JOIN LATERAL (
-    SELECT * FROM reschedule_offers
-    WHERE booking_id = b.id AND status IN ('pending', 'mentee_selected')
-    ORDER BY created_at DESC LIMIT 1
-  ) ro ON TRUE
-  WHERE b.mentor_id = p_mentor_id
-    AND b.status NOT IN ('cancelled', 'completed', 'no_show')
-    AND b.slot_time IS NOT NULL
-  ORDER BY b.slot_time;
-$$;
-
-GRANT EXECUTE ON FUNCTION mentor_sessions(UUID) TO authenticated;
+-- mentor_sessions() is defined ONCE, in the lifecycle-v2 block further down (search "Mentor view").
+-- The earlier duplicate definition that lived here was dead - it was dropped and recreated below with
+-- a wider return type - so it has been removed to avoid drift.
 
 -- ============================================================================
 -- booking_times_display (from 015)
@@ -1028,8 +990,11 @@ RETURNS TABLE (
 ) LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
   SELECT
     b.slot_time,
-    COALESCE(m.app_timezone, 'UTC'),
-    b.slot_time AT TIME ZONE COALESCE(m.app_timezone, 'UTC'),
+    -- BUG-114: many mentors have app_timezone stuck at 'UTC' while their real IANA tz is in
+    -- mentors.timezone; prefer a non-UTC app_timezone, else the profile timezone, so emails show the
+    -- mentor's own time instead of UTC.
+    COALESCE(NULLIF(m.app_timezone, 'UTC'), m.timezone, 'UTC'),
+    b.slot_time AT TIME ZONE COALESCE(NULLIF(m.app_timezone, 'UTC'), m.timezone, 'UTC'),
     COALESCE(b.attendee_timezone, p.timezone, 'UTC'),
     b.slot_time AT TIME ZONE COALESCE(b.attendee_timezone, p.timezone, 'UTC')
   FROM bookings b
@@ -2359,8 +2324,13 @@ BEGIN
     RAISE EXCEPTION 'That time is no longer available - please pick another slot.';
   END IF;
   UPDATE reschedule_offers SET status = 'accepted', selected_time = p_slot_time WHERE id = p_offer_id;
+  -- Reschedule moves the SAME booking to a new slot (so /meeting/{id} stays valid), but the new slot is
+  -- a CLEAN slate: clear attendance + no-show + the meeting room so no-show detection only reflects the
+  -- current slot and a fresh room is generated on next join.
   UPDATE bookings SET slot_time = p_slot_time, slot_end = NULL, status = 'rescheduled',
-                      reschedule_count = reschedule_count + 1
+                      reschedule_count = reschedule_count + 1,
+                      candidate_joined_at = NULL, mentor_joined_at = NULL,
+                      mentor_confirmed_at = NULL, no_show_by = NULL, meeting_room = NULL
     WHERE id = o.booking_id RETURNING * INTO b;
   DELETE FROM booking_reminders WHERE booking_id = o.booking_id;
   -- A reschedule the mentor proposed late (was_late) penalizes the mentor 25%; no customer charge.
@@ -2420,8 +2390,11 @@ BEGIN
   IF NOT is_slot_available(b.mentor_id, b.service_id, p_slot_time) THEN
     RAISE EXCEPTION 'That time is not available - pick another slot.';
   END IF;
+  -- Same-booking move (see mentee_accept_reschedule): reset attendance/no-show/room for the new slot.
   UPDATE bookings SET slot_time = p_slot_time, slot_end = NULL, status = 'rescheduled',
-                      reschedule_count = reschedule_count + 1
+                      reschedule_count = reschedule_count + 1,
+                      candidate_joined_at = NULL, mentor_joined_at = NULL,
+                      mentor_confirmed_at = NULL, no_show_by = NULL, meeting_room = NULL
     WHERE id = p_booking_id;
   DELETE FROM booking_reminders WHERE booking_id = p_booking_id;
   UPDATE booking_requests SET status = 'completed', resolved_at = NOW()
@@ -2874,14 +2847,42 @@ CREATE TABLE IF NOT EXISTS ppp_factors (
 ALTER TABLE ppp_factors DROP CONSTRAINT IF EXISTS ppp_factors_factor_check;
 ALTER TABLE ppp_factors ADD  CONSTRAINT ppp_factors_factor_check CHECK (factor > 0);
 
+-- World Bank price level ratio = PPP conversion factor (PA.NUS.PPP) / official FX (PA.NUS.FCRF),
+-- US-based (US = 1.00). A country at 0.23 is ~23% as expensive as the US, so its mentors are priced
+-- at ~23% when smart pricing is on. Clamped to [0.10, 1.50] to drop distorted-FX outliers (Iran,
+-- Sudan, Venezuela...). NOT hand-tuned. Regenerate every 6-12 months and paste the block below:
+--     python -m scripts.refresh_ppp_factors --print-sql
+--   or upsert straight into the live table:  python -m scripts.refresh_ppp_factors
 INSERT INTO ppp_factors (country_code, factor) VALUES
-  ('US',1.00),('CA',0.92),('GB',0.94),('IE',0.95),('DE',0.90),('FR',0.92),('NL',0.93),
-  ('ES',0.78),('IT',0.80),('PT',0.72),('SE',0.97),('NO',1.05),('CH',1.15),('PL',0.55),
-  ('RO',0.50),('AU',0.95),('NZ',0.90),('JP',0.85),('KR',0.78),('SG',0.85),('HK',0.90),
-  ('AE',0.72),('SA',0.60),('QA',0.70),('IN',0.30),('PK',0.29),('BD',0.32),('LK',0.32),
-  ('NP',0.30),('ID',0.38),('PH',0.40),('VN',0.37),('TH',0.45),('MY',0.45),('CN',0.55),
-  ('BR',0.45),('MX',0.50),('AR',0.40),('CO',0.42),('CL',0.55),('PE',0.45),('ZA',0.45),
-  ('NG',0.40),('KE',0.42),('EG',0.28),('MA',0.45),('TR',0.40),('RU',0.42),('UA',0.35)
+  ('AD',0.6807),('AE',0.6336),('AF',0.1723),('AG',0.6926),('AL',0.4293),('AM',0.3827),('AO',0.3541),
+  ('AR',0.4572),('AT',0.8196),('AU',0.9014),('AW',0.7463),('AZ',0.2838),('BA',0.4019),('BB',1.0954),
+  ('BD',0.2536),('BE',0.8135),('BF',0.3736),('BG',0.2338),('BH',0.4310),('BI',0.3396),('BJ',0.3443),
+  ('BM',1.1981),('BN',0.3487),('BO',0.3999),('BR',0.4572),('BS',0.9563),('BT',0.2293),('BW',0.3758),
+  ('BY',0.2961),('BZ',0.5256),('CA',0.8345),('CD',0.4177),('CF',0.4233),('CG',0.3469),('CH',1.1196),
+  ('CI',0.3716),('CL',0.4764),('CM',0.3408),('CN',0.4726),('CO',0.3782),('CR',0.5906),('CU',0.3917),
+  ('CV',0.4765),('CW',0.6974),('CY',0.6471),('CZ',0.5938),('DE',0.8023),('DJ',0.4621),('DK',0.9249),
+  ('DM',0.4838),('DO',0.3851),('DZ',0.3256),('EC',0.4252),('EE',0.6605),('EG',0.1541),('ER',0.3276),
+  ('ES',0.6452),('ET',0.3725),('FI',0.8522),('FJ',0.4065),('FM',0.9587),('FO',0.9408),('FR',0.7657),
+  ('GA',0.3719),('GB',0.8916),('GD',0.5672),('GE',0.3294),('GH',0.3783),('GL',0.7714),('GM',0.2496),
+  ('GN',0.3436),('GQ',0.4100),('GR',0.5954),('GT',0.4342),('GW',0.3412),('GY',0.3311),('HK',0.7085),
+  ('HN',0.4571),('HR',0.5320),('HT',0.8602),('HU',0.5198),('ID',0.2865),('IE',0.8485),('IL',1.0104),
+  ('IN',0.2305),('IQ',0.3792),('IR',1.5000),('IS',1.1785),('IT',0.6896),('JM',0.6021),('JO',0.4234),
+  ('JP',0.6487),('KE',0.3368),('KG',0.3350),('KH',0.3362),('KI',0.6500),('KM',0.4862),('KN',0.6858),
+  ('KR',0.5739),('KW',0.5722),('KY',1.1311),('KZ',0.3317),('LA',0.2270),('LB',0.3754),('LC',0.5143),
+  ('LK',0.2693),('LR',0.1000),('LS',0.3420),('LT',0.5799),('LU',0.9407),('LV',0.5703),('LY',0.3905),
+  ('MA',0.4205),('MD',0.4310),('ME',0.4173),('MG',0.3069),('MH',0.9470),('MK',0.3742),('ML',0.3407),
+  ('MM',0.3764),('MN',0.3418),('MO',0.5539),('MR',0.3122),('MT',0.6634),('MU',0.3859),('MV',0.5118),
+  ('MW',0.5331),('MX',0.5369),('MY',0.3163),('MZ',0.3703),('NA',0.4068),('NE',0.3561),('NG',0.1284),
+  ('NI',0.3418),('NL',0.8438),('NO',0.9092),('NP',0.2437),('NR',1.0263),('NZ',0.8563),('OM',0.4716),
+  ('PA',0.4508),('PE',0.5147),('PG',0.5790),('PH',0.3316),('PK',0.2413),('PL',0.5237),('PR',0.7782),
+  ('PT',0.6037),('PW',0.8473),('PY',0.3482),('QA',0.5627),('RO',0.4428),('RS',0.4501),('RU',0.3200),
+  ('RW',0.2698),('SA',0.4681),('SB',0.7484),('SC',0.5425),('SD',1.5000),('SE',0.8705),('SG',0.6049),
+  ('SI',0.6309),('SK',0.5789),('SL',0.2421),('SM',0.7920),('SN',0.3578),('SO',0.5245),('SR',0.3121),
+  ('SS',0.1000),('ST',0.6124),('SV',0.4090),('SX',0.7608),('SY',0.3224),('SZ',0.3279),('TC',0.9868),
+  ('TD',0.3522),('TG',0.3392),('TH',0.3069),('TJ',0.2764),('TL',0.2788),('TM',0.1000),('TN',0.2948),
+  ('TO',0.7500),('TR',0.4107),('TT',0.5110),('TV',0.8938),('TZ',0.2885),('UA',0.3103),('UG',0.3529),
+  ('US',1.0000),('UY',0.6581),('UZ',0.2918),('VC',0.5510),('VE',0.1000),('VI',0.8902),('VN',0.2893),
+  ('VU',0.9012),('WS',0.6284),('XK',0.4091),('YE',0.1000),('ZA',0.4148),('ZM',0.2992),('ZW',0.5583)
 ON CONFLICT (country_code) DO UPDATE SET factor = excluded.factor;
 
 ALTER TABLE ppp_factors ENABLE ROW LEVEL SECURITY;
@@ -2892,32 +2893,46 @@ INSERT INTO platform_settings (key, value, description) VALUES
   ('ppp_floor', '0.40', 'Minimum PPP factor (never price below this fraction of base)')
 ON CONFLICT (key) DO NOTHING;
 
--- get_ppp_factor: countries NOT in ppp_factors get 1.0; countries IN get
--- GREATEST(their factor, ppp_floor). The floor dominates seeded-low rows
--- (IN=0.30 -> effective 0.40) by design.
+-- get_ppp_factor: a country's price level (World Bank), or 1.0 when we have no data for it. No floor.
 CREATE OR REPLACE FUNCTION get_ppp_factor(p_country_code TEXT)
 RETURNS NUMERIC LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
-  SELECT GREATEST(
-    COALESCE((SELECT factor FROM ppp_factors WHERE country_code = UPPER(p_country_code)), 1.0),
-    COALESCE((SELECT value::numeric FROM platform_settings WHERE key = 'ppp_floor'), 0.40)
-  );
+  SELECT COALESCE((SELECT factor FROM ppp_factors WHERE country_code = UPPER(p_country_code)), 1.0);
 $$;
 GRANT EXECUTE ON FUNCTION get_ppp_factor(TEXT) TO anon, authenticated;
 
--- Relative PPP: the CUSTOMER's purchasing-power factor divided by the MENTOR's, so a mentor's local
--- price is re-based to the customer's country - a NL customer viewing an India-priced mentor pays
--- MORE (uplift), an India customer viewing a US mentor pays less. Raw factors drive the ratio; the
--- result is floored at ppp_floor so the discount side never drops below that fraction of the FX
--- price. Unknown/absent countries default to factor 1.0 (no adjustment).
-CREATE OR REPLACE FUNCTION ppp_relative(p_customer TEXT, p_mentor TEXT)
+-- Relative PPP: the CUSTOMER's price level divided by the ANCHOR's (the country the price is set in -
+-- the mentor's PRICING currency, not their residence). Re-bases a price to the customer's market: a US
+-- customer viewing an India-anchored price pays MORE (uplift), an India customer viewing a US-anchored
+-- price pays less. Raw ratio - NO floor or ceiling (both removed by request; revisit later). Unknown/
+-- absent countries default to factor 1.0 (no adjustment).
+DROP FUNCTION IF EXISTS ppp_relative(TEXT, TEXT);   -- 2nd param renamed p_mentor -> p_anchor
+CREATE OR REPLACE FUNCTION ppp_relative(p_customer TEXT, p_anchor TEXT)
 RETURNS NUMERIC LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
-  SELECT GREATEST(
-    COALESCE((SELECT factor FROM ppp_factors WHERE country_code = UPPER(p_customer)), 1.0)
-    / COALESCE((SELECT factor FROM ppp_factors WHERE country_code = UPPER(p_mentor)), 1.0),
-    COALESCE((SELECT value::numeric FROM platform_settings WHERE key = 'ppp_floor'), 0.40)
-  );
+  SELECT COALESCE((SELECT factor FROM ppp_factors WHERE country_code = UPPER(p_customer)), 1.0)
+       / COALESCE((SELECT factor FROM ppp_factors WHERE country_code = UPPER(p_anchor)), 1.0);
 $$;
 GRANT EXECUTE ON FUNCTION ppp_relative(TEXT, TEXT) TO anon, authenticated;
+
+-- The country a currency anchors PPP to = the mentor's PRICE currency's home, not their residence. A
+-- rupee price anchors to India, a dollar price to the US, etc., so an India-priced service scales from
+-- Indian buying power for every foreign customer. EUR uses Germany as a representative eurozone anchor;
+-- anything unmapped falls back to the US (factor 1.0 = no adjustment).
+CREATE OR REPLACE FUNCTION currency_anchor_country(p_ccy TEXT)
+RETURNS TEXT LANGUAGE sql IMMUTABLE SET search_path = public AS $$
+  SELECT CASE UPPER(COALESCE(p_ccy, ''))
+    WHEN 'INR' THEN 'IN' WHEN 'USD' THEN 'US' WHEN 'GBP' THEN 'GB' WHEN 'EUR' THEN 'DE'
+    WHEN 'AUD' THEN 'AU' WHEN 'NZD' THEN 'NZ' WHEN 'SGD' THEN 'SG' WHEN 'HKD' THEN 'HK'
+    WHEN 'CAD' THEN 'CA' WHEN 'AED' THEN 'AE' WHEN 'SAR' THEN 'SA' WHEN 'QAR' THEN 'QA'
+    WHEN 'JPY' THEN 'JP' WHEN 'KRW' THEN 'KR' WHEN 'CNY' THEN 'CN' WHEN 'CHF' THEN 'CH'
+    WHEN 'SEK' THEN 'SE' WHEN 'NOK' THEN 'NO' WHEN 'DKK' THEN 'DK' WHEN 'ZAR' THEN 'ZA'
+    WHEN 'LKR' THEN 'LK' WHEN 'PKR' THEN 'PK' WHEN 'BDT' THEN 'BD' WHEN 'NPR' THEN 'NP'
+    WHEN 'IDR' THEN 'ID' WHEN 'PHP' THEN 'PH' WHEN 'MYR' THEN 'MY' WHEN 'THB' THEN 'TH'
+    WHEN 'VND' THEN 'VN' WHEN 'BRL' THEN 'BR' WHEN 'MXN' THEN 'MX' WHEN 'TRY' THEN 'TR'
+    WHEN 'PLN' THEN 'PL' WHEN 'RON' THEN 'RO' WHEN 'NGN' THEN 'NG' WHEN 'KES' THEN 'KE'
+    WHEN 'EGP' THEN 'EG' WHEN 'TWD' THEN 'TW'
+    ELSE 'US' END;
+$$;
+GRANT EXECUTE ON FUNCTION currency_anchor_country(TEXT) TO anon, authenticated;
 
 -- Per-mentor commission override: the % taken OUT of the mentor's price (revenue-split). When set
 -- and not expired it WINS over the country/DEFAULT commission (effective_platform_fee_pct); NULL =
@@ -2943,9 +2958,19 @@ UPDATE mentors SET needs_onboarding = TRUE
  WHERE legacy_id IS NOT NULL AND onboarded_at IS NULL AND needs_onboarding = FALSE;
 
 -- Yokesh is our end-to-end test mentor. Force him back into the first-login flow on every setup run,
--- clearing any rate a previous test set, so the onboarding popup is always reproducible for him.
-UPDATE mentors SET needs_onboarding = TRUE, hourly_rate = NULL, onboarded_at = NULL
+-- clearing any rate a previous test set, so the onboarding popup is always reproducible for him. Also
+-- give him 0h minimum booking notice so we can book a slot and join it immediately when testing.
+UPDATE mentors SET needs_onboarding = TRUE, hourly_rate = NULL, onboarded_at = NULL,
+                   app_minimum_notice = INTERVAL '0'
  WHERE slug = 'yokesh-dhanabal';
+
+-- ...and full 24/7 availability so a bookable "now" slot always exists for end-to-end testing.
+DELETE FROM weekly_availability WHERE mentor_id = (SELECT id FROM mentors WHERE slug = 'yokesh-dhanabal');
+INSERT INTO weekly_availability (mentor_id, weekday, start_time, end_time, timezone, is_active)
+SELECT m.id, d.day, TIME '00:00', TIME '23:59:59', 'UTC', TRUE
+FROM mentors m
+CROSS JOIN (VALUES ('Monday'),('Tuesday'),('Wednesday'),('Thursday'),('Friday'),('Saturday'),('Sunday')) AS d(day)
+WHERE m.slug = 'yokesh-dhanabal';
 
 -- ============================================================================
 -- Legacy session history (imported read-only from the old portal's /bookings)
@@ -3238,7 +3263,7 @@ DECLARE
   v_cust_ccy TEXT; v_ppp NUMERIC := 1; v_source TEXT; v_explicit NUMERIC; v_base NUMERIC; v_mentor_amt NUMERIC;
   v_fx_mc NUMERIC; v_fx_c_inr NUMERIC; v_fx_m_inr NUMERIC;
   v_gross NUMERIC; v_platform_fee NUMERIC; v_commission NUMERIC; v_subtotal NUMERIC;
-  v_tax_amt NUMERIC; v_net_cust NUMERIC; v_net_mentor NUMERIC;
+  v_tax_amt NUMERIC; v_net_cust NUMERIC; v_net_mentor NUMERIC; v_mentor_base NUMERIC;
 BEGIN
   SELECT s.mentor_id, s.set_price, s.set_offer_price, COALESCE(s.set_currency, 'USD'), s.is_ppp,
          COALESCE(s.currency_prices, '[]'::jsonb), m.country
@@ -3277,9 +3302,17 @@ BEGIN
   ELSE
     -- Fallback: localise the primary rate to the customer currency (+ PPP).
     v_source     := 'converted';
-    v_ppp        := CASE WHEN v_is_ppp THEN ppp_relative(p_customer_country, v_mentor_country) ELSE 1 END;
-    v_fx_mc      := get_fx(v_ment_ccy, v_cust_ccy);   -- hard-fails FX_UNAVAILABLE (the charge needs it)
+    v_ppp        := CASE WHEN v_is_ppp THEN ppp_relative(p_customer_country, currency_anchor_country(v_ment_ccy)) ELSE 1 END;
+    v_fx_mc      := get_fx_or_null(v_ment_ccy, v_cust_ccy);   -- SOFT (see fallback below)
     v_base       := COALESCE(v_set_offer, v_set);
+    IF v_fx_mc IS NULL THEN
+      -- No fresh FX for this pair. Charge in the mentor's OWN currency - exactly what the card showed
+      -- (display_service_prices returns fx_ok=false with the mentor-currency price) - so the displayed
+      -- price equals the charge instead of the checkout hard-failing (F2). Fee/tax stay by customer country.
+      v_cust_ccy := v_ment_ccy;
+      v_fx_mc    := 1;
+      v_fx_c_inr := v_fx_m_inr;
+    END IF;
     v_mentor_amt := ROUND(v_base * v_ppp * v_fx_mc, 2);
     v_net_mentor := v_base * v_ppp;                    -- mentor payout basis (mentor ccy), PPP-adjusted; commission applied below (BUG-097)
   END IF;
@@ -3294,6 +3327,7 @@ BEGIN
   v_gross        := ROUND(v_mentor_amt + v_platform_fee + v_tax_amt, 2);       -- total the customer pays
   v_commission   := ROUND(v_mentor_amt * v_comm_pct / 100.0, 2);               -- internal mentor commission (out)
   v_net_cust     := ROUND(v_mentor_amt - v_commission, 2);                     -- mentor take-home, customer currency
+  v_mentor_base := v_net_mentor;                                               -- PRE-commission mentor-ccy payout basis (explicit: explicit/fx; converted: base x ppp)
   v_net_mentor := CASE WHEN v_net_mentor IS NOT NULL                           -- mentor take-home, mentor currency
                        THEN ROUND(v_net_mentor * (1 - v_comm_pct / 100.0), 2) ELSE NULL END;
 
@@ -3311,7 +3345,7 @@ BEGIN
     -- ledger + referral splits (net_customer + fee_amount = session price).
     'fee_pct', v_comm_pct, 'fee_amount', v_commission,
     'commission_pct', v_comm_pct, 'commission_amount', v_commission,
-    'net_customer', v_net_cust, 'net_mentor', v_net_mentor);
+    'net_customer', v_net_cust, 'net_mentor', v_net_mentor, 'mentor_base', v_mentor_base);
 END; $$;
 GRANT EXECUTE ON FUNCTION compute_booking_price(UUID, TEXT) TO anon, authenticated;
 
@@ -3346,7 +3380,7 @@ BEGIN
     v_amt := COALESCE((it->>'amount')::numeric, 0);
     v_from := COALESCE(it->>'from', 'USD');
     v_ppp_on := COALESCE((it->>'is_ppp')::boolean, false);
-    v_ppp := CASE WHEN v_ppp_on THEN ppp_relative(p_customer_country, it->>'mentor_country') ELSE 1 END;
+    v_ppp := CASE WHEN v_ppp_on THEN ppp_relative(p_customer_country, currency_anchor_country(v_from)) ELSE 1 END;
     -- Revenue split: the mentor's rate IS the customer price; the commission is taken OUT of it, so
     -- it never changes what the customer sees. Only tax is added on top, so the displayed price
     -- (mentor rate + tax) equals what's charged.
@@ -3405,7 +3439,7 @@ BEGIN
       customer_currency := v_cust; fx_ok := true;
     ELSE
       v_base := COALESCE(v_set_offer, v_set);
-      v_ppp  := CASE WHEN v_is_ppp THEN ppp_relative(p_customer_country, v_mentor_country) ELSE 1 END;
+      v_ppp  := CASE WHEN v_is_ppp THEN ppp_relative(p_customer_country, currency_anchor_country(v_ment_ccy)) ELSE 1 END;
       v_fx   := get_fx_or_null(v_ment_ccy, v_cust);   -- SOFT (checkout uses the strict get_fx)
       IF v_fx IS NULL THEN
         key := sid::text; you0 := ROUND(v_base, 2); you := ROUND(v_base * v_ppp, 2);
@@ -3425,19 +3459,22 @@ GRANT EXECUTE ON FUNCTION display_service_prices(TEXT, UUID[]) TO anon, authenti
 -- display_service_prices which needs service_ids). Same PPP+FX shape as display_service_prices (no
 -- fee/tax - session price only), applied to the mentor's typed-in base rate for 7 featured regions.
 -- "Europe" isn't a real ISO country, so its PPP factor is read from Germany (a representative
--- mid-Eurozone economy) while the CURRENCY shown is still plain EUR.
+-- mid-Eurozone economy) while the CURRENCY shown is still plain EUR. PPP is anchored to the base
+-- currency (currency_anchor_country), matching how compute_booking_price/display_service_prices/
+-- convert_prices anchor PPP now - never the mentor's registered country.
 CREATE OR REPLACE FUNCTION preview_regional_prices(
-  p_base_currency TEXT, p_base_price NUMERIC, p_is_ppp BOOLEAN, p_mentor_country TEXT
+  p_base_currency TEXT, p_base_price NUMERIC, p_is_ppp BOOLEAN
 ) RETURNS TABLE(region_code TEXT, currency TEXT, price NUMERIC, price_no_ppp NUMERIC, fx_ok BOOLEAN)
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
 DECLARE
-  r RECORD; v_ppp_country TEXT; v_ppp NUMERIC; v_fx NUMERIC; v_base NUMERIC := GREATEST(COALESCE(p_base_price, 0), 0);
+  r RECORD; v_ppp_country TEXT; v_anchor TEXT := currency_anchor_country(UPPER(COALESCE(p_base_currency, 'USD')));
+  v_ppp NUMERIC; v_fx NUMERIC; v_base NUMERIC := GREATEST(COALESCE(p_base_price, 0), 0);
 BEGIN
   FOR r IN SELECT * FROM (VALUES
     ('US', 'USD'), ('EU', 'EUR'), ('IN', 'INR'), ('SA', 'SAR'), ('AE', 'AED'), ('AU', 'AUD'), ('SG', 'SGD')
   ) AS t(code, ccy) LOOP
     v_ppp_country := CASE WHEN r.code = 'EU' THEN 'DE' ELSE r.code END;
-    v_ppp := CASE WHEN p_is_ppp THEN ppp_relative(v_ppp_country, p_mentor_country) ELSE 1 END;
+    v_ppp := CASE WHEN p_is_ppp THEN ppp_relative(v_ppp_country, v_anchor) ELSE 1 END;
     v_fx  := get_fx_or_null(p_base_currency, r.ccy);   -- soft: falls back, never fails the preview
     region_code := r.code; currency := r.ccy;
     IF v_fx IS NULL THEN
@@ -3448,13 +3485,13 @@ BEGIN
     RETURN NEXT;
   END LOOP;
 END; $$;
-GRANT EXECUTE ON FUNCTION preview_regional_prices(TEXT, NUMERIC, BOOLEAN, TEXT) TO anon, authenticated;
+GRANT EXECUTE ON FUNCTION preview_regional_prices(TEXT, NUMERIC, BOOLEAN) TO anon, authenticated;
 
 -- Seed a base rate for migrated mentors who have none (hourly_rate NULL/0), from their EXISTING
 -- session pricing: the highest per-hour equivalent across their sessions (using set_offer_price too,
 -- since some migrated rows carried the real amount there). Without a base rate their sessions priced
 -- at duration x 0 = 0 and showed as free on the cards. They confirm/adjust it in the first-login
--- popup. MUST run before the reprice below (it reads set_price/set_offer_price) and before the clear.
+-- popup. Does not touch services.set_price - see the note below on why that's no longer re-derived.
 UPDATE mentors m
 SET hourly_rate = sub.max_hourly
 FROM (
@@ -3468,24 +3505,14 @@ FROM (
 ) sub
 WHERE m.id = sub.mentor_id AND (m.hourly_rate IS NULL OR m.hourly_rate <= 0);
 
--- One-time data correction (BUG-079 follow-up): re-derive every PAID service's stored price from its
--- mentor's base rate. Also fixes rows stuck at set_price 0 that carry a real offer price ("broken-0")
--- - the OR below includes them; truly-free sessions (both price and offer 0) stay free. Prices are
--- always duration x rate, so this is safe + idempotent. Going forward reprice_mentor_services() keeps
--- them in sync.
-UPDATE services s
-SET set_price = ROUND(m.hourly_rate * s.duration / 60.0, 2),
-    set_currency = UPPER(COALESCE(m.currency, s.set_currency, 'USD'))
-FROM mentors m
-WHERE s.mentor_id = m.id
-  AND m.hourly_rate IS NOT NULL AND m.hourly_rate > 0
-  AND (COALESCE(s.set_price, 0) > 0 OR COALESCE(s.set_offer_price, 0) > 0);
-
--- Clear stale per-service OFFER prices. Migrated rows carried a set_offer_price, and the pricing
--- engine prefers COALESCE(set_offer_price, set_price) - so a legacy offer (e.g. a 30-min stuck at an
--- old amount) kept overriding the correct base price even after a rate change. The derived model has
--- no offer price, so clear them everywhere; going forward reprice_mentor_services keeps them NULL.
-UPDATE services SET set_offer_price = NULL WHERE set_offer_price IS NOT NULL;
+-- Migrated mentors keep their imported per-SESSION prices (services.set_price = the price the customer
+-- pays) exactly as the old portal had them. We do NOT re-derive them from a per-hour rate here - an
+-- earlier version of this block did, and it overwrote real prices (a 399 INR session became ~10). Each
+-- mentor's hourly_rate is seeded at import (scripts/migrate_mentors.py) purely as the first-login popup
+-- default; their sessions are re-priced only when they confirm/change that rate in onboarding or on the
+-- Profile tab, via reprice_mentor_services(). For an already-migrated DB whose set_price was corrupted
+-- by the old block, restore the real prices from the raw export once with:
+--     python -m scripts.reimport_migrated_prices
 
 -- ── Payment tables ───────────────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS customer_payments (
@@ -3545,12 +3572,13 @@ CREATE POLICY mentor_payouts_read ON mentor_payouts FOR SELECT
   USING (mentor_id IN (SELECT id FROM mentors WHERE profile_id = auth.uid()));
 
 -- One-time correction (BUG-097): the mentor's net earning must be the PPP-adjusted base MINUS the
--- commission. Re-derive it consistently from the stored pre-fee amount x (1 - commission %), fixing
--- legacy rows that stored a net without PPP (or none at all). amount already carries PPP + any
--- referral factor, so net = amount x (1 - fee_pct/100) is correct and idempotent.
+-- commission. Backfill it only where it was never stored (legacy/manual rows), deriving net = amount
+-- x (1 - commission %). NULL-guarded on purpose: reserve_booking already stores the correct net for new
+-- bookings, and a referred session's net is overwritten by process_referral_commissions to the referral
+-- split - re-running this must NOT clobber those correct values with a plain amount x (1 - fee).
 UPDATE mentor_payouts
 SET net_amount_mentor_currency = ROUND(amount * (1 - COALESCE(fee_pct, 0) / 100.0), 2)
-WHERE amount IS NOT NULL;
+WHERE amount IS NOT NULL AND net_amount_mentor_currency IS NULL;
 
 CREATE TABLE IF NOT EXISTS payment_refunds (
   id                          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -3596,6 +3624,7 @@ CREATE INDEX IF NOT EXISTS idx_payment_reconciliation_log_booking ON payment_rec
 -- Booking columns the reserve/confirm flow needs.
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS payment_hold_expires_at TIMESTAMPTZ;  -- 10-min reservation hold
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS customer_currency TEXT;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS notes TEXT;  -- customer's "what should my mentor prepare" note (BUG-113)
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS fx_customer_inr NUMERIC;  -- INR per 1 customer-currency unit
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS fx_mentor_inr   NUMERIC;  -- INR per 1 mentor-currency unit
 
@@ -3857,7 +3886,10 @@ BEGIN
   v_fee_amount := (s->>'fee_amount')::numeric;
   v_net_customer := (s->>'net_customer')::numeric;
   v_net_mentor := (s->>'net_mentor')::numeric;
-  v_amount := ROUND((s->>'set_price')::numeric * (s->>'ppp_multiplier')::numeric, 2);
+  -- Pre-fee mentor-currency payout basis. Prefer the engine's mentor_base (correct for explicit
+  -- per-currency prices, where set_price is the primary base, not the sold price); fall back to the
+  -- old set_price x ppp formula for pre-existing quotes issued before mentor_base existed.
+  v_amount := ROUND(COALESCE((s->>'mentor_base')::numeric, (s->>'set_price')::numeric * (s->>'ppp_multiplier')::numeric), 2);
 
   -- Referral code (optional): validated server-side; its discount scales what the customer pays.
   -- The commission SPLIT for a referred first session is applied later at completion.

@@ -65,16 +65,16 @@ def display_service_prices(customer_country: Optional[str], service_ids: list[st
     return res.data or []
 
 
-def preview_regional_prices(base_currency: str, base_price: float, is_ppp: bool,
-                            mentor_country: Optional[str]) -> list[dict[str, Any]]:
+def preview_regional_prices(base_currency: str, base_price: float, is_ppp: bool) -> list[dict[str, Any]]:
     """Same PPP+FX shape as display_service_prices (no fee/tax), applied to a typed-in base rate for
     the 7 featured regions (BUG-103) - used on the rate editor before any service exists yet, so it
-    can't key off service_ids. Soft FX. Returns [{region_code, currency, price, price_no_ppp, fx_ok}]."""
+    can't key off service_ids. PPP is anchored to the base currency (matches compute_booking_price/
+    display_service_prices/convert_prices), not the mentor's registered country. Soft FX. Returns
+    [{region_code, currency, price, price_no_ppp, fx_ok}]."""
     res = _supabase.rpc("preview_regional_prices", {
         "p_base_currency": base_currency,
         "p_base_price": base_price,
         "p_is_ppp": is_ppp,
-        "p_mentor_country": mentor_country,
     }).execute()
     return res.data or []
 

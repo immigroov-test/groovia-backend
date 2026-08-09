@@ -216,14 +216,21 @@ def transform_mentor(raw: dict, services: list[dict], weekly: list[dict]) -> dic
             expertise_categories.append(exp_cat)
         pricing = (sv.get("pricing") or [{}])[0]
         stype = sv.get("type") if sv.get("type") in ("video", "dm") else "video"
+        # The old portal priced per SESSION (a base plus an optional lower offer). Import the price the
+        # customer actually pays - the offer when it's set, else the base. We don't model a separate
+        # strike-through original, so there's no set_offer_price; the per-hour base rate is derived from
+        # these sell prices below.
+        base_p = float(pricing.get("base_price") or 0)
+        offer_p = float(pricing.get("offer_price") or 0)
+        sell_p = offer_p if offer_p > 0 else base_p
         out_services.append({
             "title": clean_text(sv.get("title")),
             "description": sv.get("description") or None,
             "type": stype,
             "duration": int(sv.get("duration") or 30),
-            "is_ppp": False,   # imported PPP-off; the mentor opts in during first-login onboarding
+            "is_ppp": True,    # BUG-62: Smart Pricing is on by default for everyone now
             "is_active": bool(sv.get("is_active")),
-            "set_price": float(pricing.get("base_price") or 0),
+            "set_price": sell_p,
             "set_currency": (pricing.get("currency") or raw.get("currency") or "USD").upper(),
             "category": svc_cat,
             "status": "approved",
@@ -241,6 +248,14 @@ def transform_mentor(raw: dict, services: list[dict], weekly: list[dict]) -> dic
                 out_weekly.append({"weekday": wd, "start_time": st, "end_time": et,
                                    "timezone": raw.get("app_timezone") or "UTC"})
 
+    # Seed a per-hour base rate from the imported per-session prices: the highest session's per-hour
+    # equivalent (a 1899 INR / 30-min session -> 3798/hr). This is only the DEFAULT shown in the
+    # first-login popup; the mentor confirms or changes it there, which reprices their sessions. NULL
+    # when they have no priced session (free-only mentors).
+    _rates = [round(s["set_price"] * 60.0 / s["duration"], 2)
+              for s in out_services if s.get("set_price", 0) > 0 and s.get("duration")]
+    seed_hourly = max(_rates) if _rates else None
+
     mentor = {
         "legacy_id": raw.get("id"),
         "email": email,
@@ -254,9 +269,9 @@ def transform_mentor(raw: dict, services: list[dict], weekly: list[dict]) -> dic
         "timezone": raw.get("app_timezone") or "UTC",
         "app_timezone": raw.get("app_timezone") or "UTC",
         "currency": (raw.get("currency") or "USD").upper(),
-        # PPP is the mentor-level smart_pricing toggle. Imported mentors start with it OFF; each
-        # mentor chooses to enable/disable fair pricing during the first-login onboarding flow.
-        "smart_pricing": False,
+        # PPP is the mentor-level smart_pricing toggle. On by default for everyone now (BUG-62); the
+        # mentor can turn it off in onboarding or on the Profile tab.
+        "smart_pricing": True,
         "languages": languages,
         "social_links": socials,
         "expertise_country_codes": expertise_countries,
@@ -268,8 +283,10 @@ def transform_mentor(raw: dict, services: list[dict], weekly: list[dict]) -> dic
         "review_count": int(raw.get("review_count") or 0),
         "status": "approved",
         "is_active": is_active,
-        # Imported mentors never gave us a per-hour rate, so gate them behind the first-login flow
-        # (welcome popup -> review profile -> set rate + confirm sessions) until they complete it.
+        # Per-hour base rate seeded from their session prices (the first-login popup default). They
+        # still go through the first-login flow (welcome popup -> review profile -> confirm/adjust rate
+        # + sessions) before the dashboard unlocks.
+        "hourly_rate": seed_hourly,
         "needs_onboarding": True,
         "legacy_data": {
             "total_sessions": raw.get("total_sessions"),
