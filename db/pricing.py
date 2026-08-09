@@ -65,14 +65,16 @@ def display_service_prices(customer_country: Optional[str], service_ids: list[st
     return res.data or []
 
 
-def pricing_preview(amount: float, currency: str, smart_pricing: bool) -> list[dict[str, Any]]:
-    """BUG-62 mentor-facing preview: what a customer in each key market sees for a base amount in the
-    mentor's currency (FX, plus PPP anchored to the pricing currency when smart pricing is on). Returns
-    [{country_code, currency, price, fx_ok}], one per market except the base currency's own."""
-    res = _supabase.rpc("pricing_preview", {
-        "p_amount": amount,
-        "p_currency": currency,
-        "p_smart_pricing": smart_pricing,
+def preview_regional_prices(base_currency: str, base_price: float, is_ppp: bool) -> list[dict[str, Any]]:
+    """Same PPP+FX shape as display_service_prices (no fee/tax), applied to a typed-in base rate for
+    the 7 featured regions (BUG-103) - used on the rate editor before any service exists yet, so it
+    can't key off service_ids. PPP is anchored to the base currency (matches compute_booking_price/
+    display_service_prices/convert_prices), not the mentor's registered country. Soft FX. Returns
+    [{region_code, currency, price, price_no_ppp, fx_ok}]."""
+    res = _supabase.rpc("preview_regional_prices", {
+        "p_base_currency": base_currency,
+        "p_base_price": base_price,
+        "p_is_ppp": is_ppp,
     }).execute()
     return res.data or []
 

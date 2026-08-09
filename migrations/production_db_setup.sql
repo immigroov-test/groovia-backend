@@ -2251,35 +2251,6 @@ RETURNS TEXT LANGUAGE sql IMMUTABLE SET search_path = public AS $$
 $$;
 GRANT EXECUTE ON FUNCTION currency_anchor_country(TEXT) TO anon, authenticated;
 
--- BUG-62: mentor-facing price preview. For a base amount in the mentor's own currency, show what a
--- customer in each of our key markets (India, Australia, Singapore, Saudi, UAE, US) would see: the
--- FX-converted price, plus PPP re-based to the pricing currency when smart pricing is on (FX only when
--- off). The market whose currency IS the base currency is skipped (the caller shows that as the base).
--- fx_ok=false = no fresh rate, price falls back to the base currency.
-CREATE OR REPLACE FUNCTION pricing_preview(p_amount NUMERIC, p_currency TEXT, p_smart_pricing BOOLEAN)
-RETURNS TABLE(country_code TEXT, currency TEXT, price NUMERIC, fx_ok BOOLEAN)
-LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
-DECLARE
-  v_base_ccy TEXT := UPPER(COALESCE(p_currency, 'INR'));
-  v_anchor   TEXT := currency_anchor_country(UPPER(COALESCE(p_currency, 'INR')));
-  v_amt      NUMERIC := COALESCE(p_amount, 0);
-  m RECORD; v_ccy TEXT; v_fx NUMERIC; v_ppp NUMERIC;
-BEGIN
-  FOR m IN SELECT cc FROM (VALUES ('IN'),('AU'),('SG'),('SA'),('AE'),('US')) AS t(cc) LOOP
-    v_ccy := currency_for_country(m.cc);
-    IF v_ccy = v_base_ccy THEN CONTINUE; END IF;           -- skip the base currency's own market
-    v_ppp := CASE WHEN p_smart_pricing THEN ppp_relative(m.cc, v_anchor) ELSE 1 END;
-    v_fx  := get_fx_or_null(v_base_ccy, v_ccy);
-    IF v_fx IS NULL THEN
-      country_code := m.cc; currency := v_base_ccy; price := ROUND(v_amt * v_ppp, 2);        fx_ok := FALSE;
-    ELSE
-      country_code := m.cc; currency := v_ccy;      price := ROUND(v_amt * v_ppp * v_fx, 2); fx_ok := TRUE;
-    END IF;
-    RETURN NEXT;
-  END LOOP;
-END; $$;
-GRANT EXECUTE ON FUNCTION pricing_preview(NUMERIC, TEXT, BOOLEAN) TO anon, authenticated;
-
 -- Per-mentor commission override: the % taken OUT of the mentor's price (revenue-split). When set
 -- and not expired it WINS over the country/DEFAULT commission (effective_platform_fee_pct); NULL =
 -- use the customer country's commission from country_pricing.
@@ -2780,6 +2751,57 @@ BEGIN
   END LOOP;
 END; $$;
 GRANT EXECUTE ON FUNCTION display_service_prices(TEXT, UUID[]) TO anon, authenticated;
+
+-- BUG-103/FEAT: mentor-facing "what will customers in major markets see" preview, shown on the rate
+-- editor during registration/onboarding/profile edit (before any service exists, so it can't reuse
+-- display_service_prices which needs service_ids). Same PPP+FX shape as display_service_prices (no
+-- fee/tax - session price only), applied to the mentor's typed-in base rate for 7 featured regions.
+-- "Europe" isn't a real ISO country, so its PPP factor is read from Germany (a representative
+-- mid-Eurozone economy) while the CURRENCY shown is still plain EUR. PPP is anchored to the base
+-- currency (currency_anchor_country), matching how compute_booking_price/display_service_prices/
+-- convert_prices anchor PPP now - never the mentor's registered country.
+CREATE OR REPLACE FUNCTION preview_regional_prices(
+  p_base_currency TEXT, p_base_price NUMERIC, p_is_ppp BOOLEAN
+) RETURNS TABLE(region_code TEXT, currency TEXT, price NUMERIC, price_no_ppp NUMERIC, fx_ok BOOLEAN)
+LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  r RECORD; v_ppp_country TEXT; v_anchor TEXT := currency_anchor_country(UPPER(COALESCE(p_base_currency, 'USD')));
+  v_ppp NUMERIC; v_fx NUMERIC; v_base NUMERIC := GREATEST(COALESCE(p_base_price, 0), 0);
+BEGIN
+  FOR r IN SELECT * FROM (VALUES
+    ('US', 'USD'), ('EU', 'EUR'), ('IN', 'INR'), ('SA', 'SAR'), ('AE', 'AED'), ('AU', 'AUD'), ('SG', 'SGD')
+  ) AS t(code, ccy) LOOP
+    v_ppp_country := CASE WHEN r.code = 'EU' THEN 'DE' ELSE r.code END;
+    v_ppp := CASE WHEN p_is_ppp THEN ppp_relative(v_ppp_country, v_anchor) ELSE 1 END;
+    v_fx  := get_fx_or_null(p_base_currency, r.ccy);   -- soft: falls back, never fails the preview
+    region_code := r.code; currency := r.ccy;
+    IF v_fx IS NULL THEN
+      price := ROUND(v_base * v_ppp, 2); price_no_ppp := ROUND(v_base, 2); fx_ok := false;
+    ELSE
+      price := ROUND(v_base * v_ppp * v_fx, 2); price_no_ppp := ROUND(v_base * v_fx, 2); fx_ok := true;
+    END IF;
+    RETURN NEXT;
+  END LOOP;
+END; $$;
+GRANT EXECUTE ON FUNCTION preview_regional_prices(TEXT, NUMERIC, BOOLEAN) TO anon, authenticated;
+
+-- Seed a base rate for migrated mentors who have none (hourly_rate NULL/0), from their EXISTING
+-- session pricing: the highest per-hour equivalent across their sessions (using set_offer_price too,
+-- since some migrated rows carried the real amount there). Without a base rate their sessions priced
+-- at duration x 0 = 0 and showed as free on the cards. They confirm/adjust it in the first-login
+-- popup. Does not touch services.set_price - see the note below on why that's no longer re-derived.
+UPDATE mentors m
+SET hourly_rate = sub.max_hourly
+FROM (
+  SELECT s.mentor_id,
+         MAX(ROUND(GREATEST(COALESCE(s.set_price, 0), COALESCE(s.set_offer_price, 0)) * 60.0
+                   / NULLIF(s.duration, 0), 0)) AS max_hourly
+  FROM services s
+  WHERE COALESCE(s.duration, 0) > 0
+  GROUP BY s.mentor_id
+  HAVING MAX(GREATEST(COALESCE(s.set_price, 0), COALESCE(s.set_offer_price, 0))) > 0
+) sub
+WHERE m.id = sub.mentor_id AND (m.hourly_rate IS NULL OR m.hourly_rate <= 0);
 
 -- Migrated mentors keep their imported per-SESSION prices (services.set_price = the price the customer
 -- pays) exactly as the old portal had them. We do NOT re-derive them from a per-hour rate here - an

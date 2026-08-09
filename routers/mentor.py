@@ -515,13 +515,23 @@ class ProfileUpdateBody(BaseModel):
         return round(v, 2) if v is not None else v
 
 
-# BUG-075: only Name + Country need admin approval; every other profile field goes live
-# immediately and admin is just notified (old -> new). Keep this in sync with the hub UI.
-_APPROVAL_PROFILE_FIELDS = {"display_name", "country"}
+# Retest feedback (profile-approval optimization): Name, Phone, Photo and Service Country need admin
+# approval; every other profile field goes live immediately with no admin email at all (fully
+# auto-approved).
+#
+# "email" IS listed per spec - it is a spec-required approval-gated field - but mentor email-change is
+# EXPLICITLY OUT OF SCOPE for this release: there is no UI anywhere for a mentor to edit their account
+# email (it's their Supabase Auth login identity, not an ordinary profile field), so nothing can ever
+# land in `fields["email"]` and this entry is currently a no-op. This is a deliberate, acknowledged gap,
+# not an oversight: a real email-change needs its own re-verification flow (confirm on the new address,
+# handle a pending-unconfirmed state, guard against lockout) and deserves a dedicated ticket rather than
+# being rushed into this one. Do NOT remove "email" from this set when that ships - wire the new flow to
+# route through `_apply_approved_profile_edit` the same way every other gated field already does.
+_APPROVAL_PROFILE_FIELDS = {"display_name", "phone", "photo_url", "country", "email"}
 _PROFILE_FIELD_LABELS = {
-    "display_name": "Name", "country": "Country", "home_country_code": "Home country",
+    "display_name": "Name", "country": "Service Country", "home_country_code": "Home country",
     "headline": "Headline", "bio": "About", "city": "City", "timezone": "Timezone",
-    "languages": "Languages", "photo_url": "Photo", "phone": "Phone",
+    "languages": "Languages", "photo_url": "Photo", "phone": "Phone Number", "email": "Email",
     "social_links": "Social links", "public_notes": "Public notes", "served_countries": "Additional countries lived",
     "expertise_country_codes": "Countries of expertise", "expertise_categories": "Focus areas",
     "years_lived_experience": "Years in current country", "years_professional_experience": "Years of experience",
@@ -546,14 +556,20 @@ def _fmt_change_value(v: Any) -> str:
 
 
 def _profile_change_rows(mentor: dict, fields: dict[str, Any]) -> list[dict[str, str]]:
-    """[{label, delta}] for fields whose value actually changed, for the admin email."""
+    """[{label, delta, field, old, new}] for fields whose value actually changed, for the admin
+    email. `old`/`new` are the raw (unformatted) values - kept alongside `delta` so a template can
+    render a field specially (e.g. Photo as an image instead of a raw URL string)."""
     rows: list[dict[str, str]] = []
     for k, new in fields.items():
         old = mentor.get(k)
         if str(old) == str(new):
             continue
         label = _PROFILE_FIELD_LABELS.get(k, k.replace("_", " ").title())
-        rows.append({"label": label, "delta": f"{_fmt_change_value(old)}  →  {_fmt_change_value(new)}"})
+        rows.append({
+            "label": label, "field": k,
+            "old": _fmt_change_value(old), "new": _fmt_change_value(new),
+            "delta": f"{_fmt_change_value(old)}  →  {_fmt_change_value(new)}",
+        })
     return rows
 
 
@@ -567,10 +583,30 @@ def _email_admins_change(template: str, mentor_name: str, changes: list[dict[str
         logger.warning("admin profile-change email failed template=%s", template)
 
 
+def _email_admin_changes_submitted(mentor_name: str, approval_rows: list[dict[str, str]],
+                                    info_rows: list[dict[str, str]]) -> None:
+    """ONE consolidated email per submission, sent only when at least one approval-gated field
+    actually changed. Purely-informational (auto-approved) fields never trigger their own email -
+    they're bundled into this one when they ride along with an approval-required change, and are
+    silently auto-approved (no email at all) when they're the only thing that changed."""
+    if not approval_rows:
+        return
+    try:
+        for admin_email in db.admin_notify_emails():
+            mailer.send_transactional(admin_email, "admin_mentor_changes_submitted", {
+                "mentor_name": mentor_name, "approval_changes": approval_rows, "info_changes": info_rows,
+            })
+    except Exception:
+        logger.warning("admin changes-submitted email failed")
+
+
 def _apply_approved_profile_edit(mentor: dict, fields: dict[str, Any], background_tasks: BackgroundTasks) -> dict[str, Any]:
-    """Approved (live) mentor edit: apply everything except Name/Country immediately, stage those two
-    for approval, and notify admin either way (BUG-075 + BUG-076)."""
-    # Only stage approval fields that ACTUALLY changed. The edit form always submits Name/Country, so
+    """Approved (live) mentor edit: apply everything except the approval-gated fields (Name, Phone,
+    Photo, Service Country) immediately - those go live right away and are fully auto-approved, no
+    admin action needed. The gated fields are staged for admin review instead. Exactly ONE admin
+    email is sent per submission, and only when a gated field actually changed - never per field,
+    and never for a submission that only touched auto-approved fields."""
+    # Only stage approval fields that ACTUALLY changed. The edit form always submits every field, so
     # staging them unconditionally stamped pending_submitted_at (and lit the "awaiting review" banner)
     # on every save, even edits that touched nothing approval-gated (BUG-111).
     approval = {k: v for k, v in fields.items()
@@ -587,8 +623,7 @@ def _apply_approved_profile_edit(mentor: dict, fields: dict[str, Any], backgroun
     row = row or mentor
 
     mentor_name = mentor.get("display_name") or "A mentor"
-    background_tasks.add_task(_email_admins_change, "admin_mentor_change_request", mentor_name, staged_changes)
-    background_tasks.add_task(_email_admins_change, "admin_mentor_change_info", mentor_name, applied_changes)
+    background_tasks.add_task(_email_admin_changes_submitted, mentor_name, staged_changes, applied_changes)
     return {
         **row,
         "staged_for_review": [c["label"] for c in staged_changes],

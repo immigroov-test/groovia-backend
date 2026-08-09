@@ -148,20 +148,37 @@ def convert_prices(body: ConvertPricesBody, request: Request):
         raise HTTPException(status_code=500, detail="Failed to convert prices")
 
 
-class PricePreviewBody(BaseModel):
-    amount: float
-    currency: str = "INR"
-    smart_pricing: bool = True
+# ── Regional preview (rate editor, before any service exists) ──────────────────
+
+class RegionalPreviewBody(BaseModel):
+    base_currency: str = Field(..., min_length=3, max_length=3)
+    base_price: float
+    smart_pricing: bool = False
+
+    @field_validator("base_price")
+    @classmethod
+    def validate_price(cls, v: float) -> float:
+        if v < 0:
+            raise ValueError("base_price must be >= 0")
+        return v
+
+    @field_validator("base_currency")
+    @classmethod
+    def validate_currency(cls, v: str) -> str:
+        return v.strip().upper()
 
 
-@router.post("/preview")
-def price_preview(body: PricePreviewBody):
-    """BUG-62: mentor-facing preview of what a customer in each key market (India, Australia, Singapore,
-    Saudi, UAE, US) would see for a base rate. Pure FX + PPP math on the mentor's own inputs (no stored
-    data), so it's public. PPP is anchored to the base currency and only applied when smart_pricing."""
+@router.post("/preview-regions")
+def preview_regions(body: RegionalPreviewBody):
+    """BUG-103: 'what will customers in major markets see' preview for the mentor's rate editor
+    (registration, onboarding, profile edit). Public — no auth needed, purely a stateless
+    calculator over the values the mentor already typed in. Same PPP+FX engine as the real
+    checkout (PPP anchored to the base currency, matching compute_booking_price/
+    display_service_prices/convert_prices), just fee/tax-free (session price only) and keyed by
+    featured region, not a service."""
     try:
-        amt = round(max(0.0, float(body.amount or 0)), 2)
-        return {"markets": db.pricing_preview(amt, (body.currency or "INR").strip().upper(), bool(body.smart_pricing))}
+        regions = db.preview_regional_prices(body.base_currency, body.base_price, body.smart_pricing)
+        return {"regions": regions}
     except Exception:
-        logger.exception("price_preview failed currency=%s", body.currency)
-        raise HTTPException(status_code=500, detail="Failed to compute preview")
+        logger.exception("preview_regions failed currency=%s", body.base_currency)
+        raise HTTPException(status_code=500, detail="Failed to compute regional preview")
