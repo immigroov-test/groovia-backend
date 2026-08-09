@@ -163,7 +163,11 @@ def booking_detail(booking_id: str, user: AuthUser = Depends(get_current_user)):
     # pick) is still possible, so offer that instead of a cancel button that would just error out.
     can_reschedule = bool((is_candidate or is_mentor) and active and not is_past)
     can_cancel = bool((is_candidate or is_mentor) and active and not is_past and deadline_state != "buffer")
-    can_report_no_show = bool((is_candidate or is_mentor) and active and slot and now > slot + timedelta(minutes=10))
+    # BUG-099: the no-show button is live only in a sensible window - from 10 min after the start until
+    # 24h after the end - and never once a no-show is already recorded or the session isn't active.
+    no_show_reported = bool(d.get("no_show_by"))
+    no_show_open = bool(slot and end and (slot + timedelta(minutes=10)) < now < (end + timedelta(hours=24)))
+    can_report_no_show = bool((is_candidate or is_mentor) and active and not no_show_reported and no_show_open)
 
     out: dict = {
         "id": d["id"],
@@ -181,6 +185,7 @@ def booking_detail(booking_id: str, user: AuthUser = Depends(get_current_user)):
         "no_show_by": d.get("no_show_by"),
         "deadline_state": deadline_state,
         "opens_at": opens_at.isoformat() if opens_at else None,
+        "closes_at": closes_at.isoformat() if closes_at else None,   # BUG-105: joinable until the END (+grace)
         "join_open": join_open,
         "offer": d.get("offer"),
         "request": d.get("request"),
