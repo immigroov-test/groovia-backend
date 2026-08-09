@@ -79,10 +79,16 @@ class AvailabilitySlot(BaseModel):
 
 @router.get("/me")
 def get_my_mentor(user: AuthUser = Depends(get_current_user)):
-    """Returns the mentor row linked to the logged-in user, or 404 if not a mentor."""
+    """Returns the mentor row linked to the logged-in user, or 404 if not a mentor.
+
+    For a mentor still in first-login onboarding we also attach rate_prefill, the currency + hourly rate
+    the rate form should open with, derived from their own imported sessions rather than the stored
+    mentors.currency (which the import left wrong on many rows)."""
     mentor = db.get_mentor_by_profile_id(user.id)
     if not mentor:
         raise HTTPException(status_code=404, detail="No mentor profile for this account")
+    if mentor.get("needs_onboarding"):
+        mentor = {**mentor, "rate_prefill": db.derive_rate_prefill(mentor)}
     return mentor
 
 

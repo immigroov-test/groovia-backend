@@ -2265,7 +2265,7 @@ DECLARE
   v_amt      NUMERIC := COALESCE(p_amount, 0);
   m RECORD; v_ccy TEXT; v_fx NUMERIC; v_ppp NUMERIC;
 BEGIN
-  FOR m IN SELECT cc FROM (VALUES ('IN'),('AU'),('SG'),('SA'),('AE'),('US')) AS t(cc) LOOP
+  FOR m IN SELECT cc FROM (VALUES ('IN'),('AU'),('SG'),('SA'),('AE'),('US'),('DE')) AS t(cc) LOOP
     v_ccy := currency_for_country(m.cc);
     IF v_ccy = v_base_ccy THEN CONTINUE; END IF;           -- skip the base currency's own market
     v_ppp := CASE WHEN p_smart_pricing THEN ppp_relative(m.cc, v_anchor) ELSE 1 END;
@@ -2369,33 +2369,36 @@ CREATE TABLE IF NOT EXISTS fx_refresh_log (
 );
 
 INSERT INTO platform_settings (key, value, description) VALUES
-  ('fx_max_age_minutes', '1440', 'Max age (minutes) of an FX rate before bookings fail with FX_UNAVAILABLE (default 24h)')
+  ('fx_max_age_minutes', '2880', 'Max age (min) of an FX rate before bookings fail with FX_UNAVAILABLE. 48h = use the latest daily rate, and if a daily refresh fails, still accept yesterday''s rate (last-day fallback) rather than blocking checkout. Requires the daily refresh (scripts/refresh_fx_rates.py) to run.')
 ON CONFLICT (key) DO NOTHING;
 
 -- Bootstrap FX so prices localize before the FX dispatcher's first run (else convert_prices has no
--- rate and every price falls back to the mentor's own currency). Approximate EUR-based rates (quote
--- units per 1 EUR); DO NOTHING so the dispatcher's live ECB rates are never overwritten by this seed.
+-- rate and every price falls back to the mentor's own currency). REAL EUR-pivot snapshot (quote units
+-- per 1 EUR), NOT round placeholders - a placeholder like EUR->INR=90 (real ~110) silently mis-prices
+-- every INR->EUR booking by ~22%. The backend's refresh_fx_rates() (on startup + daily) overwrites
+-- these with live rates, so the seed is a bootstrap only. DO NOTHING keeps live rates from being reset
+-- if setup is re-run. Keep roughly current when regenerating.
 INSERT INTO fx_rates (base, quote, rate, as_of, fetched_at) VALUES
-  ('EUR','USD',1.08,CURRENT_DATE,NOW()), ('EUR','GBP',0.85,CURRENT_DATE,NOW()),
-  ('EUR','INR',90.0,CURRENT_DATE,NOW()), ('EUR','AUD',1.63,CURRENT_DATE,NOW()),
-  ('EUR','CAD',1.47,CURRENT_DATE,NOW()), ('EUR','SGD',1.45,CURRENT_DATE,NOW()),
-  ('EUR','AED',3.97,CURRENT_DATE,NOW()), ('EUR','JPY',162.0,CURRENT_DATE,NOW()),
-  ('EUR','CHF',0.96,CURRENT_DATE,NOW()), ('EUR','CNY',7.8,CURRENT_DATE,NOW()),
-  ('EUR','ZAR',19.8,CURRENT_DATE,NOW()), ('EUR','BRL',5.9,CURRENT_DATE,NOW()),
-  ('EUR','NZD',1.78,CURRENT_DATE,NOW()), ('EUR','SEK',11.4,CURRENT_DATE,NOW()),
-  ('EUR','NOK',11.6,CURRENT_DATE,NOW()), ('EUR','DKK',7.46,CURRENT_DATE,NOW()),
-  ('EUR','PLN',4.3,CURRENT_DATE,NOW()), ('EUR','HKD',8.42,CURRENT_DATE,NOW()),
-  ('EUR','MXN',19.5,CURRENT_DATE,NOW()), ('EUR','THB',39.5,CURRENT_DATE,NOW()),
-  ('EUR','MYR',5.05,CURRENT_DATE,NOW()), ('EUR','IDR',17200.0,CURRENT_DATE,NOW()),
-  ('EUR','PHP',61.0,CURRENT_DATE,NOW()), ('EUR','VND',27200.0,CURRENT_DATE,NOW()),
-  ('EUR','KRW',1480.0,CURRENT_DATE,NOW()), ('EUR','TRY',35.0,CURRENT_DATE,NOW()),
-  ('EUR','SAR',4.05,CURRENT_DATE,NOW()), ('EUR','BDT',118.0,CURRENT_DATE,NOW()),
-  ('EUR','PKR',300.0,CURRENT_DATE,NOW()), ('EUR','LKR',325.0,CURRENT_DATE,NOW()),
-  ('EUR','NPR',144.0,CURRENT_DATE,NOW()), ('EUR','NGN',1700.0,CURRENT_DATE,NOW()),
-  ('EUR','KES',140.0,CURRENT_DATE,NOW()), ('EUR','EGP',53.0,CURRENT_DATE,NOW()),
-  ('EUR','TWD',35.0,CURRENT_DATE,NOW()), ('EUR','ILS',4.0,CURRENT_DATE,NOW()),
-  ('EUR','RON',4.97,CURRENT_DATE,NOW()), ('EUR','CZK',25.2,CURRENT_DATE,NOW()),
-  ('EUR','HUF',395.0,CURRENT_DATE,NOW())
+  ('EUR','USD',1.1548,CURRENT_DATE,NOW()), ('EUR','GBP',0.8569,CURRENT_DATE,NOW()),
+  ('EUR','INR',109.95,CURRENT_DATE,NOW()), ('EUR','AUD',1.6373,CURRENT_DATE,NOW()),
+  ('EUR','CAD',1.6122,CURRENT_DATE,NOW()), ('EUR','SGD',1.4779,CURRENT_DATE,NOW()),
+  ('EUR','AED',4.2411,CURRENT_DATE,NOW()), ('EUR','JPY',182.4,CURRENT_DATE,NOW()),
+  ('EUR','CHF',0.9344,CURRENT_DATE,NOW()), ('EUR','CNY',7.8019,CURRENT_DATE,NOW()),
+  ('EUR','ZAR',18.6848,CURRENT_DATE,NOW()), ('EUR','BRL',5.8909,CURRENT_DATE,NOW()),
+  ('EUR','NZD',1.9622,CURRENT_DATE,NOW()), ('EUR','SEK',10.9516,CURRENT_DATE,NOW()),
+  ('EUR','NOK',10.9826,CURRENT_DATE,NOW()), ('EUR','DKK',7.4617,CURRENT_DATE,NOW()),
+  ('EUR','PLN',4.2989,CURRENT_DATE,NOW()), ('EUR','HKD',9.0564,CURRENT_DATE,NOW()),
+  ('EUR','MXN',19.8185,CURRENT_DATE,NOW()), ('EUR','THB',38.1132,CURRENT_DATE,NOW()),
+  ('EUR','MYR',4.7222,CURRENT_DATE,NOW()), ('EUR','IDR',20635.21,CURRENT_DATE,NOW()),
+  ('EUR','PHP',70.2173,CURRENT_DATE,NOW()), ('EUR','VND',30068.27,CURRENT_DATE,NOW()),
+  ('EUR','KRW',1633.53,CURRENT_DATE,NOW()), ('EUR','TRY',55.1236,CURRENT_DATE,NOW()),
+  ('EUR','SAR',4.3306,CURRENT_DATE,NOW()), ('EUR','BDT',143.05,CURRENT_DATE,NOW()),
+  ('EUR','PKR',320.85,CURRENT_DATE,NOW()), ('EUR','LKR',387.12,CURRENT_DATE,NOW()),
+  ('EUR','NPR',175.91,CURRENT_DATE,NOW()), ('EUR','NGN',1573.53,CURRENT_DATE,NOW()),
+  ('EUR','KES',149.5,CURRENT_DATE,NOW()), ('EUR','EGP',57.4449,CURRENT_DATE,NOW()),
+  ('EUR','TWD',37.2763,CURRENT_DATE,NOW()), ('EUR','ILS',3.4669,CURRENT_DATE,NOW()),
+  ('EUR','RON',5.2532,CURRENT_DATE,NOW()), ('EUR','CZK',24.2611,CURRENT_DATE,NOW()),
+  ('EUR','HUF',363.73,CURRENT_DATE,NOW())
 ON CONFLICT (base, quote) DO NOTHING;
 
 -- Cross-rate via the EUR pivot. NULL if either leg is missing or stale.

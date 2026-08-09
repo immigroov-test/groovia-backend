@@ -72,6 +72,18 @@ async def lifespan(api: FastAPI):
                        "and is spoofable. Set it on the backend AND the frontend (Vercel) before going live.")
     from ai import init_agent, shutdown_agent
     await init_agent()
+    # FX must track the market daily: refresh on every cold start (frozen per UTC day, so this is a
+    # no-op when today's rates are already stored). Failure keeps yesterday's stored rates in place
+    # (last-day fallback within fx_max_age_minutes) - it never blocks startup. Belt-and-braces with
+    # the daily scripts/refresh_fx_rates.py cron, so stale rates can't silently mis-price bookings.
+    async def _startup_fx_refresh():
+        import db
+        try:
+            res = await asyncio.to_thread(db.refresh_fx_rates)
+            logger.info("startup FX refresh: %s", res)
+        except Exception:
+            logger.exception("startup FX refresh failed; keeping previously stored rates")
+    asyncio.create_task(_startup_fx_refresh())
     try:
         yield
     finally:

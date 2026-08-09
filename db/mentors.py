@@ -1217,6 +1217,33 @@ def reprice_mentor_services(mentor_id: str) -> int:
     return repriced
 
 
+def derive_rate_prefill(mentor: dict[str, Any]) -> dict[str, Any]:
+    """What the first-login rate form should START with for a migrated mentor.
+
+    Derived from the mentor's OWN imported sessions (currency of their priciest session + that session's
+    price scaled to an hour), never from mentors.currency alone: the import left many rows whose currency
+    disagrees with their sessions (e.g. sessions priced INR 3196 on a mentor row marked USD), and
+    prefilling that shows a foreign currency the mentor never chose and would reprice every session in it
+    if they just hit Finish. Falls back to the stored currency/rate, then INR, when there are no priced
+    sessions. The mentor can still change both before submitting."""
+    res = (_supabase.table("services").select("set_price, set_currency, duration")
+           .eq("mentor_id", mentor["id"]).eq("is_active", True).execute())
+    priced = [s for s in (res.data or [])
+              if (s.get("set_price") or 0) > 0 and (s.get("duration") or 0) > 0 and s.get("set_currency")]
+    if priced:
+        top = max(priced, key=lambda s: float(s["set_price"]) * 60.0 / float(s["duration"]))
+        return {
+            "currency": str(top["set_currency"]).upper(),
+            "hourly_rate": round(float(top["set_price"]) * 60.0 / float(top["duration"]), 2),
+            "source": "sessions",
+        }
+    return {
+        "currency": (mentor.get("currency") or "INR").upper(),
+        "hourly_rate": float(mentor["hourly_rate"]) if mentor.get("hourly_rate") else None,
+        "source": "mentor",
+    }
+
+
 def set_mentor_initial_rate(mentor_id: str, hourly_rate: float, currency: str,
                             currency_rates: list[dict], smart_pricing: bool,
                             reprice: bool = False) -> dict[str, Any]:

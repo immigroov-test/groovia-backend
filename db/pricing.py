@@ -20,14 +20,10 @@ _FX_BASE_SYMBOLS = [
 ]
 _FX_BACKOFF = [1.0, 3.0, 10.0]  # seconds, 3 attempts escalating
 
-# Currencies ECB/Frankfurter does NOT publish, so the daily refresh can't fetch them. We keep stable
-# manual EUR-pivot rates (AED/SAR are effectively USD-pegged; the rest move slowly) and re-stamp them
-# fresh on every refresh so they never go stale - otherwise get_fx_or_null returns NULL and countries
-# mapped to them silently fall back off their local currency (BUG-089: UAE/Saudi/Sri Lanka etc.).
-_MANUAL_FX = {
-    "AED": 3.97, "SAR": 4.05, "LKR": 325.0, "BDT": 118.0, "PKR": 300.0, "NPR": 144.0,
-    "NGN": 1700.0, "KES": 140.0, "EGP": 53.0, "TWD": 35.0, "VND": 27200.0,
-}
+# USD-pegged currencies ECB/Frankfurter omits. If neither live provider returns them we DERIVE the
+# EUR-pivot from the live EUR->USD rate times the official peg (never a hardcoded EUR rate, which goes
+# stale the moment EUR/USD moves - that class of stale value is exactly what caused the mispricing).
+_USD_PEGGED = {"AED": 3.6725, "SAR": 3.75}
 
 
 def get_booking_quote(service_id: str, customer_country: Optional[str]) -> dict[str, Any]:
@@ -81,32 +77,72 @@ def pricing_preview(amount: float, currency: str, smart_pricing: bool) -> list[d
 # compute_booking_price hard-fails once fx_rates is >24h stale (fx_max_age_minutes),
 # so a scheduler (jobs/run_due.py) must call refresh_fx_rates periodically.
 
-def _fetch_fx_rates_with_retry(symbols: list[str]) -> list[dict[str, Any]]:
-    """Frankfurter v2 returns [{quote, rate, date}, ...]. 3 attempts, escalating
-    backoff."""
-    url = "https://api.frankfurter.dev/v2/rates"
-    params = {"base": "EUR", "quotes": ",".join(symbols)}
-    last_err: Optional[Exception] = None
-    for attempt in range(len(_FX_BACKOFF)):
+def _erapi_rates() -> tuple[dict[str, float], Optional[str]]:
+    """open.er-api.com: free, no key, daily, and covers EVERY currency we price (incl. the AED/SAR/
+    LKR/PKR that ECB omits). Returns (EUR-pivot rate map, as_of)."""
+    resp = httpx.get("https://open.er-api.com/v6/latest/EUR", timeout=15.0)
+    resp.raise_for_status()
+    data = resp.json()
+    if data.get("result") != "success" or not isinstance(data.get("rates"), dict):
+        raise ValueError(f"open.er-api: {data.get('error-type', 'no rates in payload')}")
+    return ({str(k).upper(): float(v) for k, v in data["rates"].items()},
+            data.get("time_last_update_utc"))
+
+
+def _frankfurter_rates(symbols: list[str]) -> tuple[dict[str, float], Optional[str]]:
+    """ECB via Frankfurter. Authoritative but MAJORS ONLY, so it's our fallback / gap-filler."""
+    resp = httpx.get("https://api.frankfurter.dev/v2/rates",
+                     params={"base": "EUR", "quotes": ",".join(symbols)}, timeout=15.0)
+    resp.raise_for_status()
+    payload = resp.json()
+    if isinstance(payload, list):
+        return ({str(r["quote"]).upper(): float(r["rate"]) for r in payload},
+                payload[0]["date"] if payload else None)
+    if isinstance(payload, dict) and isinstance(payload.get("rates"), dict):
+        return ({str(q).upper(): float(r) for q, r in payload["rates"].items()}, payload.get("date"))
+    raise ValueError("Frankfurter: unexpected payload")
+
+
+def _fetch_fx_rates_with_retry(symbols: list[str]) -> tuple[list[dict[str, Any]], str]:
+    """Latest EUR-pivot rates for `symbols`, newest source wins. open.er-api.com is primary (covers every
+    currency we price); Frankfurter (ECB) fills anything still missing; USD-pegged currencies are derived
+    from the live EUR->USD if both providers omit them. NO hardcoded rates are ever returned - on total
+    provider failure this raises and the caller keeps the previously stored (last-day) rates. Returns
+    ([{base,quote,rate,as_of}], provider_label)."""
+    rates: dict[str, float] = {}
+    as_of: Optional[str] = None
+    provider = ""
+    errs: list[str] = []
+    for attempt in range(len(_FX_BACKOFF)):          # primary, comprehensive
         try:
-            resp = httpx.get(url, params=params, timeout=15.0)
-            resp.raise_for_status()
-            payload = resp.json()
-            if isinstance(payload, list):
-                rows = [{"base": "EUR", "quote": r["quote"], "rate": r["rate"], "as_of": r["date"]} for r in payload]
-            elif isinstance(payload, dict) and isinstance(payload.get("rates"), dict):
-                as_of = payload.get("date")
-                rows = [{"base": "EUR", "quote": q, "rate": r, "as_of": as_of} for q, r in payload["rates"].items()]
-            else:
-                rows = []
-            if not rows:
-                raise ValueError("Frankfurter: no rates in payload")
-            return rows
-        except Exception as e:  # noqa: BLE001 - retry on any failure
-            last_err = e
+            rates, as_of = _erapi_rates()
+            provider = "open.er-api.com"
+            break
+        except Exception as e:  # noqa: BLE001
+            errs.append(f"erapi:{e}")
             if attempt < len(_FX_BACKOFF) - 1:
                 time.sleep(_FX_BACKOFF[attempt])
-    raise last_err or RuntimeError("Frankfurter: unknown error")
+    missing = [s for s in symbols if s.upper() not in rates and s.upper() != "EUR"]
+    if missing:                                       # fallback / gap-fill with ECB majors
+        try:
+            fr, fr_as_of = _frankfurter_rates(missing)
+            for k, v in fr.items():
+                rates.setdefault(k, v)
+            as_of = as_of or fr_as_of
+            provider = provider or "frankfurter"
+        except Exception as e:  # noqa: BLE001
+            errs.append(f"frankfurter:{e}")
+    usd = rates.get("USD")                            # derive USD-pegged from the live peg if still gone
+    if usd:
+        for ccy, peg in _USD_PEGGED.items():
+            rates.setdefault(ccy, peg * usd)
+    rows = [{"base": "EUR", "quote": q.upper(), "rate": rates[q.upper()], "as_of": as_of}
+            for q in symbols if q.upper() in rates and q.upper() != "EUR"]
+    if not rows:
+        raise RuntimeError("all FX providers failed: " + "; ".join(errs))
+    if errs:
+        logger.warning("refresh_fx_rates: provider issues (%s); used %s", "; ".join(errs), provider)
+    return rows, provider
 
 
 def fx_rates_are_stale(max_age: timedelta) -> bool:
@@ -163,22 +199,19 @@ def refresh_fx_rates(force: bool = False) -> dict[str, Any]:
         logger.exception("refresh_fx_rates: failed to load active service currencies, using static set only")
 
     try:
-        rows = _fetch_fx_rates_with_retry(sorted(symbols))
+        rows, provider = _fetch_fx_rates_with_retry(sorted(symbols))
         now = datetime.now(timezone.utc).isoformat()
         upsert_rows = [{**r, "fetched_at": now} for r in rows]
         as_of = rows[0]["as_of"] if rows else None
-        # BUG-089: keep the non-Frankfurter currencies fresh so they don't expire and drop to USD.
-        upsert_rows.extend({"base": "EUR", "quote": q, "rate": rate, "as_of": as_of, "fetched_at": now}
-                           for q, rate in _MANUAL_FX.items())
 
         _supabase.table("fx_rates").upsert(upsert_rows, on_conflict="base,quote").execute()
         _supabase.table("fx_refresh_log").insert({
-            "provider": "frankfurter", "as_of": as_of, "raw_json": rows, "success": True, "error": None,
+            "provider": provider, "as_of": as_of, "raw_json": rows, "success": True, "error": None,
         }).execute()
-        return {"ok": True, "as_of": as_of, "count": len(upsert_rows)}
+        return {"ok": True, "as_of": as_of, "count": len(upsert_rows), "provider": provider}
     except Exception as e:
         logger.exception("refresh_fx_rates failed")
         _supabase.table("fx_refresh_log").insert({
-            "provider": "frankfurter", "as_of": None, "raw_json": None, "success": False, "error": str(e),
+            "provider": "none", "as_of": None, "raw_json": None, "success": False, "error": str(e),
         }).execute()
         raise

@@ -68,7 +68,7 @@ Each tick runs, under a lease lock so two overlapping ticks can't double-run:
 
 | Job | Cadence | Purpose |
 |---|---|---|
-| `refresh_fx_rates` | self-gated 6h | pull EUR-pivot rates from Frankfurter (pricing fails without fresh FX) |
+| `refresh_fx_rates` | self-gated, once per UTC day | pull the latest EUR-pivot rates (pricing fails without fresh FX) |
 | `expire_stale_holds` | every tick | release 10-min payment holds nobody paid → frees the slot |
 | `sweep_verify_payments` | every tick | backstop for dropped/late webhooks |
 | `process_refunds` | every tick | issue owed refunds (no-op until refund ledger is wired in the payouts phase) |
@@ -77,6 +77,25 @@ Each tick runs, under a lease lock so two overlapping ticks can't double-run:
 **Important:** FX rates start empty. Paid quotes fail with `FX_UNAVAILABLE` until
 the first `refresh_fx_rates` runs. Either wait one dispatcher tick or run it once
 manually: `python -m jobs.run_due`.
+
+### FX must stay current (money-critical)
+
+A stale FX rate does not fail loudly, it silently mis-prices every cross-currency booking. A round
+placeholder rate of `EUR->INR = 90` (real ~110) made every INR-priced mentor look ~22% more expensive
+to EU customers. Guardrails now in place:
+
+- **Latest daily rates.** `refresh_fx_rates()` runs on **every backend cold start** and is frozen per
+  UTC day, so a day's prices never drift mid-day. Also schedule it daily:
+  `python -m scripts.refresh_fx_rates` (Render Cron, e.g. `15 6 * * *`).
+- **Provider order.** `open.er-api.com` (covers every currency we price) → Frankfurter/ECB fills any
+  gaps → USD-pegged currencies (AED, SAR) derived from the **live** EUR→USD times their official peg.
+  No FX rate is ever hardcoded in application code.
+- **Last-day fallback.** If a refresh fails, nothing is written: the previously stored rates stay and
+  remain valid for `fx_max_age_minutes` (**2880 = 48h**), so one failed day degrades to yesterday's
+  rate instead of blocking checkout. Past 48h, quotes fail closed with `FX_UNAVAILABLE` rather than
+  charging a wrong price.
+- **Seed rates are a bootstrap only.** The `fx_rates` seed in the setup SQL is a real snapshot (not
+  round placeholders) and is overwritten by the first refresh. Keep it roughly current if regenerated.
 
 ## 5. Go live
 
