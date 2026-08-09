@@ -90,24 +90,52 @@ def list_active_mentors(
         rows = build("id, set_price, set_currency, is_active, category")
         has_status = False
 
-    # BUG-057: services can legitimately sit in different currencies (a migrated mentor's
-    # per-service currency comes from legacy data; see scripts/migrate_mentors.py), so comparing
-    # raw set_price numbers picks whichever currency happens to have the smallest face value, not
-    # the actually-cheapest service ("random" price on the card). Normalize every paid service to
-    # a common pivot (USD) via the EUR-pivot fx_rates table before comparing; the DISPLAYED price
-    # still uses the winning service's own set_price/set_currency, only the comparison is normalized.
+    # BUG-057 (+ Go-Live retest follow-up): services can legitimately sit in different currencies (a
+    # migrated mentor's per-service currency comes from legacy data; see scripts/migrate_mentors.py),
+    # so comparing raw set_price numbers picks whichever currency happens to have the smallest face
+    # value - e.g. AUD 45 < INR 2699 by raw number, even though INR 2699 (~USD 28) is actually
+    # cheaper than AUD 45 (~USD 32) once converted. Normalize every paid service to a common pivot
+    # (USD) via the EUR-pivot fx_rates table before comparing; the DISPLAYED price still uses the
+    # winning service's own set_price/set_currency, only the comparison is normalized.
     try:
         fx_rows = _supabase.table("fx_rates").select("quote, rate").eq("base", "EUR").execute().data or []
         fx_eur = {row["quote"].upper(): float(row["rate"]) for row in fx_rows if row.get("rate")}
     except Exception:
+        logger.exception("list_active_mentors: failed to load fx_rates for price normalization")
         fx_eur = {}
 
-    def _to_usd(amount: float, currency: str) -> float:
-        ccy = (currency or "USD").upper()
-        if ccy == "USD" or not fx_eur.get("USD") or not fx_eur.get(ccy):
-            return amount  # best-effort fallback: can't normalize, compare as-is
-        amount_eur = amount / fx_eur[ccy]
-        return amount_eur * fx_eur["USD"]
+    _unnormalizable_currencies_warned: set[str] = set()
+
+    def _normalize_to_usd(amount: float, currency: str) -> Optional[float]:
+        """USD-equivalent of `amount` (in `currency`), for MINIMUM-PRICE COMPARISON only - never for
+        the displayed price, which always uses the winning service's own raw price/currency.
+
+        Returns None when the currency can't be reliably normalized. Callers MUST exclude such
+        services from the minimum comparison rather than falling back to comparing raw, unconverted
+        face values - silently treating an unconverted amount as if it were USD is exactly the bug
+        this normalization exists to prevent (AUD 45 read as "45", beating INR 2699 read as "2699").
+        fx_rates is EUR-pivoted and may have no explicit EUR self-row, so EUR is handled explicitly
+        (1:1 to itself) rather than falling through to a "rate not found" case."""
+        ccy = (currency or "").upper()
+        if not ccy:
+            return None
+        if ccy == "USD":
+            return amount
+        usd_per_eur = fx_eur.get("USD")
+        if not usd_per_eur:
+            if "USD" not in _unnormalizable_currencies_warned:
+                _unnormalizable_currencies_warned.add("USD")
+                logger.warning("list_active_mentors: no EUR->USD fx_rate available; cannot normalize any non-USD price")
+            return None
+        if ccy == "EUR":
+            return amount * usd_per_eur
+        rate = fx_eur.get(ccy)
+        if not rate:
+            if ccy not in _unnormalizable_currencies_warned:
+                _unnormalizable_currencies_warned.add(ccy)
+                logger.warning("list_active_mentors: no EUR->%s fx_rate available; can't normalize services priced in %s", ccy, ccy)
+            return None
+        return (amount / rate) * usd_per_eur
 
     # Collapse the mentor's bookable services into a single "starting from" price for the
     # card (cheapest active, admin-approved when status exists), then drop the raw list.
@@ -127,13 +155,32 @@ def list_active_mentors(
         # show it as a small badge below the price.
         paid = [s for s in svcs if float(s["set_price"]) > 0]
         r["has_free_session"] = any(float(s["set_price"]) == 0 for s in svcs)
-        cheapest = (min(paid, key=lambda s: _to_usd(float(s["set_price"]), s.get("set_currency")))
-                    if paid else svcs[0])
-        r["min_price"] = float(cheapest["set_price"]) if paid else 0.0
-        r["price_currency"] = cheapest.get("set_currency") or r.get("currency") or "USD"
+        cheapest: Optional[dict[str, Any]] = svcs[0] if svcs else None
+        if paid:
+            # Only compare services whose currency actually normalized (see _normalize_to_usd) - an
+            # un-normalizable one is excluded from the comparison, never treated as its raw face
+            # value. Tie-break on service id so equal normalized prices are deterministic and never
+            # depend on database/array ordering.
+            comparable = [
+                (s, usd) for s in paid
+                if (usd := _normalize_to_usd(float(s["set_price"]), s.get("set_currency"))) is not None
+            ]
+            if comparable:
+                cheapest = min(comparable, key=lambda pair: (pair[1], pair[0]["id"]))[0]
+            else:
+                # Every paid service failed to normalize (e.g. a total fx_rates outage) - there is no
+                # currency-safe way to pick a "cheapest" service right now. Fall back to a stable,
+                # price-blind tie-break (service id) rather than ever comparing raw face values.
+                logger.error(
+                    "list_active_mentors: mentor=%s could not normalize ANY paid service's currency; "
+                    "falling back to a non-price tie-break", r.get("id"),
+                )
+                cheapest = min(paid, key=lambda s: s["id"])
+        r["min_price"] = float(cheapest["set_price"]) if paid and cheapest else 0.0
+        r["price_currency"] = (cheapest.get("set_currency") if cheapest else None) or r.get("currency") or "USD"
         # The cheapest PAID service's id, so the card can localize its price through the SAME engine
         # as checkout (display_service_prices) and never show a figure that jumps at checkout (BUG-077).
-        r["min_price_service_id"] = cheapest.get("id") if paid else None
+        r["min_price_service_id"] = cheapest.get("id") if paid and cheapest else None
         # What the mentor actually helps with = the categories of the sessions they configured. This
         # is the user-facing filter facet (not the self-declared expertise_categories), so browse
         # filters/tags reflect what's really bookable.
