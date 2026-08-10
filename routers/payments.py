@@ -230,6 +230,10 @@ def _handle_webhook_event(event_type: str, payload: dict, background_tasks: Back
         db.record_payment_error(
             local["id"], razorpay_payment.get("error_code"), razorpay_payment.get("error_description"),
         )
+        background_tasks.add_task(
+            _send_payment_failed_email, local["booking_id"],
+            razorpay_payment.get("error_code"), razorpay_payment.get("error_description"),
+        )
 
     elif event_type in ("refund.created", "refund.processed"):
         refund_entity = entity.get("refund", {}).get("entity", {})
@@ -245,6 +249,78 @@ def _handle_webhook_event(event_type: str, payload: dict, background_tasks: Back
         remaining = db.refund_owed_minor(local["booking_id"])
         new_state = "refunded" if remaining <= 0 else "partially_refunded"
         db.set_payment_state(local["id"], new_state)
+        # Only on 'processed': 'created' means the provider has accepted it, not that money moved.
+        if status_ == "processed":
+            background_tasks.add_task(
+                _send_refund_email, local["booking_id"],
+                int(refund_entity.get("amount") or 0), refund_entity.get("currency") or local.get("currency") or "",
+            )
+
+
+_ZERO_DECIMAL = {"JPY", "KRW", "VND", "IDR"}   # Razorpay/most PSPs quote these without minor units
+
+
+def _major(amount_minor: int, currency: str) -> str:
+    """Minor units -> a display string. payment_refunds stores minor units; most of our currencies are
+    2-decimal, but a zero-decimal currency must NOT be divided or we'd understate a refund 100x."""
+    ccy = (currency or "").upper()
+    value = float(amount_minor) if ccy in _ZERO_DECIMAL else float(amount_minor) / 100.0
+    return mailer.format_money(value, ccy)
+
+
+def _payment_context(booking_id: str) -> dict:
+    """Shared recipient/context lookup for the money emails."""
+    info = db.get_booking_notify_info(booking_id) or {}
+    return {
+        "booking_ref": f"#{str(booking_id).split('-')[0]}",
+        "service_title": info.get("service_title") or "1-on-1 session",
+        "mentor_name": info.get("mentor_name") or "",
+        "mentor_email": info.get("mentor_email") or "",
+        "candidate_name": info.get("candidate_name") or "there",
+        "candidate_email": info.get("candidate_email") or "",
+    }
+
+
+def _send_payment_failed_email(booking_id: str, error_code: Optional[str], error_desc: Optional[str]) -> None:
+    """A failed payment used to be silent: the customer was left believing they had a booking. Tell
+    them it did NOT happen, and give ops the provider's error. The mentor is deliberately NOT emailed -
+    no booking exists for them to act on."""
+    try:
+        ctx = _payment_context(booking_id)
+        inv = db.get_booking_invoice(booking_id)
+        amount = mailer.format_money(float(inv["total"]), inv["currency"]) if inv else ""
+        reason = (error_desc or error_code or "").strip()
+        if ctx["candidate_email"]:
+            mailer.send_transactional(ctx["candidate_email"], "payment_failed", {
+                "recipient_name": ctx["candidate_name"], "mentor_name": ctx["mentor_name"],
+                "service_title": ctx["service_title"], "amount": amount, "failure_reason": reason,
+                "retry_url": f"{config.FRONTEND_URL}/session/{booking_id}",
+            })
+        for admin_email in db.admin_notify_emails():
+            mailer.send_transactional(admin_email, "payment_admin_notice", {
+                "kind": "failed", **ctx, "amount": amount, "failure_reason": reason,
+            })
+    except Exception:
+        logger.warning("payment failed email skipped booking=%s", booking_id)
+
+
+def _send_refund_email(booking_id: str, amount_minor: int, currency: str) -> None:
+    """Sent only once the provider reports the refund PROCESSED, so we never tell someone their money
+    is back before it is."""
+    try:
+        ctx = _payment_context(booking_id)
+        amount = _major(amount_minor, currency)
+        if ctx["candidate_email"]:
+            mailer.send_transactional(ctx["candidate_email"], "refund_issued", {
+                "recipient_name": ctx["candidate_name"], "service_title": ctx["service_title"],
+                "booking_ref": ctx["booking_ref"], "amount": amount,
+            })
+        for admin_email in db.admin_notify_emails():
+            mailer.send_transactional(admin_email, "payment_admin_notice", {
+                "kind": "refund", **ctx, "amount": amount,
+            })
+    except Exception:
+        logger.warning("refund email skipped booking=%s", booking_id)
 
 
 def _send_confirmation_email(booking_id: str) -> None:

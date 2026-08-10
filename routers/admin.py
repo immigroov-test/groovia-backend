@@ -370,18 +370,48 @@ class PayoutPaidBody(BaseModel):
 
 
 @router.post("/payouts/{booking_id}/mark-paid")
-def mark_payout_paid(booking_id: str, body: PayoutPaidBody = PayoutPaidBody(), user: AuthUser = Depends(require_admin)):
+def mark_payout_paid(booking_id: str, background_tasks: BackgroundTasks,
+                     body: PayoutPaidBody = PayoutPaidBody(), user: AuthUser = Depends(require_admin)):
     """Record a manual payout as paid. The RPC rejects bookings that aren't
     'completed' (nothing to pay out yet) and payouts already void/blocked."""
+    reference = (body.reference or "").strip() or "manual"
     try:
-        db.mark_payout_paid(booking_id, (body.reference or "").strip() or "manual")
+        db.mark_payout_paid(booking_id, reference)
     except Exception as e:
         msg = str(e)
         if "not completed" in msg.lower():
             raise HTTPException(status_code=409, detail="This booking isn't completed yet, so there's nothing to pay out.")
         logger.exception("mark_payout_paid failed booking=%s", booking_id)
         raise HTTPException(status_code=500, detail="Could not mark the payout as paid.")
+    # The mentor was never told their money had been sent - they had to notice it in their bank.
+    background_tasks.add_task(_notify_payout_paid, booking_id, reference)
     return {"ok": True}
+
+
+def _notify_payout_paid(booking_id: str, reference: str) -> None:
+    """Tell the mentor their payout is on the way. Their OWN payout amount, so it is theirs to see;
+    the customer's price and the platform's cut are not in this email."""
+    try:
+        payout = db.get_mentor_payout(booking_id)
+        if not payout:
+            return
+        info = db.get_booking_notify_info(booking_id) or {}
+        to = info.get("mentor_email")
+        if not to:
+            return
+        amount = mailer.format_money(
+            float(payout.get("net_amount_mentor_currency") or payout.get("amount") or 0),
+            payout.get("mentor_currency") or payout.get("customer_currency") or "",
+        )
+        mailer.send_transactional(to, "payout_paid", {
+            "recipient_name": info.get("mentor_name") or "there",
+            "service_title": info.get("service_title") or "1-on-1 session",
+            "session_time": info.get("slot_time") or "",
+            "amount": amount,
+            "reference": reference,
+        })
+    except Exception:
+        logger.warning("payout email skipped booking=%s", booking_id)
 
 
 @router.post("/payouts/{booking_id}/block")

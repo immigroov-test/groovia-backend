@@ -546,6 +546,20 @@ def admin_list_payouts(state: Optional[str] = None, limit: int = 200) -> Optiona
 
 # ── Payout admin ops (manual payouts) ──────────────────────────────────────────
 
+def get_mentor_payout(booking_id: str) -> Optional[dict[str, Any]]:
+    """The payout row for a booking: what the MENTOR receives, in their own currency. Used for the
+    payout email, so it returns the mentor's side only."""
+    try:
+        res = (_supabase.table("mentor_payouts")
+               .select("amount, net_amount_mentor_currency, mentor_currency, customer_currency, "
+                       "payout_state, payout_reference, paid_date")
+               .eq("booking_id", booking_id).limit(1).execute())
+        return (res.data or [None])[0]
+    except Exception:
+        logger.exception("get_mentor_payout failed booking=%s", booking_id)
+        return None
+
+
 def mark_payout_paid(booking_id: str, reference: str) -> None:
     _supabase.rpc("mark_payout_paid", {"p_booking_id": booking_id, "p_reference": reference}).execute()
 

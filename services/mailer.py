@@ -298,6 +298,11 @@ def _money(amount: float, currency: str) -> str:
     return f"{sym}{amount:,.2f}" if sym else f"{(currency or '').upper()} {amount:,.2f}"
 
 
+def format_money(amount: float, currency: str) -> str:
+    """Public alias of the money formatter, so routers render amounts exactly as the templates do."""
+    return _money(amount, currency)
+
+
 def _invoice_block(inv: Optional[dict], booking_ref: str = "") -> str:
     """FEAT-019: the payment breakdown, so the confirmation doubles as the customer's invoice. Shows
     only what THEY paid (session, platform fee, tax, total) - commission and the mentor's payout are
@@ -865,6 +870,108 @@ def _cancel_request_sent(d: dict) -> tuple[str, str]:
     return "We've sent your cancellation request", _base(body)
 
 
+# ── Payments (failure / refund / payout) ───────────────────────────────────────
+# There is deliberately NO "payment succeeded" email: the booking confirmation already IS that
+# receipt, and it carries the payment breakdown (FEAT-019). These cover the cases where the customer
+# or mentor would otherwise be left guessing.
+
+def _payment_failed(d: dict) -> tuple[str, str]:
+    """Customer: their card was declined and the booking did NOT happen. Says so plainly, because the
+    silent failure left people believing they had a session booked."""
+    name = _e(d.get("recipient_name", "there"))
+    mentor = _e(d.get("mentor_name", "your mentor"))
+    rows = _info_row("Session", d.get("service_title", "")) if d.get("service_title") else ""
+    rows += _info_row("Requested time", d.get("session_time", "")) if d.get("session_time") else ""
+    if d.get("amount"):
+        rows += _info_row("Amount", d["amount"])
+    # The provider's own wording ("insufficient funds", "card declined") is the single most useful
+    # thing here, so it is passed through when Razorpay gives us one.
+    if d.get("failure_reason"):
+        rows += _info_row("What the bank said", d["failure_reason"])
+    body = (
+        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Your payment didn\'t go through</h1>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {name},</p>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
+        f"We couldn't take payment for your session with <strong>{mentor}</strong>, so "
+        "<strong>the booking was not made</strong> and that time is open again. You have not been charged.</p>"
+        + rows
+        + '<p style="margin:0;font-size:15px;color:#444;line-height:1.6">'
+        "You can try again with the same or another payment method. If money did leave your account, "
+        "it is an authorisation that your bank will release automatically.</p>"
+        + (_btn(d.get("retry_url", ""), "Try booking again") if d.get("retry_url") else "")
+    )
+    return "Your Immigroov payment didn't go through", _base(body)
+
+
+def _refund_issued(d: dict) -> tuple[str, str]:
+    """Customer: money is actually on its way back. Sent on refund.processed, never on refund.created,
+    so we don't tell someone they've been refunded before the provider has really done it."""
+    name = _e(d.get("recipient_name", "there"))
+    rows = _info_row("Refund amount", d.get("amount", "")) if d.get("amount") else ""
+    if d.get("service_title"):
+        rows += _info_row("Session", d["service_title"])
+    if d.get("booking_ref"):
+        rows += _info_row("Booking reference", d["booking_ref"])
+    body = (
+        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Your refund is on its way</h1>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {name},</p>'
+        '<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
+        "We've issued a refund to the payment method you originally used. Banks usually take "
+        "<strong>5-7 business days</strong> to show it on your statement.</p>"
+        + rows
+        + '<p style="margin:0;font-size:15px;color:#444;line-height:1.6">'
+        "The amount refunded follows our refund policy. If it hasn't arrived after 7 business days, "
+        'reply to this email with your booking reference and we\'ll chase it.</p>'
+        + _btn(f"{config.FRONTEND_URL}/terms", "Read the refund policy")
+    )
+    return "Your Immigroov refund has been issued", _base(body)
+
+
+def _payout_paid(d: dict) -> tuple[str, str]:
+    """Mentor: their money has been sent. This is where per-session earnings belong (BUG-097) - it is
+    the mentor's own payout, so the amount is theirs to see; the customer's price is not shown."""
+    name = _e(d.get("recipient_name", "there"))
+    rows = _info_row("Amount paid to you", d.get("amount", "")) if d.get("amount") else ""
+    if d.get("service_title"):
+        rows += _info_row("Session", d["service_title"])
+    if d.get("session_time"):
+        rows += _info_row("Session date", d["session_time"])
+    if d.get("reference"):
+        rows += _info_row("Payment reference", d["reference"])
+    body = (
+        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">You\'ve been paid</h1>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {name},</p>'
+        '<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
+        "We've sent the payout for your completed session. Depending on your bank it can take a few "
+        "working days to land.</p>"
+        + rows
+        + '<p style="margin:0;font-size:15px;color:#444;line-height:1.6">'
+        "You can see all your payouts on the Payments tab of your dashboard.</p>"
+        + _btn(f"{config.FRONTEND_URL}/mentor", "View your payments")
+    )
+    return "Your Immigroov payout has been sent", _base(body)
+
+
+def _payment_admin_notice(d: dict) -> tuple[str, str]:
+    """Ops copy for money events. Admin is the only audience that sees both sides' figures."""
+    kind = d.get("kind", "payment")
+    titles = {"failed": "Payment failed", "refund": "Refund issued", "payout": "Payout marked paid"}
+    title = titles.get(kind, "Payment event")
+    rows: list[tuple[str, str]] = []
+    for label, key in (("Booking reference", "booking_ref"), ("Session", "service_title"),
+                       ("Mentor", "mentor_name"), ("Customer", "candidate_name"),
+                       ("Customer email", "candidate_email"), ("Amount", "amount"),
+                       ("Provider reference", "reference"), ("Error", "failure_reason")):
+        if d.get(key):
+            rows.append((label, str(d[key])))
+    body = (
+        f'<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">{_e(title)}</h1>'
+        '<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Admin notification - a payment event occurred.</p>'
+        + _detail_list(rows)
+    )
+    return f"[Admin] {title}", _base(body)
+
+
 def _booking_admin_notice(d: dict) -> tuple[str, str]:
     """Ops/admin copy for every booking, reschedule, and cancellation."""
     event = d.get("event", "updated")
@@ -979,6 +1086,10 @@ def _contact_form(d: dict) -> tuple[str, str]:
 
 _TEMPLATES = {
     "booking_admin_notice": _booking_admin_notice,
+    "payment_failed": _payment_failed,
+    "refund_issued": _refund_issued,
+    "payout_paid": _payout_paid,
+    "payment_admin_notice": _payment_admin_notice,
     "contact_form": _contact_form,
     "mentor_application_received": _mentor_application_received,
     "admin_mentor_application": _admin_mentor_application,
