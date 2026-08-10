@@ -289,6 +289,54 @@ def _prep_block(notes: str, answers: list, heading: str) -> str:
     )
 
 
+def _money(amount: float, currency: str) -> str:
+    """Plain '€71.26' / 'INR 1,499.00'. No locale guessing: the symbol map covers what we price in and
+    anything else falls back to the ISO code, which is never wrong, just less pretty."""
+    symbols = {"EUR": "€", "USD": "$", "GBP": "£", "INR": "₹", "AUD": "A$", "CAD": "C$",
+               "SGD": "S$", "AED": "AED ", "SAR": "SAR ", "CHF": "CHF ", "JPY": "¥"}
+    sym = symbols.get((currency or "").upper())
+    return f"{sym}{amount:,.2f}" if sym else f"{(currency or '').upper()} {amount:,.2f}"
+
+
+def _invoice_block(inv: Optional[dict], booking_ref: str = "") -> str:
+    """FEAT-019: the payment breakdown, so the confirmation doubles as the customer's invoice. Shows
+    only what THEY paid (session, platform fee, tax, total) - commission and the mentor's payout are
+    internal. Free sessions pass inv=None and get nothing."""
+    if not inv:
+        return ""
+    ccy = inv.get("currency") or ""
+    rows = [("Session", _money(float(inv.get("session") or 0), ccy))]
+    if float(inv.get("platform_fee") or 0) > 0:
+        rows.append(("Platform fee", _money(float(inv["platform_fee"]), ccy)))
+    if float(inv.get("tax") or 0) > 0:
+        rows.append(("Tax", _money(float(inv["tax"]), ccy)))
+
+    line_html = "".join(
+        '<tr>'
+        f'<td style="padding:4px 0;font-size:14px;color:#555">{_e(label)}</td>'
+        f'<td style="padding:4px 0;font-size:14px;color:#555;text-align:right">{_e(value)}</td>'
+        '</tr>'
+        for label, value in rows
+    )
+    total_html = (
+        '<tr>'
+        '<td style="padding:10px 0 0;border-top:1px solid #e5e5e5;font-size:15px;font-weight:700;color:#0a0a0a">Total paid</td>'
+        f'<td style="padding:10px 0 0;border-top:1px solid #e5e5e5;font-size:15px;font-weight:700;color:#0a0a0a;text-align:right">'
+        f'{_e(_money(float(inv.get("total") or 0), ccy))}</td>'
+        '</tr>'
+    )
+    ref = (f'<p style="margin:10px 0 0;font-size:12px;color:#999">Booking reference {_e(booking_ref)}. '
+           'Quote it if you contact support.</p>') if booking_ref else ""
+    return (
+        '<div style="margin:20px 0 0;padding:14px 16px;background:#fafafa;border:1px solid #ececec;border-radius:12px">'
+        '<p style="margin:0 0 8px;font-size:12px;font-weight:600;color:#999;text-transform:uppercase;letter-spacing:.6px">'
+        'Payment summary</p>'
+        f'<table style="width:100%;border-collapse:collapse">{line_html}{total_html}</table>'
+        + ref +
+        '</div>'
+    )
+
+
 def _booking_confirmed_candidate(d: dict) -> tuple[str, str]:
     candidate = _e(d.get("candidate_name", ""))
     mentor = d.get("mentor_name", "your mentor")
@@ -316,7 +364,9 @@ def _booking_confirmed_candidate(d: dict) -> tuple[str, str]:
             ("When (mentor's time)", d.get("mentor_time", "")),
             ("Who", f"{mentor} (mentor) and you"),
             ("Where", "Video call - use the Join meeting button below"),
+            ("Booking reference", d.get("booking_ref", "")),
         ])
+        + _invoice_block(d.get("invoice"), d.get("booking_ref", ""))
         + _prep_block(d.get("notes", ""), d.get("answers"), "What you shared with your mentor")
         + '<p style="margin:16px 0 0;font-size:15px;color:#444;line-height:1.6">'
         "You'll receive a reminder 24 hours and 30 minutes before the session."
@@ -749,15 +799,70 @@ def _cancel_requested(d: dict) -> tuple[str, str]:
 
 
 def _no_show_reported(d: dict) -> tuple[str, str]:
+    """Audience-aware, like the cancellation email. Both parties used to get one generic message
+    ("a session you were part of was reported") pointing at /account, which tells a mentor nothing and
+    sends them to the wrong dashboard. Each side is now told who was reported, what they can do next,
+    and where. Deliberately silent on the other party's money: the mentor is not told the customer's
+    refund and the customer is not told the mentor's payout penalty."""
     name = _e(d.get("recipient_name", "there"))
+    other = _e(d.get("other_name", "the other participant"))
+    is_mentor = d.get("audience") == "mentor"
+    about_you = bool(d.get("about_you"))          # True when the RECIPIENT is the one reported
+
+    if is_mentor and about_you:
+        lead = (f"<strong>{other}</strong> reported that you didn't join this session. "
+                "If that's wrong, open the session and let us know so we can review it.")
+        cta = ("Open your sessions", d.get("manage_url") or f"{config.FRONTEND_URL}/mentor")
+    elif is_mentor:
+        lead = (f"<strong>{other}</strong> didn't join this session. You can offer them a rebook or "
+                "close the session from your dashboard.")
+        cta = ("Resolve this session", d.get("manage_url") or f"{config.FRONTEND_URL}/mentor")
+    elif about_you:
+        lead = (f"<strong>{other}</strong> reported that you didn't join this session. They may offer "
+                "you a rebook. If this is wrong, open the session and tell us.")
+        cta = ("Open the session", d.get("manage_url") or f"{config.FRONTEND_URL}/account")
+    else:
+        lead = (f"<strong>{other}</strong> didn't join this session. You can rebook with them, try a "
+                "different mentor, or request a refund, all from the session page.")
+        cta = ("Choose how to resolve it", d.get("manage_url") or f"{config.FRONTEND_URL}/account")
+
+    rows = _info_row("Session", d.get("service_title", "")) if d.get("service_title") else ""
+    rows += _info_row("Scheduled for", d.get("session_time", ""))
+    if d.get("booking_ref"):
+        rows += _info_row("Booking reference", d["booking_ref"])
+
     body = (
         '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Session marked as a no-show</h1>'
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {name},</p>'
-        '<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
-        "A session you were part of was reported as a no-show. Open your sessions to see the options for resolving it.</p>"
-        + _btn(config.FRONTEND_URL + "/account", "View session")
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">{lead}</p>'
+        + rows
+        + _btn(cta[1], cta[0])
     )
     return "A session was marked as a no-show", _base(body)
+
+
+def _cancel_request_sent(d: dict) -> tuple[str, str]:
+    """BUG-124 audit: the customer who asks for a late cancellation used to get NOTHING back - only the
+    mentor was emailed - so they had no record that the request existed or what happens next."""
+    name = _e(d.get("recipient_name", "there"))
+    other = _e(d.get("other_name", "your mentor"))
+    rows = _info_row("Session", d.get("service_title", "")) if d.get("service_title") else ""
+    rows += _info_row("Scheduled for", d.get("session_time", ""))
+    if d.get("booking_ref"):
+        rows += _info_row("Booking reference", d["booking_ref"])
+    if d.get("reason"):
+        rows += _info_row("Reason you gave", d["reason"])
+    body = (
+        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Cancellation request sent</h1>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {name},</p>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
+        f"We've asked <strong>{other}</strong> to approve your cancellation. This session is close enough "
+        "to its start time that it needs their approval. We'll email you as soon as they respond, and any "
+        "refund follows our refund policy.</p>"
+        + rows
+        + _btn(d.get("manage_url") or f"{config.FRONTEND_URL}/account", "View the session")
+    )
+    return "We've sent your cancellation request", _base(body)
 
 
 def _booking_admin_notice(d: dict) -> tuple[str, str]:
@@ -773,7 +878,14 @@ def _booking_admin_notice(d: dict) -> tuple[str, str]:
     mentor = d.get("mentor_name") or "-"
     candidate = d.get("candidate_name") or "-"
     candidate_email = d.get("candidate_email") or ""
-    rows: list[tuple[str, str]] = [
+    rows: list[tuple[str, str]] = []
+    # A booking reference first: it is what support and the customer quote at each other, and what
+    # every other admin surface is searchable by. Without it an ops mail was unactionable.
+    if d.get("booking_ref"):
+        rows.append(("Booking reference", d["booking_ref"]))
+    if d.get("service_title"):
+        rows.append(("Session", d["service_title"]))
+    rows += [
         ("Mentor", mentor),
         ("Candidate", f"{candidate} ({candidate_email})" if candidate_email else candidate),
     ]
@@ -783,6 +895,17 @@ def _booking_admin_notice(d: dict) -> tuple[str, str]:
         rows.append(("When (candidate's time)", d.get("candidate_time") or "-"))
     else:
         rows.append(("When", d.get("session_time", "-")))
+    # Money is ADMIN-ONLY and is exactly what makes this mail actionable: what the customer paid, and
+    # the split. Neither party's email ever carries the other side's figures.
+    inv = d.get("invoice")
+    if inv:
+        ccy = inv.get("currency") or ""
+        rows.append(("Customer paid", _money(float(inv.get("total") or 0), ccy)))
+        rows.append(("Of which platform fee", _money(float(inv.get("platform_fee") or 0), ccy)))
+        if float(inv.get("tax") or 0) > 0:
+            rows.append(("Tax", _money(float(inv["tax"]), ccy)))
+    if d.get("reason"):
+        rows.append(("Reason given", d["reason"]))
     body = (
         f'<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">{_e(title)}</h1>'
         '<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Admin notification - a booking event occurred.</p>'
@@ -882,6 +1005,7 @@ _TEMPLATES = {
     "reschedule_requested": _reschedule_requested,
     "reschedule_counter": _reschedule_counter,
     "cancel_requested": _cancel_requested,
+    "cancel_request_sent": _cancel_request_sent,
     "no_show_reported": _no_show_reported,
     "auth_signup_confirm": _auth_signup_confirm,
     "auth_magic_link": _auth_magic_link,

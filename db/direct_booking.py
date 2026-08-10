@@ -158,7 +158,7 @@ def get_booking_notify_info(booking_id: str) -> Optional[dict[str, Any]]:
         res = (
             _supabase.table("bookings")
             .select("mentor_id, candidate_id, candidate_email, candidate_name, slot_time, notes, "
-                    "cancel_reason, "
+                    "cancel_reason, no_show_by, "
                     "service_id, services(title), mentors(display_name, photo_url)")
             .eq("id", booking_id)
             .single()
@@ -190,6 +190,7 @@ def get_booking_notify_info(booking_id: str) -> Optional[dict[str, Any]]:
             "slot_time":       b.get("slot_time"),
             "notes":           (b.get("notes") or "").strip() or None,   # BUG-113
             "cancel_reason":   (b.get("cancel_reason") or "").strip() or None,   # BUG-123
+            "no_show_by":      b.get("no_show_by"),   # who failed to attend, so each side's email differs
             "answers":         get_booking_answers(booking_id),           # BUG-113
         }
     except Exception:
@@ -272,6 +273,38 @@ def cancel_booking(booking_id: str, cancelled_by: str = "user") -> dict:
     if not res.data:
         raise ValueError("Booking not found or already cancelled")
     return res.data
+
+
+def get_booking_invoice(booking_id: str) -> Optional[dict[str, Any]]:
+    """FEAT-019: the customer-facing price breakdown for a booking, taken from the quote snapshot that
+    actually produced the charge (never recomputed - a later FX or rate change must not alter what an
+    issued invoice says).
+
+    Returns only what the CUSTOMER paid: session price, platform fee, tax and total. Commission and the
+    mentor's net are deliberately left out; those are internal and admin-only.
+    Returns None for free/mock bookings, which have no quote and so no invoice."""
+    try:
+        res = (_supabase.table("pricing_quotes")
+               .select("snapshot, customer_currency")
+               .eq("booking_id", booking_id)
+               .order("created_at", desc=True).limit(1).execute())
+        row = (res.data or [None])[0]
+        if not row or not row.get("snapshot"):
+            return None
+        s = row["snapshot"]
+        total = float(s.get("gross_customer") or 0)
+        if total <= 0:
+            return None
+        return {
+            "currency":     row.get("customer_currency") or s.get("customer_currency") or "",
+            "session":      float(s.get("mentor_amount") or 0),
+            "platform_fee": float(s.get("platform_fee") or 0),
+            "tax":          float(s.get("tax_amount") or 0),
+            "total":        total,
+        }
+    except Exception:
+        logger.exception("get_booking_invoice failed booking=%s", booking_id)
+        return None
 
 
 def set_booking_cancellation_reason(booking_id: str, reason: Optional[str]) -> None:

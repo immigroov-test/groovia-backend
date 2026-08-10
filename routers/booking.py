@@ -933,6 +933,10 @@ def _send_booking_confirmation(
                 "signup_url": signup_url,
                 "notes": notes or "",
                 "answers": answers,
+                # FEAT-019: booking reference + what they were charged, so this email doubles as the
+                # customer's invoice. Absent for free sessions (no charge, so nothing to itemise).
+                "booking_ref": _booking_ref(booking_id),
+                "invoice": db.get_booking_invoice(booking_id),
             },
             attachments=ics_att,
         )
@@ -961,6 +965,8 @@ def _send_booking_confirmation(
                 "booking_admin_notice",
                 {
                     "event": "booked",
+                    "booking_ref": _booking_ref(booking_id),
+                    "invoice": db.get_booking_invoice(booking_id),
                     "mentor_name": mentor_name or "",
                     "candidate_name": candidate_name or "",
                     "candidate_email": candidate_email,
@@ -1096,20 +1102,50 @@ def _notify_parties(booking_id: str, event: str, old_slot: Optional[str] = None,
         elif event == "reschedule_requested":
             send(m_email, "reschedule_requested", {"recipient_name": m_name, "other_name": c_name, "session_time": session_time})
         elif event == "cancel_requested":
-            send(m_email, "cancel_requested", {"recipient_name": m_name, "other_name": c_name, "session_time": session_time})
+            times = db.get_booking_times_display(booking_id) or {}
+            reason = info.get("cancel_reason") or ""
+            send(m_email, "cancel_requested", {
+                "recipient_name": m_name, "other_name": c_name, "service_title": service_title,
+                "session_time": _local_stamp(times, "mentor_local", "mentor_tz") or session_time,
+                "booking_ref": _booking_ref(booking_id), "reason": reason, "manage_url": mentor_hub,
+            })
+            # The requester used to get nothing back, so they had no record the request existed.
+            send(c_email, "cancel_request_sent", {
+                "recipient_name": c_name, "other_name": m_name, "service_title": service_title,
+                "session_time": _local_stamp(times, "customer_local", "customer_tz") or session_time,
+                "booking_ref": _booking_ref(booking_id), "reason": reason, "manage_url": session_url,
+            })
         elif event == "no_show":
-            send(c_email, "no_show_reported", {"recipient_name": c_name, "other_name": m_name, "session_time": session_time})
-            send(m_email, "no_show_reported", {"recipient_name": m_name, "other_name": c_name, "session_time": session_time})
+            # no_show_by names WHO failed to attend, so each side is told whether it is about them.
+            times = db.get_booking_times_display(booking_id) or {}
+            no_show_by = (info.get("no_show_by") or "").lower()
+            common = {"service_title": service_title, "booking_ref": _booking_ref(booking_id)}
+            send(c_email, "no_show_reported", {
+                **common, "audience": "customer", "recipient_name": c_name, "other_name": m_name,
+                "session_time": _local_stamp(times, "customer_local", "customer_tz") or session_time,
+                "about_you": no_show_by == "user", "manage_url": session_url,
+            })
+            send(m_email, "no_show_reported", {
+                **common, "audience": "mentor", "recipient_name": m_name, "other_name": c_name,
+                "session_time": _local_stamp(times, "mentor_local", "mentor_tz") or session_time,
+                "about_you": no_show_by == "mentor", "manage_url": mentor_hub,
+            })
 
         # Admin/ops copy on the money-relevant lifecycle events (cancel, reschedule, no-show).
         if event in ("cancelled", "rescheduled", "no_show"):
             for admin_email in db.admin_notify_emails():
                 mailer.send_transactional(admin_email, "booking_admin_notice", {
                     "event": event,
+                    "booking_ref": _booking_ref(booking_id),
+                    "service_title": service_title,
                     "mentor_name": info.get("mentor_name") or "",
                     "candidate_name": info.get("candidate_name") or "",
                     "candidate_email": c_email or "",
                     "session_time": session_time,
+                    # Admin-only: what the customer paid and the split, so ops can act without
+                    # opening the dashboard. Never included in either party's own email.
+                    "invoice": db.get_booking_invoice(booking_id),
+                    "reason": info.get("cancel_reason") or "",
                 })
     except Exception:
         logger.warning("lifecycle email dispatch failed booking=%s event=%s", booking_id, event)
