@@ -615,16 +615,43 @@ def _admin_mentor_changes_submitted(d: dict) -> tuple[str, str]:
 # ── Lifecycle v2 templates (cancel / reschedule / no-show) ──────────────────────
 
 def _booking_cancelled(d: dict) -> tuple[str, str]:
+    """BUG-124: one template, two audiences. The mentor used to receive the customer's copy ("book
+    another session from the mentor directory"), which reads like someone else's mail. BUG-123 adds the
+    reason, and the body now carries the same detail as the reschedule email (service, when it was
+    scheduled in the RECIPIENT's own timezone, booking reference)."""
     name = _e(d.get("recipient_name", "there"))
-    other = d.get("other_name", "the other party")
+    other = _e(d.get("other_name", "the other party"))
+    is_mentor = d.get("audience") == "mentor"
+    by_you = bool(d.get("cancelled_by_you"))
+    reason = (d.get("reason") or "").strip()
+    manage_url = d.get("manage_url") or ""
+
+    if by_you:
+        lead = f"You cancelled this session with <strong>{other}</strong>. We've let them know."
+    elif is_mentor:
+        lead = f"<strong>{other}</strong> cancelled their session with you. The slot is free again on your calendar."
+    else:
+        lead = f"<strong>{other}</strong> cancelled your session."
+
+    rows = _info_row("Session", d.get("service_title", "")) if d.get("service_title") else ""
+    rows += _info_row("Was scheduled for", d.get("session_time", ""))
+    if d.get("booking_ref"):
+        rows += _info_row("Booking reference", d["booking_ref"])
+    if reason:
+        rows += _info_row("Reason given", reason)
+
+    tail = ("Your availability for that slot is open again."
+            if is_mentor else
+            "You can book another session any time from the mentor directory.")
+    cta = _btn(manage_url, "Go to your dashboard" if is_mentor else "Find another mentor") if manage_url else ""
+
     body = (
-        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Your session was cancelled</h1>'
+        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Session cancelled</h1>'
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {name},</p>'
-        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
-        f"Your session with <strong>{_e(other)}</strong> has been cancelled.</p>"
-        + _info_row("Was scheduled for", d.get("session_time", ""))
-        + '<p style="margin:0;font-size:15px;color:#444;line-height:1.6">'
-        "You can book another session any time from the mentor directory.</p>"
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">{lead}</p>'
+        + rows
+        + f'<p style="margin:0;font-size:15px;color:#444;line-height:1.6">{tail}</p>'
+        + cta
     )
     return "Your Immigroov session was cancelled", _base(body)
 

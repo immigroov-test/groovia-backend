@@ -471,12 +471,26 @@ def book_session(
 class CancelBody(BaseModel):
     booking_id: str
     cancelled_by: str = "user"
+    # BUG-123: mandatory for both sides. It goes to the other party's email and is kept for any refund
+    # review, so it is REQUIRED (no default - a default would skip the validator entirely and let an
+    # omitted field through) and an empty or one-character "reason" is rejected.
+    reason: str
 
     @field_validator("cancelled_by")
     @classmethod
     def validate_by(cls, v: str) -> str:
         if v not in ("user", "mentor"):
             raise ValueError("cancelled_by must be 'user' or 'mentor'")
+        return v
+
+    @field_validator("reason")
+    @classmethod
+    def validate_reason(cls, v: str) -> str:
+        v = (v or "").strip()
+        if len(v) < 3:
+            raise ValueError("Please give a reason for the cancellation")
+        if len(v) > 1000:
+            raise ValueError("Please keep the reason under 1000 characters")
         return v
 
 
@@ -494,11 +508,15 @@ def cancel_booking(body: CancelBody, background_tasks: BackgroundTasks, user: Au
         raise HTTPException(status_code=403, detail="You are not authorized to cancel this booking")
 
     try:
+        # Store the reason BEFORE the state change so the notification (which reads the booking) always
+        # sees it, and so a failed cancel doesn't leave a reason for a session that is still live.
+        db.set_booking_cancellation_reason(body.booking_id, body.reason)
         result = db.cancel_booking(body.booking_id, body.cancelled_by)
         status = result.get("status") if isinstance(result, dict) else None
         background_tasks.add_task(
             _notify_parties, body.booking_id,
             "cancelled" if status == "cancelled" else "cancel_requested",
+            None, body.cancelled_by,
         )
         return result
     except ValueError as e:
@@ -971,7 +989,28 @@ def _fmt_iso_in_tz(iso: Optional[str], tz_name: Optional[str]) -> str:
     return f"{stamp} ({city})"
 
 
-def _notify_parties(booking_id: str, event: str, old_slot: Optional[str] = None):
+def _booking_ref(booking_id: str) -> str:
+    """Short human reference for a booking, matching what the session page shows (#8b6826f8), so a
+    customer quoting it to support is quoting the same string we can search on."""
+    return f"#{str(booking_id).split('-')[0]}"
+
+
+def _local_stamp(times: dict, local_key: str, tz_key: str) -> str:
+    """'Mon, Aug 10, 2026 at 3:45 PM (Kolkata)' from booking_times_display, in the RECIPIENT's zone."""
+    local = times.get(local_key)
+    if not local:
+        return ""
+    tz = times.get(tz_key) or "UTC"
+    try:
+        dt = datetime.fromisoformat(str(local).replace("Z", ""))
+        stamp = dt.strftime("%a, %b %d, %Y at %I:%M %p").replace(" 0", " ")
+    except Exception:
+        stamp = str(local)
+    return f"{stamp} ({tz.split('/')[-1].replace('_', ' ')})"
+
+
+def _notify_parties(booking_id: str, event: str, old_slot: Optional[str] = None,
+                    cancelled_by: Optional[str] = None):
     """Dispatch the lifecycle email(s) for a booking event. Runs in a BackgroundTask;
     a mailer failure never affects the action's response. Events mirror the DB's
     notify_booking_event outbox so behaviour stays consistent."""
@@ -995,8 +1034,30 @@ def _notify_parties(booking_id: str, event: str, old_slot: Optional[str] = None)
             mailer.send_transactional(to, template, data)
 
         if event == "cancelled":
-            send(c_email, "booking_cancelled", {"recipient_name": c_name, "other_name": m_name, "session_time": session_time})
-            send(m_email, "booking_cancelled", {"recipient_name": m_name, "other_name": c_name, "session_time": session_time})
+            # BUG-124: both sides used to get the SAME customer-worded email ("book another session
+            # from the mentor directory"), which reads as someone else's mail when it lands in a
+            # mentor's inbox. Each side now gets its own wording, and the body carries the same detail
+            # as the reschedule email: service, when it was scheduled IN THE RECIPIENT'S OWN timezone
+            # (BUG-126), the booking reference, and the reason it was cancelled (BUG-123).
+            times = db.get_booking_times_display(booking_id) or {}
+            reason = info.get("cancel_reason") or ""
+            common = {
+                "service_title": service_title,
+                "booking_ref": _booking_ref(booking_id),
+                "reason": reason,
+            }
+            send(c_email, "booking_cancelled", {
+                **common, "audience": "customer", "recipient_name": c_name, "other_name": m_name,
+                "session_time": _local_stamp(times, "customer_local", "customer_tz") or session_time,
+                "cancelled_by_you": cancelled_by == "user",
+                "manage_url": f"{config.FRONTEND_URL}/mentors",
+            })
+            send(m_email, "booking_cancelled", {
+                **common, "audience": "mentor", "recipient_name": m_name, "other_name": c_name,
+                "session_time": _local_stamp(times, "mentor_local", "mentor_tz") or session_time,
+                "cancelled_by_you": cancelled_by == "mentor",
+                "manage_url": mentor_hub,
+            })
         elif event == "rescheduled":
             # BUG-088: the rescheduled email now carries the SAME detail as the booking email -
             # service, old + new time (each in the recipient's own tz), and the join link.

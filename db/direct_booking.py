@@ -158,6 +158,7 @@ def get_booking_notify_info(booking_id: str) -> Optional[dict[str, Any]]:
         res = (
             _supabase.table("bookings")
             .select("mentor_id, candidate_id, candidate_email, candidate_name, slot_time, notes, "
+                    "cancel_reason, "
                     "service_id, services(title), mentors(display_name, photo_url)")
             .eq("id", booking_id)
             .single()
@@ -188,6 +189,7 @@ def get_booking_notify_info(booking_id: str) -> Optional[dict[str, Any]]:
             "service_title":   svc.get("title") if isinstance(svc, dict) else None,
             "slot_time":       b.get("slot_time"),
             "notes":           (b.get("notes") or "").strip() or None,   # BUG-113
+            "cancel_reason":   (b.get("cancel_reason") or "").strip() or None,   # BUG-123
             "answers":         get_booking_answers(booking_id),           # BUG-113
         }
     except Exception:
@@ -270,6 +272,18 @@ def cancel_booking(booking_id: str, cancelled_by: str = "user") -> dict:
     if not res.data:
         raise ValueError("Booking not found or already cancelled")
     return res.data
+
+
+def set_booking_cancellation_reason(booking_id: str, reason: Optional[str]) -> None:
+    """BUG-123: persist why a session was cancelled. Kept on the booking so the other party's email can
+    quote it and any later refund review has the context."""
+    r = (reason or "").strip()
+    if not r:
+        return
+    try:
+        _supabase.table("bookings").update({"cancel_reason": r[:1000]}).eq("id", booking_id).execute()
+    except Exception:
+        logger.exception("set_booking_cancellation_reason failed booking=%s", booking_id)
 
 
 def get_booking_times_display(booking_id: str) -> Optional[dict]:
