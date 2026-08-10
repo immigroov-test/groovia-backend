@@ -7,6 +7,7 @@ from pydantic import BaseModel, field_validator
 
 import db
 from core.auth import AuthUser, get_current_user
+from services import booking_rules
 
 logger = logging.getLogger("immigroov.routers.availability")
 
@@ -15,18 +16,24 @@ router = APIRouter(prefix="/mentor/availability-v2", tags=["mentor-availability"
 _DAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
 
 
-def _get_mentor_id(user: AuthUser) -> str:
+def _get_mentor(user: AuthUser) -> dict:
     mentor = db.get_mentor_by_profile_id(user.id)
     if not mentor:
         raise HTTPException(status_code=404, detail="No mentor profile for this account")
     if mentor.get("status") not in ("approved", "pending_review"):
         raise HTTPException(status_code=403, detail="Mentor profile not active")
-    return mentor["id"]
+    return mentor
+
+
+def _get_mentor_id(user: AuthUser) -> str:
+    return _get_mentor(user)["id"]
 
 
 # ── Booking rules ──────────────────────────────────────────────────────────────
 
 class BookingRulesBody(BaseModel):
+    """Sanity bounds only. The product limits live in services/booking_rules and are enforced in the
+    handler, where the mentor is known (BUG-045: test profiles are exempt)."""
     days_ahead: int = 30
     min_notice_hours: float = 2.0
     cancel_hours: Optional[int] = None
@@ -34,37 +41,53 @@ class BookingRulesBody(BaseModel):
     @field_validator("days_ahead")
     @classmethod
     def validate_days(cls, v: int) -> int:
-        if v < 1 or v > 90:
-            raise ValueError("Mentees can book between 1 and 90 days ahead")
+        if v < 0 or v > 365:
+            raise ValueError("Booking window must be a sensible number of days")
         return v
 
     @field_validator("min_notice_hours")
     @classmethod
     def validate_notice(cls, v: float) -> float:
-        if v < 0 or v > 24:
-            raise ValueError("Minimum booking notice must be between 0 and 24 hours")
+        if v < 0 or v > 168:
+            raise ValueError("Minimum booking notice must be a sensible number of hours")
         return v
 
     @field_validator("cancel_hours")
     @classmethod
     def validate_cancel(cls, v: Optional[int]) -> Optional[int]:
-        if v is not None and not (2 <= v <= 48):
-            raise ValueError("Cancellation/rescheduling notice must be between 2 and 48 hours")
+        if v is not None and (v < 0 or v > 168):
+            raise ValueError("Cancellation / rescheduling notice must be a sensible number of hours")
         return v
 
 
 @router.get("/rules")
 def get_rules(user: AuthUser = Depends(get_current_user)):
-    mentor_id = _get_mentor_id(user)
+    mentor = _get_mentor(user)
     try:
-        return db.get_availability_rules(mentor_id)
+        rules = db.get_availability_rules(mentor["id"])
     except Exception:
         raise HTTPException(status_code=500, detail="Failed to load booking rules")
+    # BUG-045: ship the limits with the rules so the form validates as you type against the same
+    # numbers the server enforces, instead of keeping a second hardcoded copy in the client.
+    rules = dict(rules or {})
+    rules["limits"] = booking_rules.limits()
+    rules["limits_enforced"] = mentor.get("slug") not in booking_rules.EXEMPT_MENTOR_SLUGS
+    return rules
 
 
 @router.post("/rules")
 def set_rules(body: BookingRulesBody, user: AuthUser = Depends(get_current_user)):
-    mentor_id = _get_mentor_id(user)
+    mentor = _get_mentor(user)
+    mentor_id = mentor["id"]
+    try:                                                    # BUG-045: enforce the product limits
+        booking_rules.validate(
+            days_ahead=body.days_ahead,
+            min_notice_hours=body.min_notice_hours,
+            cancel_hours=body.cancel_hours,
+            mentor_slug=mentor.get("slug"),
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
     try:
         db.set_availability_rules(
             mentor_id=mentor_id,

@@ -8,7 +8,7 @@ from pydantic import BaseModel, field_validator, model_validator
 
 import config
 import db
-from services import mailer, bank_validation, bank_crypto, pricing_input
+from services import mailer, bank_validation, bank_crypto, pricing_input, booking_rules
 from core.auth import AuthUser, get_current_user
 from core.permissions import require_mentor
 
@@ -174,26 +174,17 @@ class BookingRules(BaseModel):
     min_notice_hours: float = 2
     cancel_hours: int = 24
 
-    @field_validator("days_ahead")
-    @classmethod
-    def _cap_days_ahead(cls, v: int) -> int:
-        if not (1 <= v <= 90):
-            raise ValueError("Mentees can book between 1 and 90 days ahead")
-        return v
-
-    @field_validator("min_notice_hours")
-    @classmethod
-    def _cap_min_notice(cls, v: float) -> float:
-        if not (0 <= v <= 24):
-            raise ValueError("Minimum booking notice must be between 0 and 24 hours")
-        return v
-
-    @field_validator("cancel_hours")
-    @classmethod
-    def _cap_cancel_hours(cls, v: int) -> int:
-        if not (2 <= v <= 48):
-            raise ValueError("Cancellation/rescheduling notice must be between 2 and 48 hours")
-        return v
+    # BUG-045: the product limits live in services/booking_rules so signup, profile edit and the
+    # availability page all enforce one set of numbers. A brand-new mentor is never a test profile,
+    # so signup can enforce them here with no exemption.
+    @model_validator(mode="after")
+    def _within_limits(self) -> "BookingRules":
+        booking_rules.validate(
+            days_ahead=self.days_ahead,
+            min_notice_hours=self.min_notice_hours,
+            cancel_hours=self.cancel_hours,
+        )
+        return self
 
 
 class DateOverrideDraft(BaseModel):

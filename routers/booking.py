@@ -38,6 +38,10 @@ JITSI_DOMAIN = "meet.jit.si"
 MEETING_OPEN_BEFORE = timedelta(minutes=5)
 MEETING_GRACE_AFTER = timedelta(minutes=30)
 
+# Hard floor before the session where cancelling is off the table entirely (no refund path left).
+# Mirrors booking_deadline_state() in SQL; surfaced to the client so copy can state it (BUG-119).
+BUFFER_HOURS = 2.0
+
 
 def _parse_ts(ts: Optional[str]) -> Optional[datetime]:
     if not ts:
@@ -151,10 +155,10 @@ def booking_detail(booking_id: str, user: AuthUser = Depends(get_current_user)):
     # Deadline state: buffer < 2h, then 'late' until the mentor's cancel/reschedule notice, else
     # 'free'. Mirrors booking_deadline_state() in SQL so the page and the DB agree on penalties.
     deadline_state = None
+    free_hours = max(float(d.get("cancel_notice_hours") or 24), BUFFER_HOURS)
     if slot:
         hours = (slot - now).total_seconds() / 3600
-        free_hours = max(float(d.get("cancel_notice_hours") or 24), 2)
-        deadline_state = "buffer" if hours < 2 else "late" if hours < free_hours else "free"
+        deadline_state = "buffer" if hours < BUFFER_HOURS else "late" if hours < free_hours else "free"
 
     can_pay = bool(is_candidate and unpaid_hold and not is_past)
     can_join = bool((is_candidate or is_mentor) and join_open)
@@ -184,6 +188,10 @@ def booking_detail(booking_id: str, user: AuthUser = Depends(get_current_user)):
         "reschedule_count": d.get("reschedule_count") or 0,
         "no_show_by": d.get("no_show_by"),
         "deadline_state": deadline_state,
+        # BUG-119: the real windows, so the page states this mentor's actual notice period instead of
+        # a hardcoded "2 hours" / "24 hours" that contradicts whatever they set in their booking rules.
+        "cancel_notice_hours": free_hours,
+        "buffer_hours": BUFFER_HOURS,
         "opens_at": opens_at.isoformat() if opens_at else None,
         "closes_at": closes_at.isoformat() if closes_at else None,   # BUG-105: joinable until the END (+grace)
         "join_open": join_open,
