@@ -42,27 +42,40 @@ def _fmt_time(times: dict | None, local_key: str, tz_key: str) -> str:
 
 
 def send_session_reminders() -> dict:
-    """24h + 30min reminders to the candidate (BUG-094)."""
+    """24h + 30min reminders to BOTH the candidate and the mentor (BUG-094).
+
+    One claim_reminder() per (booking, kind) still gates the whole pair - that's the
+    existing atomic dedup guarantee and stays untouched, so a retried/overlapping tick
+    still can't double-send. Each recipient's send is its own try/except so a failure
+    on one side (e.g. a bad mentor email) never blocks the other party's reminder.
+    """
     sent = 0
     for kind, (lo, hi) in _REMINDER_WINDOWS.items():
         for bid in db.due_unreminded_bookings(kind, lo, hi):
             if not db.claim_reminder(bid, kind):
                 continue
-            try:
-                info = db.get_booking_notify_info(bid) or {}
-                to = info.get("candidate_email")
+            info = db.get_booking_notify_info(bid) or {}
+            times = db.get_booking_times_display(bid)
+            meeting_url = f"{config.FRONTEND_URL}/meeting/{bid}"
+            recipients = (
+                (info.get("candidate_email"), info.get("candidate_name"),
+                 info.get("mentor_name") or "your mentor", "customer_local", "customer_tz"),
+                (info.get("mentor_email"), info.get("mentor_name"),
+                 info.get("candidate_name") or "your attendee", "mentor_local", "mentor_tz"),
+            )
+            for to, recipient_name, other_name, local_key, tz_key in recipients:
                 if not to:
                     continue
-                times = db.get_booking_times_display(bid)
-                mailer.send_transactional(to, f"session_reminder_{kind}", {
-                    "recipient_name": info.get("candidate_name") or "there",
-                    "other_party_name": info.get("mentor_name") or "your mentor",
-                    "meeting_url": f"{config.FRONTEND_URL}/meeting/{bid}",
-                    "session_time": _fmt_time(times, "customer_local", "customer_tz"),
-                })
-                sent += 1
-            except Exception:
-                logger.warning("reminder send failed booking=%s kind=%s", bid, kind)
+                try:
+                    mailer.send_transactional(to, f"session_reminder_{kind}", {
+                        "recipient_name": recipient_name or "there",
+                        "other_party_name": other_name,
+                        "meeting_url": meeting_url,
+                        "session_time": _fmt_time(times, local_key, tz_key),
+                    })
+                    sent += 1
+                except Exception:
+                    logger.warning("reminder send failed booking=%s kind=%s to=%s", bid, kind, to)
     return {"reminders_sent": sent}
 
 
