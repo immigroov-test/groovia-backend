@@ -155,3 +155,19 @@ if EMAIL_TEST_REDIRECT and not MOCK_SERVICES:
         "being redirected to this one inbox, not real recipients. Unset it in production.",
         stacklevel=1,
     )
+
+# ── Video calls (Jitsi) ────────────────────────────────────────────────────────
+# BUG-120: the free meet.jit.si REFUSES to host an embedded call for more than 5 minutes ("Embedding
+# meet.jit.si is only meant for demo purposes"), which kills every 30-minute session mid-call. That is
+# their policy, not something we can code around: a production embed needs Jitsi as a Service (8x8) or
+# a self-hosted server. Both are a domain + credentials, so they are env-driven here and the code path
+# is already in place - set these and the limit is gone with no deploy of new logic.
+#   JITSI_DOMAIN       8x8.vc for JaaS, or your own server. Defaults to the demo server.
+#   JITSI_APP_ID       JaaS AppID (vpaas-magic-cookie-...). Enables JWT auth when set.
+#   JITSI_PRIVATE_KEY  JaaS RSA private key (PEM) used to sign the room token.
+#   JITSI_KID          JaaS key id that pairs with the private key.
+JITSI_DOMAIN      = os.getenv("JITSI_DOMAIN", "meet.jit.si").strip()
+JITSI_APP_ID      = os.getenv("JITSI_APP_ID", "").strip()
+JITSI_PRIVATE_KEY = os.getenv("JITSI_PRIVATE_KEY", "").strip().replace("\\n", "\n")
+JITSI_KID         = os.getenv("JITSI_KID", "").strip()
+JITSI_JAAS_READY  = bool(JITSI_APP_ID and JITSI_PRIVATE_KEY and JITSI_KID)

@@ -31,10 +31,10 @@ def _raise_booking_error(e: Exception, fallback: str) -> None:
         raise HTTPException(status_code=400, detail=getattr(e, "message", None) or str(e))
     raise HTTPException(status_code=500, detail=fallback)
 
-# Jitsi 1:1 video. The room is revealed only inside [start - 5min, end + 30min], and
-# only to the booking's candidate or mentor. meet.jit.si is the free public server;
-# swapping to a self-hosted/JWT domain later is just these two constants + a token.
-JITSI_DOMAIN = "meet.jit.si"
+# Jitsi 1:1 video. The room is revealed only inside [start - 5min, end + 30min], and only to the
+# booking's candidate or mentor. The server comes from config (BUG-120): the default demo server cuts
+# an EMBEDDED call off after 5 minutes, so production needs JaaS or a self-hosted domain.
+JITSI_DOMAIN = config.JITSI_DOMAIN
 MEETING_OPEN_BEFORE = timedelta(minutes=5)
 MEETING_GRACE_AFTER = timedelta(minutes=30)
 
@@ -76,6 +76,28 @@ def _deadline_state(slot: Optional[datetime], now: datetime, cancel_notice_hours
     state = "buffer" if hours < BUFFER_HOURS else "late" if hours < free_hours else "free"
     return state, free_hours
 
+def _jaas_token(room: str, display_name: str, is_moderator: bool) -> Optional[str]:
+    """Signed room token for Jitsi as a Service, or None on the demo server (which takes no token).
+
+    Only JaaS/self-hosted lifts the 5-minute embed cut-off (BUG-120), and JaaS authenticates every
+    join with an RS256 JWT scoped to one room. Failing to sign must never block the call, so a bad key
+    logs and degrades to no token rather than 500-ing someone out of their session."""
+    if not config.JITSI_JAAS_READY:
+        return None
+    try:
+        import jwt as _jwt
+        now = int(datetime.now(timezone.utc).timestamp())
+        payload = {
+            "aud": "jitsi", "iss": "chat", "sub": config.JITSI_APP_ID,
+            "room": room, "exp": now + 4 * 3600, "nbf": now - 60,
+            "context": {"user": {"name": display_name or "Guest", "moderator": is_moderator}},
+        }
+        return _jwt.encode(payload, config.JITSI_PRIVATE_KEY, algorithm="RS256",
+                           headers={"kid": config.JITSI_KID})
+    except Exception:
+        logger.exception("jaas token signing failed; joining without one")
+        return None
+
 
 @router.get("/{booking_id}/room")
 def meeting_room(booking_id: str, user: AuthUser = Depends(get_current_user)):
@@ -112,7 +134,10 @@ def meeting_room(booking_id: str, user: AuthUser = Depends(get_current_user)):
     room = db.ensure_meeting_room(booking_id)
     if not room:
         raise HTTPException(status_code=500, detail="Could not prepare the meeting room")
-    return {"open": True, "domain": JITSI_DOMAIN, "room": room, **base}
+    # JaaS rooms are namespaced by the AppID and need a signed token; the demo server takes neither.
+    full_room = f"{config.JITSI_APP_ID}/{room}" if config.JITSI_JAAS_READY else room
+    return {"open": True, "domain": JITSI_DOMAIN, "room": full_room,
+            "jwt": _jaas_token(room, display_name, party == "mentor"), **base}
 
 
 class AttendanceBody(BaseModel):
@@ -817,8 +842,30 @@ class ResolveNoShowBody(BaseModel):
     choice: str
 
 
+def _notify_refund_request(booking_id: str) -> None:
+    """Tell the admins a customer has asked for a refund after a mentor no-show, so someone can review
+    it. Deliberately admin-only: the customer already sees "under review" in the app."""
+    try:
+        info = db.get_booking_notify_info(booking_id) or {}
+        inv = db.get_booking_invoice(booking_id)
+        for admin_email in db.admin_notify_emails():
+            mailer.send_transactional(admin_email, "payment_admin_notice", {
+                "kind": "refund_requested",
+                "booking_ref": _booking_ref(booking_id),
+                "service_title": info.get("service_title") or "",
+                "mentor_name": info.get("mentor_name") or "",
+                "candidate_name": info.get("candidate_name") or "",
+                "candidate_email": info.get("candidate_email") or "",
+                "amount": (mailer.format_money(float(inv["total"]), inv["currency"]) if inv else ""),
+                "failure_reason": "Mentor no-show - customer requested a refund. Needs manual review.",
+            })
+    except Exception:
+        logger.warning("refund-request admin email skipped booking=%s", booking_id)
+
+
 @router.post("/no-show/resolve-mentor")
-def resolve_mentor_no_show(body: ResolveNoShowBody, user: AuthUser = Depends(get_current_user)):
+def resolve_mentor_no_show(body: ResolveNoShowBody, background_tasks: BackgroundTasks,
+                           user: AuthUser = Depends(get_current_user)):
     """User chooses how to resolve a mentor no-show: rebook_same | rebook_different | refund."""
     principals = db.get_booking_principals(body.booking_id)
     if not principals:
@@ -826,7 +873,12 @@ def resolve_mentor_no_show(body: ResolveNoShowBody, user: AuthUser = Depends(get
     if principals.get("candidate_id") != user.id:
         raise HTTPException(status_code=403, detail="Only the attendee can resolve a mentor no-show")
     try:
-        return db.resolve_mentor_no_show(body.booking_id, body.choice)
+        result = db.resolve_mentor_no_show(body.booking_id, body.choice)
+        # BUG-121: a refund after a no-show is REVIEWED by a person, not paid automatically, so the
+        # request has to reach an admin. The customer is told it is under review, never that it is done.
+        if body.choice == "refund":
+            background_tasks.add_task(_notify_refund_request, body.booking_id)
+        return result
     except Exception as e:
         msg = str(e)
         if "no-show" in msg.lower() or "Unknown choice" in msg:

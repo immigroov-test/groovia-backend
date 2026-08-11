@@ -955,7 +955,8 @@ def _payout_paid(d: dict) -> tuple[str, str]:
 def _payment_admin_notice(d: dict) -> tuple[str, str]:
     """Ops copy for money events. Admin is the only audience that sees both sides' figures."""
     kind = d.get("kind", "payment")
-    titles = {"failed": "Payment failed", "refund": "Refund issued", "payout": "Payout marked paid"}
+    titles = {"failed": "Payment failed", "refund": "Refund issued", "payout": "Payout marked paid",
+              "refund_requested": "Refund REQUESTED - needs review"}
     title = titles.get(kind, "Payment event")
     rows: list[tuple[str, str]] = []
     for label, key in (("Booking reference", "booking_ref"), ("Session", "service_title"),

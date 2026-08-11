@@ -332,7 +332,9 @@ def get_mentor_by_profile_id(profile_id: str) -> Optional[dict[str, Any]]:
         .select("id, slug, display_name, status, session_duration_minutes, rejection_reason, "
                 "headline, bio, photo_url, phone, country, home_country_code, served_countries, "
                 "city, timezone, languages, social_links, "
-                "expertise_country_codes, expertise_categories, professional_domains, "
+                # specializations is edited on the profile form now, so it must be fetched or a save
+                # sends [] and wipes it - the same trap served_countries was in (BUG-110/128).
+                "expertise_country_codes, expertise_categories, professional_domains, specializations, "
                 "years_lived_experience, years_professional_experience, public_notes, submission_count, "
                 "hourly_rate, currency, currency_rates, smart_pricing, needs_onboarding, "
                 "pending_changes, pending_submitted_at")
@@ -1539,5 +1541,4 @@ def upsert_ai_event(
         }).execute()
     except Exception:
         logger.exception("Failed to log ai_event (thread=%s)", thread_id)
-
 
