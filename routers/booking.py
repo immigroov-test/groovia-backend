@@ -136,8 +136,13 @@ def meeting_room(booking_id: str, user: AuthUser = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail="Could not prepare the meeting room")
     # JaaS rooms are namespaced by the AppID and need a signed token; the demo server takes neither.
     full_room = f"{config.JITSI_APP_ID}/{room}" if config.JITSI_JAAS_READY else room
-    return {"open": True, "domain": JITSI_DOMAIN, "room": full_room,
-            "jwt": _jaas_token(room, display_name, party == "mentor"), **base}
+    token = _jaas_token(room, display_name, party == "mentor")
+    # embed=False on the public server: it cuts an EMBEDDED call at 5 minutes, so the client opens the
+    # room in its own tab instead (same server, no cap). Once JaaS/self-hosted is configured the call
+    # goes back inside the page with no client change.
+    join_url = f"https://{JITSI_DOMAIN}/{full_room}" + (f"?jwt={token}" if token else "")
+    return {"open": True, "domain": JITSI_DOMAIN, "room": full_room, "jwt": token,
+            "embed": config.JITSI_JAAS_READY, "join_url": join_url, **base}
 
 
 class AttendanceBody(BaseModel):
