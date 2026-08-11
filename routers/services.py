@@ -110,6 +110,40 @@ class ServiceUpdateBody(BaseModel):
     is_active: bool
 
 
+# BUG-137: a mentor previously had no way to edit an existing service at all - only toggle
+# active/delete. This is deliberately scoped to the service's TEXT/DETAIL fields (title,
+# description, category, tags); duration and price are left untouched here since they're tied to
+# the one-service-per-duration slot model and the hourly-rate-derived pricing business rule
+# (BUG-135/create_service) - editing those isn't what "view and edit the details of an existing
+# service" was asking for, and changing that pricing model is out of scope for this fix.
+class ServiceEditBody(BaseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    category: Optional[str] = None
+    tags: Optional[list[str]] = None
+
+    @field_validator("title")
+    @classmethod
+    def validate_title(cls, v: Optional[str]) -> Optional[str]:
+        if v is not None and not v.strip():
+            raise ValueError("Title cannot be empty")
+        return v
+
+    @field_validator("tags")
+    @classmethod
+    def validate_tags(cls, v: Optional[list[str]]) -> Optional[list[str]]:
+        if v is None:
+            return None
+        cleaned: list[str] = []
+        for t in v:
+            t = (t or "").strip()[:40]
+            if t and t.lower() not in {c.lower() for c in cleaned}:
+                cleaned.append(t)
+        if len(cleaned) > 5:
+            raise ValueError("You can add up to 5 tags")
+        return cleaned
+
+
 def _assert_service_owner(service_id: str, mentor_id: str) -> None:
     if db.get_service_mentor_id(service_id) != mentor_id:
         raise HTTPException(status_code=403, detail="You do not own this service")
@@ -122,6 +156,32 @@ def set_service_active(service_id: str, body: ServiceUpdateBody, mentor: dict = 
         db.set_service_active(service_id, body.is_active)
         return {"updated": True}
     except Exception:
+        raise HTTPException(status_code=500, detail="Failed to update service")
+
+
+@router.post("/{service_id}/update")
+def update_service(service_id: str, body: ServiceEditBody, mentor: dict = Depends(require_mentor)):
+    """Edit an existing service's title/description/category/tags in place, whatever its current
+    status (approved/pending/rejected) - the same permission level the mentor already has to
+    toggle it active or delete it. Does not touch or re-trigger the admin approval workflow;
+    that stays governed entirely by /approve and /reject."""
+    _assert_service_owner(service_id, mentor["id"])
+    fields = body.model_dump(exclude_unset=True)
+    if not fields:
+        raise HTTPException(status_code=400, detail="No fields to update")
+    if "title" in fields and fields["title"] is not None:
+        fields["title"] = fields["title"].strip()
+    if "description" in fields:
+        fields["description"] = (fields["description"] or "").strip() or None
+    if "category" in fields:
+        # BUG-118: never let an edit put category back to NULL - same safe default the create
+        # path and the migrated-services backfill both use.
+        fields["category"] = (fields["category"] or "").strip() or "General Guidance"
+    try:
+        db.update_service(service_id, fields)
+        return {"updated": True}
+    except Exception:
+        logger.exception("update_service failed id=%s", service_id)
         raise HTTPException(status_code=500, detail="Failed to update service")
 
 
