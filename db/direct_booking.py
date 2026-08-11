@@ -589,6 +589,36 @@ def set_service_tags(service_id: str, tags: list[str]) -> None:
         logger.warning("set_service_tags: could not save tags (column not migrated yet?)")
 
 
+_SERVICE_EDITABLE_FIELDS = {"title", "description", "category", "tags"}
+
+
+def update_service(service_id: str, fields: dict[str, Any]) -> None:
+    """Edit an existing service's title/description/category/tags in place (BUG-137). Ownership
+    is checked by the router before this is called; here we only guard which columns can be
+    written, same as save_mentor_profile_live does for the mentor row."""
+    safe = {k: v for k, v in fields.items() if k in _SERVICE_EDITABLE_FIELDS}
+    if not safe:
+        return
+    if "tags" in safe:
+        clean: list[str] = []
+        for t in (safe["tags"] or []):
+            t = (t or "").strip()
+            if t and t.lower() not in {c.lower() for c in clean}:
+                clean.append(t)
+        safe["tags"] = clean[:MAX_SERVICE_TAGS]
+    try:
+        _supabase.table("services").update(safe).eq("id", service_id).execute()
+    except Exception:
+        if "tags" in safe:
+            # Same defensive fallback list_services/create_service use - the tags column may not
+            # be migrated on this environment yet.
+            safe.pop("tags")
+            if safe:
+                _supabase.table("services").update(safe).eq("id", service_id).execute()
+        else:
+            raise
+
+
 def set_service_active(service_id: str, is_active: bool) -> None:
     _supabase.rpc("service_set_active", {"p_id": service_id, "p_active": is_active}).execute()
 
