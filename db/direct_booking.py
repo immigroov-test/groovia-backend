@@ -106,17 +106,24 @@ def get_booking_principals(booking_id: str) -> Optional[dict[str, Any]]:
 
 
 def get_booking_reschedule_target(booking_id: str) -> Optional[dict[str, Any]]:
-    """mentor_id + service_id + candidate_id + current slot_time for a booking - used
-    to load the reschedule slot picker for its owner."""
+    """mentor_id + service_id + candidate_id + current slot_time + this mentor's own
+    cancel/reschedule notice window (BUG-119) for a booking - used to load the reschedule
+    slot picker for its owner, and to classify the deadline the SAME way booking_detail()
+    does, so the two pages can never disagree about when a reschedule needs approval."""
     try:
         res = (
             _supabase.table("bookings")
-            .select("candidate_id, mentor_id, service_id, slot_time")
+            .select("candidate_id, mentor_id, service_id, slot_time, mentors(cancel_notice_hours)")
             .eq("id", booking_id)
             .single()
             .execute()
         )
-        return res.data or None
+        b = res.data
+        if not b:
+            return None
+        mnt = b.pop("mentors", None) or {}
+        b["cancel_notice_hours"] = mnt.get("cancel_notice_hours") if isinstance(mnt, dict) else None
+        return b
     except Exception:
         return None
 
