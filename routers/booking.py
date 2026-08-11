@@ -62,6 +62,21 @@ def _meeting_party(meeting: dict, user_id: str) -> Optional[str]:
     return None
 
 
+def _deadline_state(slot: Optional[datetime], now: datetime, cancel_notice_hours) -> tuple[Optional[str], float]:
+    """(deadline_state, free_hours) - buffer < BUFFER_HOURS, then 'late' until THIS mentor's own
+    cancel/reschedule notice window, else 'free'. Single source of truth for both booking_detail()
+    and reschedule_slots() (BUG-119) - they used to compute this separately and reschedule_slots()
+    had its own hardcoded 24h floor, so the reschedule page could contradict the session detail
+    page for any mentor whose configured notice wasn't exactly 24h. Mirrors booking_deadline_state()
+    in SQL."""
+    free_hours = max(float(cancel_notice_hours or 24), BUFFER_HOURS)
+    if not slot:
+        return None, free_hours
+    hours = (slot - now).total_seconds() / 3600
+    state = "buffer" if hours < BUFFER_HOURS else "late" if hours < free_hours else "free"
+    return state, free_hours
+
+
 @router.get("/{booking_id}/room")
 def meeting_room(booking_id: str, user: AuthUser = Depends(get_current_user)):
     """Reveal the Jitsi room for a session - only to its candidate/mentor, and only
@@ -154,11 +169,7 @@ def booking_detail(booking_id: str, user: AuthUser = Depends(get_current_user)):
 
     # Deadline state: buffer < 2h, then 'late' until the mentor's cancel/reschedule notice, else
     # 'free'. Mirrors booking_deadline_state() in SQL so the page and the DB agree on penalties.
-    deadline_state = None
-    free_hours = max(float(d.get("cancel_notice_hours") or 24), BUFFER_HOURS)
-    if slot:
-        hours = (slot - now).total_seconds() / 3600
-        deadline_state = "buffer" if hours < BUFFER_HOURS else "late" if hours < free_hours else "free"
+    deadline_state, free_hours = _deadline_state(slot, now, d.get("cancel_notice_hours"))
 
     can_pay = bool(is_candidate and unpaid_hold and not is_past)
     can_join = bool((is_candidate or is_mentor) and join_open)
@@ -280,7 +291,8 @@ def reschedule_slots(
 ):
     """Available slots for rescheduling a booking (its own mentor + service), plus the
     current slot and deadline state. Owner-only."""
-    from datetime import date as _date, timedelta, timezone as _tz
+    from datetime import date as _date
+
     target = db.get_booking_reschedule_target(booking_id)
     if not target:
         raise HTTPException(status_code=404, detail="Booking not found")
@@ -292,20 +304,19 @@ def reschedule_slots(
     p_to = to_date or (today + timedelta(days=30))
 
     slot_iso = target.get("slot_time")
-    deadline: Optional[str] = None
-    if slot_iso:
-        try:
-            st = datetime.fromisoformat(str(slot_iso).replace("Z", "+00:00"))
-            hours = (st - datetime.now(_tz.utc)).total_seconds() / 3600
-            deadline = "buffer" if hours < 2 else "late" if hours < 24 else "free"
-        except Exception:
-            deadline = None
+    # BUG-119: same helper (and same source - this mentor's own cancel_notice_hours) as
+    # booking_detail(), so this page can never disagree with the session detail page about
+    # whether a reschedule this close to the session needs the mentor's approval.
+    deadline, free_hours = _deadline_state(_parse_ts(slot_iso), datetime.now(timezone.utc), target.get("cancel_notice_hours"))
     # If the MENTOR proposed a reschedule, the page defaults to their proposed time frame (with a
     # "see all my available times" option). offer = {id, range_start, range_end} or None.
     offer = db.get_active_mentor_proposal(booking_id)
     try:
         slots = db.get_available_slots(target["mentor_id"], target["service_id"], str(p_from), str(p_to))
-        return {"slots": slots, "current_slot": slot_iso, "deadline_state": deadline, "offer": offer}
+        return {
+            "slots": slots, "current_slot": slot_iso, "deadline_state": deadline, "offer": offer,
+            "cancel_notice_hours": free_hours,
+        }
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
     except Exception:
