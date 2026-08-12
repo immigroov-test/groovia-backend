@@ -5,7 +5,7 @@ import logging
 import time
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import BackgroundTasks, APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
 
 import config
@@ -44,7 +44,8 @@ def set_guest(user: AuthUser = Depends(get_current_user)):
 
 
 @router.post("/sync")
-def sync_account(body: SyncBody = SyncBody(), user: AuthUser = Depends(get_current_user)):
+def sync_account(background_tasks: BackgroundTasks, body: SyncBody = SyncBody(),
+                 user: AuthUser = Depends(get_current_user)):
     """Run right after login/signup. Three idempotent jobs:
     1. Link a pre-approved mentor (mentors row matched by email, no account yet).
     2. Backfill the profile's name (the signup trigger left it null; the name is
@@ -53,6 +54,14 @@ def sync_account(body: SyncBody = SyncBody(), user: AuthUser = Depends(get_curre
     mentor = db.link_mentor_by_email(user.id, user.email)
     db.backfill_profile_name(user.id, body.full_name)
     linked_bookings = db.link_guest_bookings(user.id, user.email)
+    # BUG-147: new customers never got a welcome (mentors get theirs on approval). Claimed once per
+    # account, since this endpoint runs on every login, and skipped for mentors who get their own.
+    if not mentor and user.email and db.claim_welcome_email(user.id):
+        background_tasks.add_task(
+            mailer.send_transactional, user.email, "welcome_candidate",
+            {"candidate_name": (body.full_name or "").strip() or "there",
+             "platform_url": config.FRONTEND_URL},
+        )
     return {
         "linked": bool(mentor),
         "role": "mentor" if mentor else "candidate",

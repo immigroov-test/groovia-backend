@@ -10,18 +10,17 @@ from datetime import datetime
 
 import config
 import db
-from services import mailer
+from services import mailer, policy
 
 logger = logging.getLogger("immigroov.services.notifications")
 
 # Window each reminder fires in, in minutes from now. Kept ~wider than the ~5-min dispatcher
 # tick so a session is never skipped between ticks; the per-(booking,kind) claim prevents
 # repeats within the window.
-_REMINDER_WINDOWS = {
-    "24h":   (23 * 60 + 45, 24 * 60 + 15),
-    "30min": (20, 40),   # BUG-094: second reminder half an hour before (was 1h)
-}
-_ATTEND_WINDOW = (45, 75)   # mentor nudge, same ~1h-out window
+# The windows live in services/policy so the schedule and the sentences describing it in emails can
+# never drift apart (BUG-094 changed 1h -> 30min and the confirmation email kept promising the old one).
+_REMINDER_WINDOWS = policy.REMINDER_WINDOWS
+_ATTEND_WINDOW = policy.ATTENDANCE_WINDOW   # mentor nudge, same ~1h-out window
 
 
 def _fmt_time(times: dict | None, local_key: str, tz_key: str) -> str:

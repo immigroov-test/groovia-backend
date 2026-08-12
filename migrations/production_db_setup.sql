@@ -2904,6 +2904,10 @@ CREATE INDEX IF NOT EXISTS idx_payment_reconciliation_log_booking ON payment_rec
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS payment_hold_expires_at TIMESTAMPTZ;  -- 10-min reservation hold
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS customer_currency TEXT;
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS notes TEXT;  -- customer's "what should my mentor prepare" note (BUG-113)
+
+-- BUG-147: one-shot marker for the new-customer welcome email. /auth/sync runs on EVERY login, so
+-- without this the welcome would go out again on each sign-in.
+ALTER TABLE profiles ADD COLUMN IF NOT EXISTS welcome_sent_at TIMESTAMPTZ;
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS fx_customer_inr NUMERIC;  -- INR per 1 customer-currency unit
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS fx_mentor_inr   NUMERIC;  -- INR per 1 mentor-currency unit
 

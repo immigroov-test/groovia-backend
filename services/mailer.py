@@ -10,6 +10,7 @@ from typing import Optional
 import httpx
 
 import config
+from services import policy
 
 logger = logging.getLogger("immigroov.mailer")
 
@@ -384,7 +385,7 @@ def _booking_confirmed_candidate(d: dict) -> tuple[str, str]:
         + _invoice_block(d.get("invoice"), d.get("booking_ref", ""))
         + _prep_block(d.get("notes", ""), d.get("answers"), "What you shared with your mentor")
         + '<p style="margin:16px 0 0;font-size:15px;color:#444;line-height:1.6">'
-        "You'll receive a reminder 24 hours and 30 minutes before the session."
+        f"You'll receive a reminder {policy.reminder_notice()} before the session."
         "</p>"
         + (guest_block if is_guest else (
             (_btn(url, "Join meeting") if url else "")
@@ -435,15 +436,15 @@ def _session_reminder_24h(d: dict) -> tuple[str, str]:
     other = d.get("other_party_name", "your mentor")
     url = d.get("meeting_url", "")
     body = (
-        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Your session is tomorrow</h1>'
+        f'<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Your session is in {policy.reminder_label("24h")}</h1>'
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {recipient},</p>'
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
-        f"Just a reminder that your session with <strong>{_e(other)}</strong> is tomorrow."
+        f"Just a reminder that your session with <strong>{_e(other)}</strong> is in about {policy.reminder_label('24h')}."
         "</p>"
         + _info_row("Date & Time", d.get("session_time", ""))
         + (_btn(url, "Join meeting") if url else "")
     )
-    return f"Reminder: your session with {other} is tomorrow", _base(body)
+    return f"Reminder: your session with {other} is in {policy.reminder_label('24h')}", _base(body)
 
 
 def _session_reminder_1h(d: dict) -> tuple[str, str]:
@@ -466,15 +467,15 @@ def _session_reminder_30min(d: dict) -> tuple[str, str]:
     other = d.get("other_party_name", "your mentor")
     url = d.get("meeting_url", "")
     body = (
-        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Your session starts in 30 minutes</h1>'
+        f'<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Your session starts in {policy.reminder_label("30min")}</h1>'
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {recipient},</p>'
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
-        f"Your session with <strong>{_e(other)}</strong> starts in about 30 minutes. Make sure you're ready!"
+        f"Your session with <strong>{_e(other)}</strong> starts in about {policy.reminder_label('30min')}. Make sure you're ready!"
         "</p>"
         + _session_rows(d)
         + (_btn(url, "Join meeting") if url else "")
     )
-    return f"Your session with {other} starts in 30 minutes", _base(body)
+    return f"Your session with {other} starts in {policy.reminder_label('30min')}", _base(body)
 
 
 def _mentor_attendance_check(d: dict) -> tuple[str, str]:
@@ -562,7 +563,7 @@ def _mentor_application_received(d: dict) -> tuple[str, str]:
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {name},</p>'
         '<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
         "Thanks for applying to become a mentor on Immigroov. Our team will review your profile and "
-        "get back to you within <strong>1-2 business days</strong>."
+        f"get back to you within <strong>{policy.SUPPORT_REPLY_DAYS} business days</strong>."
         "</p>"
         '<p style="margin:0;font-size:15px;color:#444;line-height:1.6">'
         "While you wait, you can set your weekly availability so it's ready the moment you're approved."
@@ -953,10 +954,10 @@ def _refund_issued(d: dict) -> tuple[str, str]:
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {name},</p>'
         '<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
         "We've issued a refund to the payment method you originally used. Banks usually take "
-        "<strong>5-7 business days</strong> to show it on your statement.</p>"
+        f"<strong>{policy.REFUND_BUSINESS_DAYS} business days</strong> to show it on your statement.</p>"
         + rows
         + '<p style="margin:0;font-size:15px;color:#444;line-height:1.6">'
-        "The amount refunded follows our refund policy. If it hasn't arrived after 7 business days, "
+        f"The amount refunded follows our refund policy. If it hasn't arrived after {policy.REFUND_CHASE_DAYS} business days, "
         'reply to this email with your booking reference and we\'ll chase it.</p>'
         + _btn(f"{config.FRONTEND_URL}/terms", "Read the refund policy")
     )
@@ -1079,7 +1080,7 @@ def _auth_signup_confirm(d: dict) -> tuple[str, str]:
     return _auth_link_email(
         "Confirm your Immigroov account", "Confirm your Immigroov account",
         "Click below to confirm your email and finish setting up your account.",
-        "Confirm my account", "This link expires in 24 hours.", d,
+        "Confirm my account", f"This link expires in {policy.SIGNUP_LINK_EXPIRY}.", d,
     )
 
 
@@ -1095,7 +1096,7 @@ def _auth_recovery(d: dict) -> tuple[str, str]:
     return _auth_link_email(
         "Reset your Immigroov password", "Reset your Immigroov password",
         "Click below to choose a new password. If you didn't request this, you can ignore this email.",
-        "Reset password", "This link expires in 1 hour.", d,
+        "Reset password", f"This link expires in {policy.RESET_LINK_EXPIRY}.", d,
     )
 
 

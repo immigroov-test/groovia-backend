@@ -982,6 +982,22 @@ def get_email_account_status(email: str) -> dict:
         return {"exists": False, "has_password": False, "providers": [], "oauth_only": False, "confirmed": False}
 
 
+def claim_welcome_email(profile_id: str) -> bool:
+    """True exactly once per account: stamps welcome_sent_at and reports whether THIS call won it.
+    /auth/sync runs on every login, so the send has to be claimed, not just checked."""
+    if not profile_id:
+        return False
+    try:
+        res = (_supabase.table("profiles")
+               .update({"welcome_sent_at": datetime.now(timezone.utc).isoformat()})
+               .eq("id", profile_id).is_("welcome_sent_at", "null")
+               .execute())
+        return bool(res.data)
+    except Exception:
+        logger.exception("claim_welcome_email failed profile=%s", profile_id)
+        return False
+
+
 def get_profile_role(profile_id: str) -> Optional[str]:
     """Return the app-level role for a profile (candidate|mentor|admin), or None if not found."""
     if not profile_id:

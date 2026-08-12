@@ -11,7 +11,7 @@ from pydantic import BaseModel, EmailStr, field_validator
 import config
 import db
 from core.auth import AuthUser, get_current_user, get_current_user_optional
-from services import mailer
+from services import mailer, policy
 from services.ics import build_ics
 
 logger = logging.getLogger("immigroov.routers.booking")
@@ -35,12 +35,12 @@ def _raise_booking_error(e: Exception, fallback: str) -> None:
 # booking's candidate or mentor. The server comes from config (BUG-120): the default demo server cuts
 # an EMBEDDED call off after 5 minutes, so production needs JaaS or a self-hosted domain.
 JITSI_DOMAIN = config.JITSI_DOMAIN
-MEETING_OPEN_BEFORE = timedelta(minutes=5)
-MEETING_GRACE_AFTER = timedelta(minutes=30)
+MEETING_OPEN_BEFORE = timedelta(minutes=policy.MEETING_OPEN_BEFORE_MIN)
+MEETING_GRACE_AFTER = timedelta(minutes=policy.MEETING_GRACE_AFTER_MIN)
 
 # Hard floor before the session where cancelling is off the table entirely (no refund path left).
 # Mirrors booking_deadline_state() in SQL; surfaced to the client so copy can state it (BUG-119).
-BUFFER_HOURS = 2.0
+BUFFER_HOURS = policy.BUFFER_HOURS
 
 
 def _parse_ts(ts: Optional[str]) -> Optional[datetime]:
@@ -233,6 +233,10 @@ def booking_detail(booking_id: str, user: AuthUser = Depends(get_current_user)):
         # a hardcoded "2 hours" / "24 hours" that contradicts whatever they set in their booking rules.
         "cancel_notice_hours": free_hours,
         "buffer_hours": BUFFER_HOURS,
+        # The page states these percentages in its cancellation copy; sending them means the wording
+        # follows services/policy instead of being retyped in the client (BUG-147).
+        "late_cancel_fee_pct": policy.LATE_CANCEL_FEE_PCT,
+        "mentor_penalty_pct": policy.MENTOR_NO_SHOW_PENALTY_PCT,
         "opens_at": opens_at.isoformat() if opens_at else None,
         "closes_at": closes_at.isoformat() if closes_at else None,   # BUG-105: joinable until the END (+grace)
         "join_open": join_open,
