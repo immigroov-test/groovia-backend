@@ -1023,6 +1023,7 @@ def _send_booking_confirmation(
                     "notes": notes or "",
                     "answers": answers,
                     "meeting_url": meeting_url,
+                    "booking_ref": _booking_ref(booking_id),
                 },
                 attachments=ics_att,
             )
@@ -1152,23 +1153,34 @@ def _notify_parties(booking_id: str, event: str, old_slot: Optional[str] = None,
             cust_new, mentor_new = _new("customer_local", "customer_tz"), _new("mentor_local", "mentor_tz")
             send(c_email, "booking_rescheduled", {
                 "recipient_name": c_name, "other_name": m_name, "service_title": service_title,
+                "booking_ref": _booking_ref(booking_id),
                 "old_time": _fmt_iso_in_tz(old_slot, times.get("customer_tz")), "new_time": cust_new,
                 "meeting_url": meeting_url, "manage_url": session_url,
             })
             send(m_email, "booking_rescheduled", {
                 "recipient_name": m_name, "other_name": c_name, "service_title": service_title,
+                "booking_ref": _booking_ref(booking_id),
                 "old_time": _fmt_iso_in_tz(old_slot, times.get("mentor_tz")), "new_time": mentor_new,
                 "meeting_url": meeting_url, "manage_url": mentor_hub,
             })
         elif event == "proposed":
             send(c_email, "reschedule_proposed", {"recipient_name": c_name, "other_name": m_name,
+                                                  "service_title": service_title,
+                                                  "booking_ref": _booking_ref(booking_id),
                                                   "session_time": session_time, "session_url": session_url})
         elif event == "counter_proposed":
             # Mentee asked for another date (counter-offer). Mentor must re-propose times for that day.
             send(m_email, "reschedule_counter", {"recipient_name": m_name, "other_name": c_name,
+                                                 "service_title": service_title,
+                                                 "booking_ref": _booking_ref(booking_id),
                                                  "session_time": session_time, "session_url": mentor_hub})
         elif event == "reschedule_requested":
-            send(m_email, "reschedule_requested", {"recipient_name": m_name, "other_name": c_name, "session_time": session_time})
+            times = db.get_booking_times_display(booking_id) or {}
+            send(m_email, "reschedule_requested", {
+                "recipient_name": m_name, "other_name": c_name, "service_title": service_title,
+                "session_time": _local_stamp(times, "mentor_local", "mentor_tz") or session_time,
+                "booking_ref": _booking_ref(booking_id), "manage_url": mentor_hub,
+            })
         elif event == "cancel_requested":
             times = db.get_booking_times_display(booking_id) or {}
             reason = info.get("cancel_reason") or ""

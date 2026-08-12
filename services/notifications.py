@@ -94,9 +94,19 @@ def send_review_requests() -> dict:
                 to = info.get("candidate_email")
                 if not to:
                     continue
+                # Name the session and when it was: a review ask that only says "your recent
+                # session" leaves the person guessing which one, days later. Best-effort - a missing
+                # timestamp must never cost the whole email, which is the point of the message.
+                try:
+                    times = db.get_booking_times_display(bid) or {}
+                except Exception:
+                    times = {}
                 mailer.send_transactional(to, "review_request", {
                     "candidate_name": info.get("candidate_name") or "there",
                     "mentor_name": info.get("mentor_name") or "your mentor",
+                    "service_title": info.get("service_title") or "",
+                    "session_time": _fmt_time(times, "customer_local", "customer_tz"),
+                    "booking_ref": f"#{str(bid).split('-')[0]}",
                     "review_url": f"{config.FRONTEND_URL}/session/{bid}",
                     "is_reminder": reminder,
                 })

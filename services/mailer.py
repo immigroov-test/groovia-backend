@@ -330,8 +330,18 @@ def _invoice_block(inv: Optional[dict], booking_ref: str = "") -> str:
         f'{_e(_money(float(inv.get("total") or 0), ccy))}</td>'
         '</tr>'
     )
-    ref = (f'<p style="margin:10px 0 0;font-size:12px;color:#999">Booking reference {_e(booking_ref)}. '
-           'Quote it if you contact support.</p>') if booking_ref else ""
+    # Booking reference identifies the session; the payment reference is what the gateway and our own
+    # reconciliation key off, and what a customer would quote in a dispute with their bank.
+    pay_ref = (inv.get("payment_ref") or "").strip()
+    ref = ""
+    if booking_ref or pay_ref:
+        parts = []
+        if booking_ref:
+            parts.append(f"Booking reference {_e(booking_ref)}")
+        if pay_ref:
+            parts.append(f"Payment reference {_e(pay_ref)}")
+        ref = ('<p style="margin:10px 0 0;font-size:12px;color:#999">'
+               + ". ".join(parts) + ". Quote these if you contact support.</p>")
     return (
         '<div style="margin:20px 0 0;padding:14px 16px;background:#fafafa;border:1px solid #ececec;border-radius:12px">'
         '<p style="margin:0 0 8px;font-size:12px;font-weight:600;color:#999;text-transform:uppercase;letter-spacing:.6px">'
@@ -406,6 +416,7 @@ def _booking_confirmed_mentor(d: dict) -> tuple[str, str]:
             ("When (candidate's time)", d.get("candidate_time", "")),
             ("Who", who),
             ("Where", "Video call - use the Join meeting button below"),
+            ("Booking reference", d.get("booking_ref", "")),
         ])
         + notes_html
         + (_btn(url, "Join meeting") if url else "")
@@ -460,6 +471,7 @@ def _session_reminder_30min(d: dict) -> tuple[str, str]:
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
         f"Your session with <strong>{_e(other)}</strong> starts in about 30 minutes. Make sure you're ready!"
         "</p>"
+        + _session_rows(d)
         + (_btn(url, "Join meeting") if url else "")
     )
     return f"Your session with {other} starts in 30 minutes", _base(body)
@@ -487,6 +499,7 @@ def _review_request(d: dict) -> tuple[str, str]:
     mentor = d.get("mentor_name", "your mentor")
     # Prefer a session-specific link (the review form lives on /session/<id>); fall back to /mentors.
     review_url = d.get("review_url") or (d.get("platform_url", config.FRONTEND_URL) + "/mentors")
+    detail = _session_rows(d)   # which session, when, and its reference
     is_reminder = bool(d.get("is_reminder"))
     lead = ("Just a quick reminder to review your recent session with"
             if is_reminder else "We hope your session with")
@@ -499,6 +512,7 @@ def _review_request(d: dict) -> tuple[str, str]:
         "international professionals find the right mentor for their journey."
         "</p>"
         '<p style="margin:0;font-size:15px;color:#444;line-height:1.6">It only takes a minute to leave a review.</p>'
+        + detail
         + _btn(review_url, "Leave a Review")
     )
     subject = (f"Reminder: review your session with {mentor}"
@@ -739,6 +753,7 @@ def _booking_rescheduled(d: dict) -> tuple[str, str]:
             if manage else ""
         )
     )
+    body += _info_row('Booking reference', d.get('booking_ref','')) if d.get('booking_ref') else ''
     return f"Rescheduled: your session with {other}", _base(body)
 
 
@@ -754,9 +769,25 @@ def _reschedule_proposed(d: dict) -> tuple[str, str]:
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
         f"<strong>{_e(mentor)}</strong> proposed a new time range for your session. "
         "Open it to pick a time that works, ask for another date, or decline.</p>"
+        + _session_rows(d)
         + _btn(link, "Review & pick a time")
     )
     return f"{mentor} proposed a new time for your session", _base(body)
+
+
+def _session_rows(d: dict) -> str:
+    """Session, when, reference and reason - the facts a recipient needs to act on a request without
+    opening the dashboard first. Every row is skipped when absent, so one helper serves them all."""
+    rows = ""
+    if d.get("service_title"):
+        rows += _info_row("Session", d["service_title"])
+    if d.get("session_time"):
+        rows += _info_row("Scheduled for", d["session_time"])
+    if d.get("booking_ref"):
+        rows += _info_row("Booking reference", d["booking_ref"])
+    if d.get("reason"):
+        rows += _info_row("Reason given", d["reason"])
+    return rows
 
 
 def _reschedule_requested(d: dict) -> tuple[str, str]:
@@ -766,9 +797,10 @@ def _reschedule_requested(d: dict) -> tuple[str, str]:
         '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">A reschedule was requested</h1>'
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {mentor},</p>'
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
-        f"<strong>{_e(attendee)}</strong> requested to reschedule a session within 24 hours of the start. "
+        f"<strong>{_e(attendee)}</strong> asked to reschedule this session. "
         "Approve or decline it from your Mentor Hub - if you don't respond in time it auto-approves.</p>"
-        + _btn(config.FRONTEND_URL + "/mentor", "Review request")
+        + _session_rows(d)
+        + _btn(d.get("manage_url") or config.FRONTEND_URL + "/mentor", "Review request")
     )
     return "A reschedule was requested", _base(body)
 
@@ -784,6 +816,7 @@ def _reschedule_counter(d: dict) -> tuple[str, str]:
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
         f"<strong>{_e(attendee)}</strong> would like to reschedule but none of your proposed times worked. "
         "Open the session to propose a new date and time range that suits you.</p>"
+        + _session_rows(d)
         + _btn(link, "Propose new times")
     )
     return "Your attendee asked for a different day", _base(body)
@@ -796,9 +829,10 @@ def _cancel_requested(d: dict) -> tuple[str, str]:
         '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">A cancellation was requested</h1>'
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {mentor},</p>'
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
-        f"<strong>{_e(attendee)}</strong> requested to cancel a session within 24 hours of the start. "
+        f"<strong>{_e(attendee)}</strong> asked to cancel this session. "
         "Approve or decline it from your Mentor Hub - if you don't respond in time it auto-approves.</p>"
-        + _btn(config.FRONTEND_URL + "/mentor", "Review request")
+        + _session_rows(d)
+        + _btn(d.get("manage_url") or config.FRONTEND_URL + "/mentor", "Review request")
     )
     return "A cancellation was requested", _base(body)
 
@@ -886,6 +920,8 @@ def _payment_failed(d: dict) -> tuple[str, str]:
         rows += _info_row("Amount", d["amount"])
     # The provider's own wording ("insufficient funds", "card declined") is the single most useful
     # thing here, so it is passed through when Razorpay gives us one.
+    if d.get("booking_ref"):
+        rows += _info_row("Booking reference", d["booking_ref"])
     if d.get("failure_reason"):
         rows += _info_row("What the bank said", d["failure_reason"])
     body = (
@@ -936,6 +972,8 @@ def _payout_paid(d: dict) -> tuple[str, str]:
         rows += _info_row("Session", d["service_title"])
     if d.get("session_time"):
         rows += _info_row("Session date", d["session_time"])
+    if d.get("booking_ref"):
+        rows += _info_row("Booking reference", d["booking_ref"])
     if d.get("reference"):
         rows += _info_row("Payment reference", d["reference"])
     body = (

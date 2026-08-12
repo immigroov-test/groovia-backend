@@ -302,12 +302,24 @@ def get_booking_invoice(booking_id: str) -> Optional[dict[str, Any]]:
         total = float(s.get("gross_customer") or 0)
         if total <= 0:
             return None
+        # The gateway's own payment id, so the receipt carries the reference the customer would
+        # quote to their bank and we would search on in Razorpay. Absent on free/mock bookings.
+        pay_ref = ""
+        try:
+            pr = (_supabase.table("customer_payments")
+                  .select("provider_payment_id")
+                  .eq("booking_id", booking_id).not_.is_("provider_payment_id", "null")
+                  .limit(1).execute().data) or []
+            pay_ref = (pr[0].get("provider_payment_id") if pr else "") or ""
+        except Exception:
+            logger.exception("get_booking_invoice: payment reference lookup failed booking=%s", booking_id)
         return {
             "currency":     row.get("customer_currency") or s.get("customer_currency") or "",
             "session":      float(s.get("mentor_amount") or 0),
             "platform_fee": float(s.get("platform_fee") or 0),
             "tax":          float(s.get("tax_amount") or 0),
             "total":        total,
+            "payment_ref":  pay_ref,
         }
     except Exception:
         logger.exception("get_booking_invoice failed booking=%s", booking_id)
