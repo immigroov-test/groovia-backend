@@ -106,7 +106,6 @@ class InitialRateBody(BaseModel):
     currency: str = "INR"
     currency_rates: list[dict] = []      # additional-currency base rates [{currency, hourly_rate}]
     smart_pricing: bool = False
-    apply_to_sessions: bool = True       # reprice sessions from the new rate; see setup_rate
 
 
 @router.post("/setup-rate")
@@ -148,7 +147,9 @@ def setup_rate(body: InitialRateBody, user: AuthUser = Depends(get_current_user)
         # Reprice whenever the money actually moved. Sessions are priced as duration x rate, so a rate
         # or currency change that does not flow through leaves every session at a stale price, active
         # and inactive alike (an inactive one is repriced too, so re-enabling it is never a surprise).
-        reprice=body.apply_to_sessions or _rate_changed(mentor, body),
+        # The server decides this, not the caller: a client-supplied flag was both redundant and
+        # able to disagree with the values it was sent alongside.
+        reprice=_rate_changed(mentor, body),
     )
 
 
