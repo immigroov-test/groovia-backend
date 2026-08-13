@@ -111,16 +111,26 @@ class ServiceUpdateBody(BaseModel):
 
 
 # BUG-137: a mentor previously had no way to edit an existing service at all - only toggle
-# active/delete. This is deliberately scoped to the service's TEXT/DETAIL fields (title,
-# description, category, tags); duration and price are left untouched here since they're tied to
-# the one-service-per-duration slot model and the hourly-rate-derived pricing business rule
-# (BUG-135/create_service) - editing those isn't what "view and edit the details of an existing
-# service" was asking for, and changing that pricing model is out of scope for this fix.
+# active/delete. Started as text/detail fields only; `duration` was then added because a mentor who
+# picked the wrong length had no way back short of deleting the session and losing its questions and
+# its approval state. Migrated sessions arrived with lengths nobody chose, so they need it most.
+#
+# Duration still obeys the one-service-per-duration rule, checked against the mentor's other ACTIVE
+# services below, and price is re-derived server-side from the hourly rate rather than accepted from
+# the client, so a longer session cannot be sold at the shorter session's price.
 class ServiceEditBody(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
     category: Optional[str] = None
     tags: Optional[list[str]] = None
+    duration: Optional[int] = None
+
+    @field_validator("duration")
+    @classmethod
+    def validate_edit_duration(cls, v: Optional[int]) -> Optional[int]:
+        if v is not None and not (5 <= v <= 480):
+            raise ValueError("duration must be between 5 and 480 minutes")
+        return v
 
     @field_validator("title")
     @classmethod
@@ -177,6 +187,20 @@ def update_service(service_id: str, body: ServiceEditBody, mentor: dict = Depend
         # BUG-118: never let an edit put category back to NULL - same safe default the create
         # path and the migrated-services backfill both use.
         fields["category"] = (fields["category"] or "").strip() or "General Guidance"
+    if fields.get("duration") is not None:
+        existing = {s["id"]: s for s in db.list_services(mentor["id"])}
+        current = existing.get(service_id)
+        clash = [s for sid, s in existing.items()
+                 if sid != service_id and s.get("is_active") and s.get("duration") == fields["duration"]]
+        if clash:
+            raise HTTPException(status_code=400,
+                                detail="You already have a session of this length.")
+        # Re-price from the hourly rate, exactly as create does, so the price cannot lag the length.
+        # A free session stays free: prorating zero is zero, but say it plainly rather than rely on it.
+        if current is not None and float(current.get("set_price") or 0) > 0:
+            rate = float(mentor.get("hourly_rate") or 0)
+            if rate > 0:
+                fields["set_price"] = round(rate * fields["duration"] / 60, 2)
     try:
         db.update_service(service_id, fields)
         return {"updated": True}
