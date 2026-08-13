@@ -462,8 +462,11 @@ def mentor_confirm_attendance(booking_id: str) -> None:
 
 # ── Services ───────────────────────────────────────────────────────────────────
 
+# currency_prices carries the per-currency price the mentor's additional rates work out to for this
+# session's length, written by reprice_mentor_services. Without it in this list the mentor's own
+# session cards could only ever show the base currency, however many currencies they had set.
 _SERVICE_COLS = ("id, title, description, type, duration, category, set_price, "
-                 "set_currency, platform_fee, is_active, is_ppp, status, tags")
+                 "set_currency, currency_prices, platform_fee, is_active, is_ppp, status, tags")
 _SERVICE_COLS_NO_TAGS = _SERVICE_COLS.replace(", tags", "")
 
 
