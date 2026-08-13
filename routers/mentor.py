@@ -104,21 +104,23 @@ class InitialRateBody(BaseModel):
     currency: str = "INR"
     currency_rates: list[dict] = []      # additional-currency base rates [{currency, hourly_rate}]
     smart_pricing: bool = False
-    apply_to_sessions: bool = False      # True only from the "Update my session prices" button
+    apply_to_sessions: bool = True       # reprice sessions from the new rate; see setup_rate
 
 
 @router.post("/setup-rate")
 def setup_rate(body: InitialRateBody, user: AuthUser = Depends(get_current_user)):
-    """First-login rate capture for a migrated mentor who has no per-hour rate yet. Applies directly
-    to the live row (not staged for re-approval) so the mentor is immediately priceable. First-time
-    only: once a rate exists, edits go through the normal profile flow."""
+    """Set or change the mentor's per-hour base rate. Applies directly to the live row (not staged
+    for re-approval) so the mentor is immediately priceable.
+
+    This used to be first-login only and returned 409 once onboarding was finished. The rate editor
+    posts here from the hub too, so a mentor who changed their base rate after setup got "A rate is
+    already set for this mentor" and, worse, none of their sessions were repriced: session prices are
+    always derived from the rate, so they silently kept the old numbers. It is now an idempotent
+    upsert, and repricing is the default rather than opt-in, which is the only behaviour that keeps
+    derived prices honest."""
     mentor = db.get_mentor_by_profile_id(user.id)
     if not mentor:
         raise HTTPException(status_code=404, detail="No mentor profile for this account")
-    # A migrated mentor can (re)set their rate freely while still in first-login onboarding; once
-    # they've finished (needs_onboarding cleared), a set rate is locked and edits go via /profile.
-    if mentor.get("hourly_rate") and not mentor.get("needs_onboarding"):
-        raise HTTPException(status_code=409, detail="A rate is already set for this mentor")
     if body.hourly_rate is None or body.hourly_rate <= 0 or body.hourly_rate > 100000:
         raise HTTPException(status_code=422, detail="Enter a valid hourly rate")
     try:
@@ -131,8 +133,23 @@ def setup_rate(body: InitialRateBody, user: AuthUser = Depends(get_current_user)
         currency=(body.currency or "INR").strip().upper(),
         currency_rates=validated_rates,
         smart_pricing=body.smart_pricing,
-        reprice=body.apply_to_sessions,
+        # Reprice whenever the money actually moved. Sessions are priced as duration x rate, so a rate
+        # or currency change that does not flow through leaves every session at a stale price, active
+        # and inactive alike (an inactive one is repriced too, so re-enabling it is never a surprise).
+        reprice=body.apply_to_sessions or _rate_changed(mentor, body),
     )
+
+
+def _rate_changed(mentor: dict, body: "InitialRateBody") -> bool:
+    """True when the stored rate, currency or per-currency overrides differ from what was submitted."""
+    if float(mentor.get("hourly_rate") or 0) != round(float(body.hourly_rate or 0), 2):
+        return True
+    if (mentor.get("currency") or "").upper() != (body.currency or "INR").strip().upper():
+        return True
+    def norm(rows):
+        return sorted((str(r.get("currency", "")).upper(), float(r.get("hourly_rate") or 0))
+                      for r in (rows or []))
+    return norm(mentor.get("currency_rates")) != norm(body.currency_rates)
 
 
 @router.post("/complete-onboarding")
