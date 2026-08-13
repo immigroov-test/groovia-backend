@@ -1,36 +1,53 @@
 # Claude Code internal files
 .claude/
 
-# Secrets
-*.env
+# Secrets - never commit. Ignore all .env* except the placeholder template.
 .env*
 !.env.example
-Google Auth keys.txt
+*.key
+*Auth keys.txt
+*auth keys.txt
+secrets.json
 Meeting_1_feedback.txt
+
+# Third-party reference code - never push
+immigroov-main/
+
+# Frontend is now its own repo (immigroov-test/groovia-frontend); never track it here.
+groovia-frontend/
 
 # Python
 __pycache__/
 *.py[cod]
+*.pyc
 .venv/
 venv/
 env/
-Lib/
-Scripts/
-Include/
-pyvenv.cfg
 *.egg-info/
-dist/
-build/
+.ipynb_checkpoints/
 
-# Node
+# Local data & generated artifacts
+data/
+etc/
+*visualization.png
+graph.png
+system_architecture.png
+_dev_emails.jsonl
+# Legacy mentor migration downloads - contain PII, NEVER commit
+mentor_migration_raw.json
+mentor_migration_preview.json
+
+# Node (none here now; harmless)
 node_modules/
 .next/
 .turbo/
 
-# OS
+# OS / IDE
 .DS_Store
 Thumbs.db
-
-# IDE
 .vscode/
 .idea/
+
+# Local DR backups (never commit - may contain PII)
+scripts/backups/
+scripts/*.log

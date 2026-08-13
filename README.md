@@ -1,73 +1,148 @@
-# Groovia by Immigroov
+# Groovia - Backend (`groovia-backend`)
 
-AI-powered career and immigration consultant for internationally mobile professionals. Users upload a resume and get a personalised country comparison report, real mentor connections, and follow-up Q&A — all in one chat interface.
+Backend and "brain" for **Immigroov** - a two-sided immigration mentorship marketplace
+that connects people moving between countries with mentors who have lived the journey.
+At its centre is **Groovia**, an AI agent that profiles each candidate, recommends
+countries, and matches them to mentors they can book a paid session with.
 
-## Monorepo structure
+This repo is **FastAPI + LangGraph + Supabase**. It owns the AI agent, authentication,
+the mentor lifecycle (signup → admin approval), the in-house booking system, and all
+data access. The user-facing UI lives in the **separate** [`groovia-frontend`](https://github.com/immigroov-test/groovia-frontend)
+repo (Next.js on Vercel); this service is its API.
 
-```
-groovia/
-├── groovia-backend/    # FastAPI + LangGraph AI backend
-└── groovia-frontend/   # Next.js 16 frontend
-```
+> Two repos, one product: **`groovia-backend`** (this) = API/agent on Render +
+> Supabase. **`groovia-frontend`** = Next.js UI on Vercel that proxies to this API.
 
-Both services deploy independently and communicate over HTTPS.
+---
 
-## Tech stack
+## Current status (what works today)
 
-| Layer | Technology |
+| Area | Status |
 |---|---|
-| Frontend | Next.js 16 (App Router), React 19, Tailwind v4, Supabase SSR |
-| Backend | FastAPI, LangGraph, Groq (Llama-4), Supabase |
-| AI | Groq Llama-3.3-70b (agent) + Llama-3.1-8b (reviewer) |
-| Search tools | Tavily (broad web), Exa (neural / precise) |
-| Database | Supabase Postgres + Auth + Storage |
-| Deployment | Fly.io (backend), Vercel (frontend) |
+| Groovia AI agent (country discovery, Q&A, mentor matching) | ✅ Working |
+| Auth - Supabase email/password + Google OAuth, JWT verification | ✅ Working |
+| Mentor lifecycle - signup → onboarding → **admin approval** | ✅ Working |
+| In-house booking + lifecycle v2 (cancel / reschedule / no-show) | ✅ Working |
+| Transactional email (Resend) | ✅ Working (needs verified domain for real sends) |
+| Deployment - Render (API) + Supabase (DB/Auth) + Vercel (UI) | ✅ Live on `staging` |
 
-## Quick start
+## Future developments (planned per PRD v2.1 - not yet built)
 
-**Backend**
+Payments (Stripe + Razorpay) & credits · commission/attribution engine · reviews &
+ratings · mentor earnings & payouts · candidate dashboard & roadmap · CV optimizer ·
+RAG knowledge base (pgvector) · Sponsor Radar · group sessions / webinars · auto
+Google Meet links · analytics (GA4 / PostHog / GTM) · cookie consent & GDPR export/delete · MFA.
+
+---
+
+## How the agent works
+
+Conversations are phase-driven: **no_resume → awaiting_intent → report | mentor | qna**.
+
+Within `report` and `mentor`, a **reflection loop** reviews the LLM draft with a reviewer
+model (Llama-3.1-8b) and revises up to `MAX_REVISION` times. Tools: `web_search`
+(Tavily, advanced depth), `retrieve_matching_mentors` (Supabase). All mentor
+links in AI responses use the Groovia platform URL (`/mentors/{slug}`).
+
+Short-circuit gates fire *before* any LLM call for: missing resume, bare acks, ambiguous
+intent, missing country/track - canned responses with zero API cost.
+
+## Structure - what each file holds
+
+```
+groovia-backend/            # ← this folder is the repo root
+├── main.py                 # FastAPI app, lifespan, CORS, router registration
+├── config.py               # All env vars, tunable parameters, feature flags
+├── content.py              # UI strings, agent intent phrases, canned messages
+├── schema.py               # Pydantic response models
+├── core/
+│   ├── auth.py             # JWT verification (HS256 + asymmetric JWKS), AuthUser, require_admin
+│   ├── permissions.py      # Centralized authz: require_mentor, authorize_booking_party
+│   └── rate_limit.py       # slowapi limiter (20/min per IP on /chat)
+├── ai/
+│   ├── graph.py            # LangGraph StateGraph: nodes, edges, PostgreSQL checkpointer
+│   ├── prompts.py          # System prompts (report, mentor, qna, reviewer, compression)
+│   └── tools.py            # Tools: Tavily web search, mentor DB lookup, PDF/DOCX parsers
+├── db/
+│   ├── mentors.py          # Mentor + profile queries (list, create, update, approve)
+│   ├── bookings.py         # Booking queries
+│   ├── chat.py             # Thread + ai_event queries
+│   └── direct_booking.py   # Booking RPCs: slots, book, cancel, reschedule, services, availability
+├── services/
+│   └── mailer.py           # Resend transactional email (mocked when MOCK_SERVICES=true)
+├── routers/
+│   ├── chat.py             # POST /chat, GET /chat/threads, thread claim
+│   ├── mentor.py           # /mentor/signup, /mentor/me, profile
+│   ├── mentors.py          # GET /mentors, GET /mentors/{slug}
+│   ├── booking.py          # /booking/* - slot booking, cancel, reschedule, no-show
+│   ├── services.py         # /mentor/services/* - session types + intake questions
+│   ├── availability.py     # /mentor/availability-v2/* - weekly schedule, overrides, rules
+│   ├── admin.py            # /admin/mentors/* (approve, reject, list pending)
+│   └── auth.py             # /auth/* (recaptcha-adjacent stubs)
+├── migrations/             # SQL setup + reset scripts (see below)
+├── tests/                  # unit + integration (LLMs mocked, no Postgres needed)
+├── Dockerfile              # python:3.13-slim - what Render builds
+├── render.yaml             # Render blueprint (prod + staging web services)
+└── requirements.txt
+```
+
+(`backend.py` / `utils.py` are thin compatibility shims mapping to `ai.graph` / `ai.tools` for tests.)
+
+## Running locally
 
 ```bash
-cd groovia-backend
-cp .env.example .env          # fill in API keys
+cp .env.example .env        # fill in secrets
 pip install -r requirements.txt
-python main.py                # or: uvicorn main:api --reload --port 8000
+python main.py              # or: uvicorn main:api --reload --port 8000
 ```
 
-**Frontend**
+Set `MOCK_SERVICES=true` to intercept Resend and skip webhook signature checks.
+Run tests with `pip install -r requirements-dev.txt && pytest` (no Postgres needed).
 
-```bash
-cd groovia-frontend
-cp .env.local.example .env.local   # fill in Supabase + backend URL
-npm install
-npm run dev
-```
+## Key env vars
 
-## Architecture
+| Variable | Required | Notes |
+|---|---|---|
+| `SUPABASE_URL` | Yes | Project URL (`https://xxxx.supabase.co`) |
+| `SUPABASE_SERVICE_ROLE_KEY` | Yes | Bypasses RLS - backend only, never expose to client |
+| `SUPABASE_JWT_SECRET` | Yes | Verifies user JWTs locally |
+| `DATABASE_URL` | Yes | Postgres URL for LangGraph - **Session pooler, port 5432** (not 6543) |
+| `GROQ_API_KEY` / `TAVILY_API_KEY` | Yes | LLM + web search |
+| `FRONTEND_URL` | Yes | CORS + LLM-generated mentor links |
+| `CORS_ORIGINS` | Yes (deploy) | Comma-separated allowed origins, no trailing slash |
+| `RESEND_API_KEY` / `EMAIL_FROM` | No | Transactional email; booking works without it |
+| `MOCK_SERVICES` | No | `true` mocks email/webhooks - **never deploy `true`** |
 
-The backend runs a phase-driven LangGraph agent:
+Feature flags (`FEATURE_*`, default ON) are listed in `config.py` and mirrored in
+`groovia-frontend/lib/features.ts`.
 
-```
-no_resume → awaiting_intent → report | mentor | qna
-```
+## Booking system
 
-Each real LLM response goes through a reflection loop (reviewer LLM audits, revises up to N times). Short-circuit gates handle trivial turns with zero LLM cost.
+Mentors set a weekly schedule (`weekly_availability`) + session types (`services`).
+Candidates browse slots and book via PostgreSQL RPCs. **All RPCs run server-side with
+the service-role key, so `auth.uid()` is NULL - every ownership/authz check is enforced
+at the FastAPI layer** (`core/permissions.py`). Lifecycle v2 adds deadline-aware cancel,
+mentor↔candidate reschedule negotiation, and no-show handling.
 
-Run `python groovia-backend/generate_architecture.py` to regenerate `system_architecture.png` (requires `pip install diagrams` and Graphviz on PATH).
+LangGraph uses `AsyncPostgresSaver` on Supabase Postgres via the **Session pooler (5432)**
+- not the transaction pooler (6543), because it relies on prepared statements.
 
-## Database migrations
+## Database migrations - 2 files per environment
 
-Run SQL files from `groovia-backend/migrations/` sequentially in the Supabase SQL editor (001 → 014).
+| File | Purpose |
+|---|---|
+| `production_db_setup.sql` | Full production schema (no seed mentors). Run once on a fresh project. |
+| `production_clear_users.sql` | Promotes the admin, then deletes mentee accounts only (keeps mentors). |
+| `testing_db_setup.sql` | Full schema + 14 seed mentors with services & availability. Run once. |
+| `testing_db_reset.sql` | Promotes the admin, clears test data, keeps seed mentors. Re-run between test runs. |
 
-## Roadmap
+**First-time setup:** run the `*_db_setup.sql` → sign up once as the admin email →
+run the matching clear/reset file (it promotes that account to `admin`). Setup files are
+re-runnable (functions whose return type changed are dropped first).
 
-- **Payments** — Stripe (global) + Razorpay (India) for paid mentor sessions
-- **Candidate dashboard** — session history, AI career roadmap, saved mentors
-- **Mentor earnings** — earnings summary, upcoming sessions
-- **Commission engine** — 2-axis model: source attribution × session volume tiers
-- **Reviews & ratings** — verified post-session reviews, mentor responses
-- **RAG / pgvector** — context-aware answers from curated visa and country guides
-- **CV optimizer** — AI-tailored resume for target country + role
-- **Sponsor radar** — searchable IND-registered Netherlands employer database
-- **Group sessions / webinars** — multi-attendee mentor-led sessions (V3)
-- **GDPR tools** — data export and right-to-deletion flows
+## Deployment (Render)
+
+`render.yaml` defines two Docker web services: `groovia-api` (branch `main`) and
+`groovia-api-staging` (branch `staging`). **Root Directory = repo root** (the Dockerfile
+is at the root). Set the `sync: false` secrets in the Render dashboard. A legacy
+`fly.toml` is included but Render is the active target.

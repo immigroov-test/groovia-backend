@@ -1,0 +1,133 @@
+# Render Blueprint. Commit this file and connect the repo to Render - Render
+# detects it, provisions the service, and only asks you to fill the `sync: false`
+# secret values from its dashboard.
+# Docs: https://render.com/docs/blueprint-spec
+
+services:
+  # ── Production (tracks `main`) ───────────────────────────────────────────────
+  - type: web
+    name: groovia-api
+    runtime: docker
+    plan: starter            # free tier; cold-starts after 15 min idle. Upgrade to "standard" once live.
+    region: frankfurt        # EU - keeps data near Supabase EU West and stays GDPR-friendly.
+    branch: main             # pinned so prod only rebuilds on main.
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeploy: true         # Render rebuilds on every push to the watched branch.
+    envVars:
+      # Per-environment / public-ish
+      - key: PORT
+        value: 8000
+      - key: HOST
+        value: 0.0.0.0
+      - key: CORS_ORIGINS
+        sync: false          # set to your Vercel domain(s), comma-separated
+      - key: FRONTEND_URL
+        sync: false          # https://your-vercel-domain.com - used for the mentor-directory link in LLM responses
+
+      # Models
+      - key: MAIN_MODEL_NAME
+        value: llama-3.3-70b-versatile
+      - key: REVIEW_MODEL_NAME
+        value: llama-3.1-8b-instant
+
+      # Feature flags (default ON - override per environment)
+      - key: FEATURE_CHAT_HISTORY
+        value: "true"
+      - key: FEATURE_GUEST_MODE
+        value: "true"
+      - key: FEATURE_MENTORS_PUBLIC
+        value: "true"
+      - key: FEATURE_WEB_SEARCH_TOOL
+        value: "true"
+      - key: FEATURE_MENTOR_TOOL
+        value: "true"
+      - key: FEATURE_RESUME_UPLOAD
+        value: "true"
+      - key: FEATURE_GOOGLE_OAUTH
+        value: "true"
+
+      # Secrets - all marked `sync: false` so Render won't overwrite them on each deploy.
+      # Set their values in the Render dashboard once.
+      - key: GROQ_API_KEY
+        sync: false
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+      - key: DATABASE_URL
+        sync: false           # Supabase SESSION pooler URI, port 5432 (NOT 6543 - LangGraph uses prepared statements)
+      - key: RESEND_API_KEY
+        sync: false           # transactional email; optional
+      - key: ADMIN_EMAIL
+        sync: false           # ops inbox copied on booking/reschedule/cancel (e.g. yokeshmd99@gmail.com)
+      - key: BANK_ENC_KEY
+        sync: false           # Fernet key encrypting mentor payout bank details at rest (see .env.example)
+
+  # ── Staging (tracks `staging` branch) ────────────────────────────────────────
+  # Point ALL Supabase secrets below at the SEPARATE staging Supabase project,
+  # and CORS_ORIGINS / FRONTEND_URL at the staging Vercel URL. See STAGING_SETUP.md.
+  - type: web
+    name: groovia-api-staging
+    runtime: docker
+    plan: starter
+    region: frankfurt
+    branch: staging
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: PORT
+        value: 8000
+      - key: HOST
+        value: 0.0.0.0
+      - key: CORS_ORIGINS
+        sync: false           # the staging Vercel URL, e.g. https://groovia-frontend-git-staging-<scope>.vercel.app
+      - key: FRONTEND_URL
+        sync: false           # same staging Vercel URL
+
+      - key: MAIN_MODEL_NAME
+        value: llama-3.3-70b-versatile
+      - key: REVIEW_MODEL_NAME
+        value: llama-3.1-8b-instant
+
+      - key: FEATURE_CHAT_HISTORY
+        value: "true"
+      - key: FEATURE_GUEST_MODE
+        value: "true"
+      - key: FEATURE_MENTORS_PUBLIC
+        value: "true"
+      - key: FEATURE_WEB_SEARCH_TOOL
+        value: "true"
+      - key: FEATURE_MENTOR_TOOL
+        value: "true"
+      - key: FEATURE_RESUME_UPLOAD
+        value: "true"
+      - key: FEATURE_GOOGLE_OAUTH
+        value: "true"
+
+      # Secrets - STAGING Supabase project + shared LLM/search keys.
+      - key: GROQ_API_KEY
+        sync: false
+      - key: TAVILY_API_KEY
+        sync: false
+      - key: SUPABASE_URL
+        sync: false           # staging Supabase project URL
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false           # staging Supabase service role key
+      - key: SUPABASE_JWT_SECRET
+        sync: false           # staging Supabase JWT secret (Settings → API → JWT Settings)
+      - key: DATABASE_URL
+        sync: false           # staging Supabase SESSION pooler URI, port 5432 (NOT 6543 - LangGraph uses prepared statements)
+      - key: RESEND_API_KEY
+        sync: false           # optional - leave unset to skip real emails
+      - key: ADMIN_EMAIL
+        sync: false           # ops inbox copied on booking/reschedule/cancel (e.g. yokeshmd99@gmail.com)
+      - key: BANK_ENC_KEY
+        sync: false           # Fernet key encrypting mentor payout bank details at rest (see .env.example)
+      - key: MOCK_SERVICES
+        value: "false"        # set "true" to mock Resend/webhooks on staging instead
