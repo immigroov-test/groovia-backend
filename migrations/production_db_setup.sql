@@ -4386,3 +4386,24 @@ RETURNS SETOF audit_events LANGUAGE sql STABLE SECURITY DEFINER SET search_path 
 $$;
 REVOKE ALL ON FUNCTION admin_audit_events(UUID, TEXT, INT) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION admin_audit_events(UUID, TEXT, INT) TO service_role;
+
+-- ── RLS backfill ──────────────────────────────────────────────────────────────
+-- These ten were created without RLS. Postgres tables in the `public` schema are served by PostgREST
+-- to anyone holding the anon key, and that key ships in the browser bundle, so "no RLS" means world
+-- readable. Four of them carry money (payment_events, payment_refunds, booking_pricing,
+-- pricing_quotes). Staging happened to have RLS on already; a fresh production run from this script
+-- would not have, which is exactly the kind of gap that only shows up after launch.
+--
+-- No policies accompany these on purpose: the backend talks to Postgres with the service_role key,
+-- which bypasses RLS entirely, and nothing in the browser needs these tables. RLS on with zero
+-- policies is therefore a deny-all to anon and authenticated, which is what we want.
+ALTER TABLE booking_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE booking_pricing ENABLE ROW LEVEL SECURITY;
+ALTER TABLE dispatcher_locks ENABLE ROW LEVEL SECURITY;
+ALTER TABLE fx_rates ENABLE ROW LEVEL SECURITY;
+ALTER TABLE fx_refresh_log ENABLE ROW LEVEL SECURITY;
+ALTER TABLE job_run_history ENABLE ROW LEVEL SECURITY;
+ALTER TABLE payment_events ENABLE ROW LEVEL SECURITY;
+ALTER TABLE payment_reconciliation_log ENABLE ROW LEVEL SECURITY;
+ALTER TABLE payment_refunds ENABLE ROW LEVEL SECURITY;
+ALTER TABLE pricing_quotes ENABLE ROW LEVEL SECURITY;
