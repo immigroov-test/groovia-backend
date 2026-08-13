@@ -51,3 +51,6 @@ Thumbs.db
 # Local DR backups (never commit - may contain PII)
 scripts/backups/
 scripts/*.log
+
+# Local-only: production setup runbook (contains the launch checklist, kept off git)
+docs/PRODUCTION_SETUP.md
