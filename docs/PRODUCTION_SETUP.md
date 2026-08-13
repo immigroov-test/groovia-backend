@@ -26,6 +26,28 @@ Have these accounts ready with billing enabled where relevant:
 
 ---
 
+## 0.1 Build order, and why it is not top-to-bottom
+
+Several values here do not exist until the *other* service is already deployed. The backend needs the
+Vercel URL; Vercel needs the Render URL; Razorpay and Supabase both need the Render URL; Google needs
+the Supabase URL. Nothing can be first.
+
+So this runbook is deliberately **two passes**:
+
+**Pass 1 - stand everything up with placeholders.** Deploy the backend and the frontend even though
+their cross-references are wrong. Both will boot. Some things will be visibly broken (login redirects
+to the wrong host, the frontend cannot reach the API). That is expected and it is not a
+misconfiguration you need to debug.
+
+**Pass 2 - go back and paste the real URLs in (§6).** Only now do you have every value. This is where
+most launch bugs come from, because each one fails *silently*: a stale `CORS_ORIGINS` looks like a
+frontend bug, a stale Razorpay webhook URL means customers pay and the booking never confirms, and
+nothing in either log says "you forgot to come back here."
+
+Do not skip §6 because §1-§5 all appeared to succeed.
+
+---
+
 ## 1. Supabase (production project)
 
 ### 1.1 Create the project
@@ -49,7 +71,7 @@ Have these accounts ready with billing enabled where relevant:
 SQL Editor → paste **`migrations/production_db_setup.sql`** → Run.
 
 > Verify first. Staging has had columns added live over time; run the diff described in
-> `MIGRATION_CHECKLIST` (section 6) and confirm the prod file contains every one before running it.
+> `MIGRATION_CHECKLIST` (section 7) and confirm the prod file contains every one before running it.
 
 ### 1.4 Auth settings
 **Authentication → URL Configuration**
@@ -130,8 +152,8 @@ RAZORPAY_KEY_SECRET       LIVE secret
 RAZORPAY_WEBHOOK_SECRET   from §3
 SUPABASE_AUTH_HOOK_SECRET from §1.4
 BANK_ENC_KEY              Fernet key: python -c "from cryptography.fernet import Fernet;print(Fernet.generate_key().decode())"
-FRONTEND_URL              https://immigroov.com
-CORS_ORIGINS              https://immigroov.com
+FRONTEND_URL              https://immigroov.com    <- placeholder on pass 1, fix in §6 row 1
+CORS_ORIGINS              https://immigroov.com    <- placeholder on pass 1, fix in §6 row 2
 ADMIN_EMAIL               ops inbox for admin notifications
 INTERNAL_GEO_TOKEN        long random string, SAME value on Vercel
 DISPATCHER_TOKEN          long random string, protects the cron endpoint
@@ -170,10 +192,10 @@ EMAIL_TEST_REDIRECT                                           NEVER set in produ
 
 ```
 NEXT_PUBLIC_SITE_URL                  https://immigroov.com
-BACKEND_URL                           https://<render-backend>   (server-side only)
+BACKEND_URL                           https://<render-backend>   (server-side only; §6 row 3)
 NEXT_PUBLIC_SUPABASE_URL              from §1.2
 NEXT_PUBLIC_SUPABASE_ANON_KEY         from §1.2
-INTERNAL_GEO_TOKEN                    SAME value as the backend
+INTERNAL_GEO_TOKEN                    SAME value as the backend (§6 row 12)
 NEXT_PUBLIC_GOOGLE_SITE_VERIFICATION  from Google Search Console
 ```
 
@@ -188,7 +210,76 @@ meta tag (that's what `NEXT_PUBLIC_GOOGLE_SITE_VERIFICATION` emits) → submit
 
 ---
 
-## 6. Data migration
+## 6. Cross-wiring (pass 2)
+
+Everything below is a value produced by one service and pasted into another. Do this **after** Render
+and Vercel have both deployed once, so every URL actually exists. Redeploy both after editing, since
+neither picks up an env-var change on its own.
+
+Write the two URLs down first, then work the table:
+
+```
+RENDER  = https://__________.onrender.com
+VERCEL  = https://immigroov.com          (or the .vercel.app host until DNS resolves)
+```
+
+| # | Paste this | Into | Exactly | Breaks if wrong |
+|---|---|---|---|---|
+| 1 | `VERCEL` | Render env `FRONTEND_URL` | no trailing slash | every email link points at the wrong site |
+| 2 | `VERCEL` | Render env `CORS_ORIGINS` | scheme + host, no path | browser blocks all API calls; looks like a frontend bug |
+| 3 | `RENDER` | Vercel env `BACKEND_URL` | no trailing slash | frontend cannot reach the API at all |
+| 4 | `RENDER/auth/email-hook` | Supabase → Auth → Hooks → Send Email | full URL | auth mail comes from Supabase, not Immigroov (BUG-026) |
+| 5 | Supabase hook secret | Render env `SUPABASE_AUTH_HOOK_SECRET` | as generated | hook rejected, same symptom as #4 |
+| 6 | `RENDER/payments/razorpay/webhook` | Razorpay → Settings → Webhooks | full URL, live mode | **customers pay and the booking never confirms** |
+| 7 | Razorpay webhook secret | Render env `RAZORPAY_WEBHOOK_SECRET` | as generated | every webhook fails signature, same as #6 |
+| 8 | `VERCEL` | Supabase → Auth → URL Configuration → Site URL | no trailing slash | password reset and magic links land on the wrong host |
+| 9 | `VERCEL/auth/callback` | Supabase → Auth → Redirect URLs | full URL | Google sign-in returns to a dead page |
+| 10 | `https://<project>.supabase.co/auth/v1/callback` | Google Cloud → Credentials → Authorised redirect URIs | full URL | Google returns `redirect_uri_mismatch` |
+| 11 | Google client ID + secret | Supabase → Auth → Providers → Google | both fields | Google button does nothing |
+| 12 | one random string | Render `INTERNAL_GEO_TOKEN` **and** Vercel `INTERNAL_GEO_TOKEN` | **identical on both** | backend trusts client-sent country; anyone can spoof cheaper PPP pricing |
+| 13 | one random string | Render `DISPATCHER_TOKEN` **and** the cron job's env | identical | reminders and refunds never run |
+
+### 6.1 Google OAuth, in order
+
+The two sides reference each other, so create the credential first and fill the second field after:
+
+1. console.cloud.google.com → your project → **APIs & Services → OAuth consent screen**
+   - User type **External**, publish it (in Testing mode only allow-listed accounts can sign in)
+   - Add `immigroov.com` under Authorised domains
+2. **Credentials → Create Credentials → OAuth client ID → Web application**
+   - Authorised JavaScript origins: `VERCEL`
+   - Authorised redirect URIs: `https://<project>.supabase.co/auth/v1/callback` (row 10)
+3. Copy the client ID and secret into Supabase (row 11)
+
+> Use a **separate** OAuth client for production. Reusing staging's means staging redirect URIs stay
+> valid against live accounts.
+
+### 6.2 Webhook checklist
+
+Both webhooks point at Render, so neither can be set before §4 deploys.
+
+| Tool | URL | Events | Verify |
+|---|---|---|---|
+| Razorpay | `RENDER/payments/razorpay/webhook` | `payment.captured`, `payment.failed`, `refund.created`, `refund.processed` | dashboard shows a 2xx delivery |
+| Supabase | `RENDER/auth/email-hook` | send-email hook | sign up once, mail arrives from Immigroov |
+
+> Razorpay silently keeps sending to an old URL if you edit the wrong webhook. After changing it, use
+> **Send test webhook** and confirm a 2xx in the delivery log before trusting it.
+
+### 6.3 Confirm pass 2 actually took
+
+```
+curl -s -o /dev/null -w "%{http_code}
+" $RENDER/health          # 200
+curl -s -H "Origin: $VERCEL" -I $RENDER/mentors | grep -i access-control-allow-origin
+```
+
+The second must echo your Vercel origin. If it is missing or shows the staging host, `CORS_ORIGINS`
+did not take and the site will look broken in a browser while working fine in curl.
+
+---
+
+## 7. Data migration
 
 Order matters. Do this **after** the schema exists and **before** announcing launch.
 
@@ -237,15 +328,24 @@ Order matters. Do this **after** the schema exists and **before** announcing lau
 
 ---
 
-## 7. Branch check
+## 8. Branch check
 
-At the time of writing, **`main` does not contain the recent fixes; `staging` does.** Merge `staging`
-into `main` and confirm both Render and Vercel deploy from the branch you intend, before pointing the
-domain at them.
+**Done, 13 Aug 2026.** `staging` was merged into `main` on both repos and the resulting trees are
+byte-identical to staging, so `main` deploys exactly what staging runs. Backend `main` had also been
+left on the old monorepo layout (backend and frontend in subdirectories); that is corrected.
+
+Both repos: `main` is 0 commits behind `staging`.
+
+Point Render and Vercel at **`main`** for production. Keep the staging services on `staging` so the
+two never move together. Re-merge `staging` into `main` for each release, and re-check with:
+
+```
+git fetch origin && git rev-list --count origin/main..origin/staging   # 0 = main is current
+```
 
 ---
 
-## 8. Smoke test on production
+## 9. Smoke test on production
 
 Run these in order, with real (small) money:
 
