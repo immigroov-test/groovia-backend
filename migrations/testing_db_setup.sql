@@ -4062,23 +4062,6 @@ BEGIN
   END IF;
 END $$;
 
--- Dispatcher schedule (24h/30min reminders + T-60 mentor nudge + FX/refund/verify money jobs) is
--- scheduled MANUALLY, not here: Supabase forbids ALTER DATABASE SET, so the URL + token must be
--- pasted inline. This is intentionally NOT auto-run so a re-run never clobbers a working job.
--- One-time setup:
---   1. Enable pg_cron + pg_net (Dashboard -> Database -> Extensions).
---   2. Set DISPATCHER_TOKEN on the backend (Render env var).
---   3. Run once (swap in your backend URL + the same token):
---        do $$ begin
---          if exists (select 1 from cron.job where jobname='run-dispatcher') then
---            perform cron.unschedule('run-dispatcher'); end if;
---          perform cron.schedule('run-dispatcher','*/5 * * * *', $cron$
---            select net.http_post(
---              url     := 'https://groovia-4bet.onrender.com/payments/run-dispatcher',
---              headers := jsonb_build_object('Content-Type','application/json',
---                           'X-Dispatcher-Token','<your DISPATCHER_TOKEN>'),
---              body    := '{}'::jsonb);
---          $cron$); end $$;
 
 -- ###########################################################################
 -- Referral / affiliate commission system (SCHEMA)
@@ -5162,3 +5145,57 @@ BEGIN
 EXCEPTION WHEN insufficient_privilege THEN
   RAISE NOTICE 'ensure_rls event trigger needs elevated rights; re-run the RLS sweep after any new table appears.';
 END $$;
+
+-- ── Dispatcher schedule ───────────────────────────────────────────────────────
+-- The 5-minute job that runs reminders, the attendance nudge, refunds, expiring holds, the payment
+-- verification sweep and the FX refresh. On free-tier hosting its traffic doubles as the keep-warm
+-- that stops the backend idling into a cold start, and as the activity that stops Supabase pausing.
+--
+-- It used to be a commented-out block you pasted by hand, because the URL and token differ per
+-- environment and Supabase forbids ALTER DATABASE SET. They live in a table instead, so the job is
+-- scheduled by this script like the other four and survives a re-run without re-pasting.
+--
+-- The operator supplies two rows (see below). Until they exist the job is scheduled but no-ops, so a
+-- half-configured environment quietly does nothing rather than hammering a wrong URL.
+CREATE TABLE IF NOT EXISTS deployment_config (
+  key         TEXT PRIMARY KEY,
+  value       TEXT NOT NULL,
+  updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+-- Holds the dispatcher token, so it is deny-all: RLS on, no policies. Only the service role and the
+-- cron job (running as the table owner) can read it. Note the token is visible in cron.job.command
+-- regardless, to anyone who can read that, so this is not a new exposure.
+ALTER TABLE deployment_config ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON deployment_config FROM anon, authenticated;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_cron')
+     AND EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'pg_net') THEN
+    IF EXISTS (SELECT 1 FROM cron.job WHERE jobname = 'run-dispatcher') THEN
+      PERFORM cron.unschedule('run-dispatcher');
+    END IF;
+    PERFORM cron.schedule('run-dispatcher', '*/5 * * * *', $cron$
+      SELECT net.http_post(
+        url     := (SELECT value FROM deployment_config WHERE key = 'backend_url'),
+        headers := jsonb_build_object('Content-Type', 'application/json',
+                     'X-Dispatcher-Token',
+                     (SELECT value FROM deployment_config WHERE key = 'dispatcher_token')),
+        body    := '{}'::jsonb)
+      WHERE EXISTS (SELECT 1 FROM deployment_config WHERE key = 'backend_url')
+        AND EXISTS (SELECT 1 FROM deployment_config WHERE key = 'dispatcher_token');
+    $cron$);
+  ELSE
+    RAISE NOTICE 'pg_cron/pg_net not enabled - run-dispatcher not scheduled. Enable both and re-run.';
+  END IF;
+END $$;
+
+-- ONE-TIME, per environment. Run these two with your own values:
+--
+--   INSERT INTO deployment_config (key, value) VALUES
+--     ('backend_url',      'https://<your-backend-host>/payments/run-dispatcher'),
+--     ('dispatcher_token', '<the DISPATCHER_TOKEN set on the backend>')
+--   ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW();
+--
+-- Then confirm it is being accepted (200, not 403):
+--   SELECT status_code, error_msg, created FROM net._http_response ORDER BY created DESC LIMIT 5;
