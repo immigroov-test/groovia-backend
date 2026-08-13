@@ -2948,16 +2948,17 @@ DECLARE
   v_amt      NUMERIC := COALESCE(p_amount, 0);
   m RECORD; v_ccy TEXT; v_fx NUMERIC; v_ppp NUMERIC;
 BEGIN
-  FOR m IN SELECT cc FROM (VALUES ('IN'),('AU'),('SG'),('SA'),('AE'),('US'),('DE')) AS t(cc) LOOP
+  FOR m IN SELECT cc FROM (VALUES ('US'),('DE'),('GB'),('AU'),('CA'),('SG'),('JP'),('CH'),('AE'),('IN')) AS t(cc) LOOP
     v_ccy := currency_for_country(m.cc);
     IF v_ccy = v_base_ccy THEN CONTINUE; END IF;           -- skip the base currency's own market
     v_ppp := CASE WHEN p_smart_pricing THEN ppp_relative(m.cc, v_anchor) ELSE 1 END;
     v_fx  := get_fx_or_null(v_base_ccy, v_ccy);
-    IF v_fx IS NULL THEN
-      country_code := m.cc; currency := v_base_ccy; price := ROUND(v_amt * v_ppp, 2);        fx_ok := FALSE;
-    ELSE
-      country_code := m.cc; currency := v_ccy;      price := ROUND(v_amt * v_ppp * v_fx, 2); fx_ok := TRUE;
-    END IF;
+    -- No FX for this pair: skip the market entirely. Emitting the BASE currency here (what this
+    -- used to do) rendered as a second tile in the mentor's own currency carrying a PPP-adjusted
+    -- number, so an INR mentor saw three INR tiles with three different prices and no way to tell
+    -- that two of them were really Saudi and the UAE. A missing market is honest; a wrong one is not.
+    IF v_fx IS NULL THEN CONTINUE; END IF;
+    country_code := m.cc; currency := v_ccy; price := ROUND(v_amt * v_ppp * v_fx, 2); fx_ok := TRUE;
     RETURN NEXT;
   END LOOP;
 END; $$;
