@@ -604,7 +604,7 @@ def set_service_tags(service_id: str, tags: list[str]) -> None:
         logger.warning("set_service_tags: could not save tags (column not migrated yet?)")
 
 
-_SERVICE_EDITABLE_FIELDS = {"title", "description", "category", "tags"}
+_SERVICE_EDITABLE_FIELDS = {"title", "description", "category", "tags", "duration", "set_price"}
 
 
 def update_service(service_id: str, fields: dict[str, Any]) -> None:
