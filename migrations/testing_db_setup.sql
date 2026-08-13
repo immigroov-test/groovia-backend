@@ -5086,23 +5086,79 @@ $$;
 REVOKE ALL ON FUNCTION admin_audit_events(UUID, TEXT, INT) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION admin_audit_events(UUID, TEXT, INT) TO service_role;
 
--- ── RLS backfill ──────────────────────────────────────────────────────────────
--- These ten were created without RLS. Postgres tables in the `public` schema are served by PostgREST
--- to anyone holding the anon key, and that key ships in the browser bundle, so "no RLS" means world
--- readable. Four of them carry money (payment_events, payment_refunds, booking_pricing,
--- pricing_quotes). Staging happened to have RLS on already; a fresh production run from this script
--- would not have, which is exactly the kind of gap that only shows up after launch.
+-- ── RLS sweep (runs LAST, and on every re-run) ────────────────────────────────
+-- Replaces the hand-maintained list that preceded it. A table in `public` with RLS off is served by
+-- PostgREST to anyone holding the anon key, and that key ships in the browser bundle, so "forgot one"
+-- means "world readable". A list has to be remembered; this cannot be forgotten.
 --
--- No policies accompany these on purpose: the backend talks to Postgres with the service_role key,
--- which bypasses RLS entirely, and nothing in the browser needs these tables. RLS on with zero
--- policies is therefore a deny-all to anon and authenticated, which is what we want.
-ALTER TABLE booking_events ENABLE ROW LEVEL SECURITY;
-ALTER TABLE booking_pricing ENABLE ROW LEVEL SECURITY;
-ALTER TABLE dispatcher_locks ENABLE ROW LEVEL SECURITY;
-ALTER TABLE fx_rates ENABLE ROW LEVEL SECURITY;
-ALTER TABLE fx_refresh_log ENABLE ROW LEVEL SECURITY;
-ALTER TABLE job_run_history ENABLE ROW LEVEL SECURITY;
-ALTER TABLE payment_events ENABLE ROW LEVEL SECURITY;
-ALTER TABLE payment_reconciliation_log ENABLE ROW LEVEL SECURITY;
-ALTER TABLE payment_refunds ENABLE ROW LEVEL SECURITY;
-ALTER TABLE pricing_quotes ENABLE ROW LEVEL SECURITY;
+-- It also catches tables this script never creates. The LangGraph agent creates checkpoint_blobs,
+-- checkpoints, checkpoint_writes and checkpoint_migrations at RUNTIME, holding AI conversation state,
+-- so a fresh install has no RLS on them until the agent has run at least once. Re-run this script (or
+-- just this block) after the app has served traffic and they are covered.
+--
+-- No policies are added on purpose: the backend connects with the service_role key, which bypasses
+-- RLS entirely, and nothing in the browser touches these. RLS on with zero policies is a deny-all.
+DO $$
+DECLARE r RECORD; n INT := 0;
+BEGIN
+  FOR r IN
+    SELECT c.relname FROM pg_class c JOIN pg_namespace nsp ON nsp.oid = c.relnamespace
+    WHERE nsp.nspname = 'public' AND c.relkind = 'r' AND NOT c.relrowsecurity
+  LOOP
+    EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', r.relname);
+    n := n + 1;
+  END LOOP;
+  RAISE NOTICE 'RLS sweep: enabled on % table(s)', n;
+END $$;
+
+-- ── Corrective settings ───────────────────────────────────────────────────────
+-- platform_settings seeds use ON CONFLICT DO NOTHING so an operator's tuning survives a re-run. This
+-- one value is exempt: 1440 was an earlier default and it is actively harmful, because at 24h a
+-- single late FX refresh makes every booking fail with FX_UNAVAILABLE. 2880 is what makes the
+-- last-day fallback work. Only the known-bad value is corrected; anything else an operator chose is
+-- left alone.
+UPDATE platform_settings SET value = '2880'
+  WHERE key = 'fx_max_age_minutes' AND value = '1440';
+
+-- ── RLS on tables we do not create ────────────────────────────────────────────
+-- The sweep above fixes tables that exist NOW. This covers tables created later by anything else.
+-- The LangGraph agent creates checkpoints/checkpoint_blobs/checkpoint_writes/checkpoint_migrations at
+-- runtime, holding AI conversation state; a library upgrade could add more. Without this they arrive
+-- with RLS off, and a public-schema table with RLS off is served by PostgREST to anyone holding the
+-- anon key, which ships in the browser bundle.
+--
+-- This existed on staging and was never in this file, which is exactly why staging's checkpoint tables
+-- were protected and a fresh production install's were not.
+CREATE OR REPLACE FUNCTION rls_auto_enable() RETURNS event_trigger
+LANGUAGE plpgsql AS $$
+DECLARE cmd record;
+BEGIN
+  FOR cmd IN
+    SELECT * FROM pg_event_trigger_ddl_commands()
+    WHERE command_tag IN ('CREATE TABLE', 'CREATE TABLE AS', 'SELECT INTO')
+      AND object_type IN ('table', 'partitioned table')
+  LOOP
+    IF cmd.schema_name = 'public' THEN
+      BEGIN
+        EXECUTE format('ALTER TABLE %s ENABLE ROW LEVEL SECURITY', cmd.object_identity);
+      EXCEPTION WHEN OTHERS THEN
+        -- Never let this abort the DDL that triggered it. A table we could not protect is a problem;
+        -- a migration that cannot create tables at all is a bigger one.
+        RAISE WARNING 'rls_auto_enable: could not enable RLS on %: %', cmd.object_identity, SQLERRM;
+      END;
+    END IF;
+  END LOOP;
+END $$;
+
+-- Guarded: creating an event trigger needs elevated rights, and on a host that withholds them the
+-- sweep above is still the safety net.
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_event_trigger WHERE evtname = 'ensure_rls') THEN
+    CREATE EVENT TRIGGER ensure_rls ON ddl_command_end
+      WHEN TAG IN ('CREATE TABLE', 'CREATE TABLE AS', 'SELECT INTO')
+      EXECUTE FUNCTION rls_auto_enable();
+  END IF;
+EXCEPTION WHEN insufficient_privilege THEN
+  RAISE NOTICE 'ensure_rls event trigger needs elevated rights; re-run the RLS sweep after any new table appears.';
+END $$;
