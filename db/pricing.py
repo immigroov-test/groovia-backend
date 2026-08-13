@@ -215,3 +215,15 @@ def refresh_fx_rates(force: bool = False) -> dict[str, Any]:
             "provider": "none", "as_of": None, "raw_json": None, "success": False, "error": str(e),
         }).execute()
         raise
+
+
+def fx_or_null(base: str, quote: str) -> Optional[float]:
+    """Wrapper over the get_fx_or_null SQL function: the soft lookup that returns NULL rather than
+    raising when a pair has no usable rate. Used by the minimum-rate floor, which must not block a
+    mentor from pricing just because a feed is briefly down."""
+    try:
+        res = _supabase.rpc("get_fx_or_null", {"p_from": base.upper(), "p_to": quote.upper()}).execute()
+        return float(res.data) if res.data is not None else None
+    except Exception:
+        logger.exception("fx_or_null failed %s->%s", base, quote)
+        return None

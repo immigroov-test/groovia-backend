@@ -14,6 +14,8 @@ from core.permissions import require_mentor
 
 logger = logging.getLogger("immigroov.routers.mentor")
 
+from routers.pricing import min_base_rate
+
 router = APIRouter(prefix="/mentor", tags=["mentor"])
 
 
@@ -127,6 +129,16 @@ def setup_rate(body: InitialRateBody, user: AuthUser = Depends(get_current_user)
         validated_rates = pricing_input.validate_currency_rates(body.currency, body.currency_rates)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
+    # Floor, enforced here and not only in the form: the form can be bypassed, and a base rate near
+    # zero prices every derived session at almost nothing. A free session is still legitimately 0,
+    # but that is a per-service choice and never the base rate.
+    for ccy, amount in [((body.currency or "INR"), body.hourly_rate),
+                        *[(r["currency"], r["hourly_rate"]) for r in validated_rates]]:
+        floor, fx_ok = min_base_rate(ccy)
+        if fx_ok and float(amount or 0) < floor:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Base rate is too low. Enter at least {floor:g} {ccy.upper()} per hour.")
     return db.set_mentor_initial_rate(
         mentor["id"],
         hourly_rate=round(body.hourly_rate, 2),
@@ -344,6 +356,16 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
         validated_rates = pricing_input.validate_currency_rates(body.currency, body.currency_rates)
     except ValueError as e:
         raise HTTPException(status_code=422, detail=str(e))
+    # Floor, enforced here and not only in the form: the form can be bypassed, and a base rate near
+    # zero prices every derived session at almost nothing. A free session is still legitimately 0,
+    # but that is a per-service choice and never the base rate.
+    for ccy, amount in [((body.currency or "INR"), body.hourly_rate),
+                        *[(r["currency"], r["hourly_rate"]) for r in validated_rates]]:
+        floor, fx_ok = min_base_rate(ccy)
+        if fx_ok and float(amount or 0) < floor:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Base rate is too low. Enter at least {floor:g} {ccy.upper()} per hour.")
     result = db.create_mentor_signup(
         user.id,
         display_name=display_name,

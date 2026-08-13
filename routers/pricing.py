@@ -1,3 +1,4 @@
+import math
 import logging
 from typing import Optional
 
@@ -165,3 +166,37 @@ def price_preview(body: PricePreviewBody):
     except Exception:
         logger.exception("price_preview failed currency=%s", body.currency)
         raise HTTPException(status_code=500, detail="Failed to compute preview")
+
+
+# ── Minimum base rate ─────────────────────────────────────────────────────────
+# A floor expressed in ONE currency (INR 100/hr) and converted, so it means the same thing to every
+# mentor rather than being 100 of whatever unit they happen to price in. Applies to the base rate and
+# to every additional-currency rate. It does NOT apply to a service's own price: a free session is
+# legitimately 0, and that is a per-service decision, not a base rate.
+MIN_BASE_RATE_INR = 100.0
+
+
+def min_base_rate(currency: str) -> tuple[float, bool]:
+    """The floor in `currency`, and whether FX was available. Falls back to the INR number itself
+    when FX is missing, which is the permissive direction: better to accept a rate we could not
+    check than to block a mentor from pricing at all because a rate feed is down."""
+    ccy = (currency or "INR").strip().upper()
+    if ccy == "INR":
+        return MIN_BASE_RATE_INR, True
+    try:
+        fx = db.fx_or_null("INR", ccy)
+    except Exception:
+        fx = None
+    if not fx:
+        return 0.0, False
+    # Round up to something a person would type, so the error never asks for 1.83.
+    raw = MIN_BASE_RATE_INR * float(fx)
+    step = 1 if raw >= 10 else 0.5
+    return (math.ceil(raw / step) * step), True
+
+
+@router.get("/min-rate")
+def get_min_rate(currency: str = "INR"):
+    """What the rate editor must reject below, for the currency the mentor is pricing in."""
+    amount, fx_ok = min_base_rate(currency)
+    return {"currency": (currency or "INR").strip().upper(), "min": amount, "fx_ok": fx_ok}
