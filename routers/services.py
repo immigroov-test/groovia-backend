@@ -115,9 +115,9 @@ class ServiceUpdateBody(BaseModel):
 # picked the wrong length had no way back short of deleting the session and losing its questions and
 # its approval state. Migrated sessions arrived with lengths nobody chose, so they need it most.
 #
-# Duration still obeys the one-service-per-duration rule, checked against the mentor's other ACTIVE
-# services below, and price is re-derived server-side from the hourly rate rather than accepted from
-# the client, so a longer session cannot be sold at the shorter session's price.
+# Duration is no longer required to be unique among a mentor's services - multiple sessions can
+# share a length. Price is still re-derived server-side from the hourly rate rather than accepted
+# from the client, so a longer session cannot be sold at the shorter session's price.
 class ServiceEditBody(BaseModel):
     title: Optional[str] = None
     description: Optional[str] = None
