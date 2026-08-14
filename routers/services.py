@@ -191,14 +191,21 @@ def update_service(service_id: str, body: ServiceEditBody, mentor: dict = Depend
         # No one-per-duration check: that rule exists in neither the schema nor create_service, and the
         # imported data contradicts it (mentors legitimately run several same-length sessions on
         # different topics). Enforcing it here blocked mentors from correcting a session's length.
-        existing = {s["id"]: s for s in db.list_services(mentor["id"])}
-        current = existing.get(service_id)
+        current = next((s for s in db.list_services(mentor["id"]) if s.get("id") == service_id), None)
+        if current is None:
+            raise HTTPException(status_code=404, detail="Service not found")
         # Re-price from the hourly rate, exactly as create does, so the price cannot lag the length.
         # A free session stays free: prorating zero is zero, but say it plainly rather than rely on it.
-        if current is not None and float(current.get("set_price") or 0) > 0:
+        if float(current.get("set_price") or 0) > 0:
             rate = float(mentor.get("hourly_rate") or 0)
-            if rate > 0:
-                fields["set_price"] = round(rate * fields["duration"] / 60, 2)
+            if rate <= 0:
+                # Refuse rather than skip. Skipping let the length change while the price stayed at the
+                # old length's figure, so a 15-minute session re-cut to 60 minutes kept the 15-minute
+                # price and the mentor was underpaid on every booking, silently.
+                raise HTTPException(
+                    status_code=422,
+                    detail="Set your hourly rate before changing a paid session's length.")
+            fields["set_price"] = round(rate * fields["duration"] / 60, 2)
     try:
         db.update_service(service_id, fields)
         return {"updated": True}
