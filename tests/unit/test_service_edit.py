@@ -32,6 +32,36 @@ def test_update_service_persists_title_description_category_tags():
     assert fields["tags"] == ["cv", "resume"]
 
 
+def test_update_service_allows_duration_matching_another_active_service():
+    """Duration is no longer a unique key: two active services may share a length."""
+    body = ServiceEditBody(duration=90)
+    existing = [
+        {"id": "svc-1", "is_active": True, "duration": 60, "set_price": 0},
+        {"id": "svc-2", "is_active": True, "duration": 90, "set_price": 0},
+    ]
+    with patch.object(db, "get_service_mentor_id", return_value="mentor-1"), \
+         patch.object(db, "list_services", return_value=existing), \
+         patch.object(db, "update_service") as upd:
+        result = update_service("svc-1", body, mentor={"id": "mentor-1", "currency": "USD", "hourly_rate": 60})
+
+    assert result == {"updated": True}
+    fields = upd.call_args.args[1]
+    assert fields["duration"] == 90
+
+
+def test_update_service_persists_duration_and_reprices():
+    body = ServiceEditBody(duration=90)
+    existing = [{"id": "svc-1", "is_active": True, "duration": 60, "set_price": 60.0}]
+    with patch.object(db, "get_service_mentor_id", return_value="mentor-1"), \
+         patch.object(db, "list_services", return_value=existing), \
+         patch.object(db, "update_service") as upd:
+        update_service("svc-1", body, mentor={"id": "mentor-1", "currency": "USD", "hourly_rate": 60})
+
+    fields = upd.call_args.args[1]
+    assert fields["duration"] == 90
+    assert fields["set_price"] == 90.0
+
+
 def test_update_service_rejects_non_owner():
     body = ServiceEditBody(title="New title")
     with patch.object(db, "get_service_mentor_id", return_value="someone-elses-mentor-id"):
@@ -107,8 +137,8 @@ def test_db_update_service_ignores_unknown_fields():
     with patch("db.direct_booking._supabase", FakeTable()):
         db.update_service("svc-1", {"title": "T", "set_price": 999, "status": "approved"})
 
-    # set_price/status are NOT in the editable set - only title should be written.
-    assert captured["payload"] == {"title": "T"}
+    # status is NOT in the editable set; title/set_price are.
+    assert captured["payload"] == {"title": "T", "set_price": 999}
 
 
 def test_db_update_service_dedupes_and_caps_tags():
