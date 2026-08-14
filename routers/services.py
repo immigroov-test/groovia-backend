@@ -188,13 +188,11 @@ def update_service(service_id: str, body: ServiceEditBody, mentor: dict = Depend
         # path and the migrated-services backfill both use.
         fields["category"] = (fields["category"] or "").strip() or "General Guidance"
     if fields.get("duration") is not None:
+        # No one-per-duration check: that rule exists in neither the schema nor create_service, and the
+        # imported data contradicts it (mentors legitimately run several same-length sessions on
+        # different topics). Enforcing it here blocked mentors from correcting a session's length.
         existing = {s["id"]: s for s in db.list_services(mentor["id"])}
         current = existing.get(service_id)
-        clash = [s for sid, s in existing.items()
-                 if sid != service_id and s.get("is_active") and s.get("duration") == fields["duration"]]
-        if clash:
-            raise HTTPException(status_code=400,
-                                detail="You already have a session of this length.")
         # Re-price from the hourly rate, exactly as create does, so the price cannot lag the length.
         # A free session stays free: prorating zero is zero, but say it plainly rather than rely on it.
         if current is not None and float(current.get("set_price") or 0) > 0:
