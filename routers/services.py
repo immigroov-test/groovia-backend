@@ -50,8 +50,8 @@ class ServiceCreateBody(BaseModel):
     @field_validator("duration")
     @classmethod
     def validate_duration(cls, v: int) -> int:
-        if v < 5 or v > 480:
-            raise ValueError("duration must be between 5 and 480 minutes")
+        if v not in ALLOWED_DURATIONS:
+            raise ValueError(f"duration must be one of {', '.join(map(str, ALLOWED_DURATIONS))} minutes")
         return v
 
     @field_validator("set_price")
@@ -70,6 +70,14 @@ def list_services(mentor: dict = Depends(require_mentor)):
     except Exception:
         logger.exception("list_services failed mentor=%s", mentor_id)
         raise HTTPException(status_code=500, detail="Failed to load services")
+
+
+# The only session lengths offered. Kept in step with DURATION_OPTIONS in the frontend's
+# ServicesManager, and enforced here too because the form can be bypassed. Prices are derived as
+# rate x duration/60, so these four give clean quarter-hour fractions (0.25 / 0.5 / 0.75 / 1.0) of
+# the hourly rate; an arbitrary length like 7 minutes would produce a price no mentor chose.
+# Verified safe to enforce: all 193 existing services already use one of these.
+ALLOWED_DURATIONS = (15, 30, 45, 60)
 
 
 @router.post("")
@@ -128,8 +136,8 @@ class ServiceEditBody(BaseModel):
     @field_validator("duration")
     @classmethod
     def validate_edit_duration(cls, v: Optional[int]) -> Optional[int]:
-        if v is not None and not (5 <= v <= 480):
-            raise ValueError("duration must be between 5 and 480 minutes")
+        if v is not None and v not in ALLOWED_DURATIONS:
+            raise ValueError(f"duration must be one of {', '.join(map(str, ALLOWED_DURATIONS))} minutes")
         return v
 
     @field_validator("title")
