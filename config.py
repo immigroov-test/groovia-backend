@@ -45,7 +45,7 @@ TAVILY_MAX_RESULTS       = 5
 # address at a domain you've verified in Resend (e.g. noreply@immigroov.com).
 # A personal gmail/outlook address will be REJECTED by Resend (every send fails).
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
-EMAIL_FROM     = os.getenv("EMAIL_FROM", "Immigroov <onboarding@resend.dev>")
+EMAIL_FROM     = os.getenv("EMAIL_FROM", "Immigroov <support@immigroov.com>")
 # Ops inbox copied on every booking / reschedule / cancellation. Empty = no admin copy.
 ADMIN_EMAIL    = os.getenv("ADMIN_EMAIL", "")
 # Testing without a verified domain: when set, ALL transactional emails are routed to
