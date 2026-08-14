@@ -773,6 +773,7 @@ def get_booking_meeting(booking_id: str) -> Optional[dict[str, Any]]:
         res = (
             _supabase.table("bookings")
             .select("candidate_id, mentor_id, slot_time, slot_end, status, meeting_room, "
+                    "candidate_joined_at, mentor_joined_at, "
                     "candidate_name, mentors(profile_id, display_name)")
             .eq("id", booking_id)
             .single()
@@ -792,6 +793,11 @@ def get_booking_meeting(booking_id: str) -> Optional[dict[str, Any]]:
             "slot_end":          b.get("slot_end"),
             "status":            b.get("status"),
             "meeting_room":      b.get("meeting_room"),
+            # Whether each party actually opened the call. The meeting page gates its
+            # post-call actions (review, no-show) on the viewer having joined, so a
+            # no-show cannot be reported by someone who never turned up themselves.
+            "candidate_joined_at": b.get("candidate_joined_at"),
+            "mentor_joined_at":    b.get("mentor_joined_at"),
         }
     except Exception:
         logger.exception("get_booking_meeting failed booking=%s", booking_id)
