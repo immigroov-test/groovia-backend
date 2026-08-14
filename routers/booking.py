@@ -130,6 +130,7 @@ def meeting_room(booking_id: str, user: AuthUser = Depends(get_current_user)):
     they_joined = bool(m.get("mentor_joined_at") if party == "candidate" else m.get("candidate_joined_at"))
     base = {"party": party, "display_name": display_name, "other_name": other_name,
             "i_joined": i_joined, "they_joined": they_joined,
+            "service_title": m.get("service_title"), "duration": m.get("duration"),
             "slot_time": m.get("slot_time"), "opens_at": opens_at.isoformat(), "closes_at": closes_at.isoformat()}
 
     if now < opens_at:
