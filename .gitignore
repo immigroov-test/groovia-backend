@@ -57,3 +57,4 @@ docs/PRODUCTION_SETUP.md
 
 # Generated prod seed dumps (contain mentor PII, regenerate with scripts/export_prod_seed.py)
 scripts/prod_seed.sql
+scripts/prod_seed/
