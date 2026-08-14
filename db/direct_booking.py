@@ -774,7 +774,7 @@ def get_booking_meeting(booking_id: str) -> Optional[dict[str, Any]]:
             _supabase.table("bookings")
             .select("candidate_id, mentor_id, slot_time, slot_end, status, meeting_room, "
                     "candidate_joined_at, mentor_joined_at, "
-                    "candidate_name, mentors(profile_id, display_name)")
+                    "candidate_name, mentors(profile_id, display_name), services(title, duration)")
             .eq("id", booking_id)
             .single()
             .execute()
@@ -789,6 +789,10 @@ def get_booking_meeting(booking_id: str) -> Optional[dict[str, Any]]:
             "mentor_profile_id": mnt.get("profile_id") if isinstance(mnt, dict) else None,
             "mentor_name":       mnt.get("display_name") if isinstance(mnt, dict) else None,
             "candidate_name":    b.get("candidate_name"),
+            # For the call-details block on the meeting page, so it shows the same facts as the
+            # confirmation email instead of the attendee having to cross-reference.
+            "service_title":     (b.get("services") or {}).get("title") if isinstance(b.get("services"), dict) else None,
+            "duration":          (b.get("services") or {}).get("duration") if isinstance(b.get("services"), dict) else None,
             "slot_time":         b.get("slot_time"),
             "slot_end":          b.get("slot_end"),
             "status":            b.get("status"),
