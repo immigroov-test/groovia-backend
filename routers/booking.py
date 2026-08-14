@@ -123,7 +123,13 @@ def meeting_room(booking_id: str, user: AuthUser = Depends(get_current_user)):
 
     display_name = (m.get("candidate_name") if party == "candidate" else m.get("mentor_name")) or ""
     other_name = (m.get("mentor_name") if party == "candidate" else m.get("candidate_name")) or "the other participant"
+    # i_joined gates the post-call actions on the meeting page: clicking Join is what proves a
+    # party actually attended, so only then may they leave a review or report the other side as a
+    # no-show. they_joined lets the page say who was missing instead of asking.
+    i_joined   = bool(m.get("candidate_joined_at") if party == "candidate" else m.get("mentor_joined_at"))
+    they_joined = bool(m.get("mentor_joined_at") if party == "candidate" else m.get("candidate_joined_at"))
     base = {"party": party, "display_name": display_name, "other_name": other_name,
+            "i_joined": i_joined, "they_joined": they_joined,
             "slot_time": m.get("slot_time"), "opens_at": opens_at.isoformat(), "closes_at": closes_at.isoformat()}
 
     if now < opens_at:
