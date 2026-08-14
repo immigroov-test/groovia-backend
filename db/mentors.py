@@ -1375,6 +1375,7 @@ def get_admin_stats() -> dict[str, int]:
         pending = _supabase.table("mentors").select("id", count="exact").eq("status", "pending_review").execute().count or 0
         approved = _supabase.table("mentors").select("id", count="exact").eq("status", "approved").execute().count or 0
         active_flag = _supabase.table("mentors").select("id", count="exact").eq("status", "approved").eq("is_active", True).execute().count or 0
+        suspended = _supabase.table("mentors").select("id", count="exact").eq("status", "suspended").execute().count or 0
         bookings = _supabase.table("bookings").select("id", count="exact").execute().count or 0
         # Reuse the exact browse filter so 'active' matches what users see. Small roster, so fetching
         # all and counting is fine (revisit with a SQL count if it ever grows huge). Inactive and
@@ -1390,6 +1391,10 @@ def get_admin_stats() -> dict[str, int]:
             "active_mentor_count": bookable,                            # approved + active + a bookable service
             "inactive_mentor_count": max(approved - active_flag, 0),    # is_active = false (hidden by admin)
             "no_service_mentor_count": max(active_flag - bookable, 0),  # active toggle but nothing to book
+            "suspended_mentor_count": suspended,                        # status=suspended: excluded from every
+                                                                        # count above, so without this tile a
+                                                                        # suspended mentor vanishes from the
+                                                                        # summary instead of moving buckets
             "pending_service_count": pending_services,                  # services from live mentors awaiting review
             "total_bookings": bookings,
         }
