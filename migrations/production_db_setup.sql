@@ -763,6 +763,11 @@ BEGIN
         AND sa.is_booked = FALSE
         AND sa.is_blackout = FALSE
         AND sa.start_time IS NOT NULL
+      -- BUG-153: without this the UNION ALL hands back windows in whatever order the planner
+      -- produces, so a mentor with several windows in a day had slots listed out of sequence
+      -- (e.g. 18:00, 09:00, 14:00). The outer date loop is already ordered by generate_series;
+      -- only the within-day order was arbitrary.
+      ORDER BY 1
     LOOP
       s       := (d::TEXT || ' ' || rec.start_time::TEXT)::TIMESTAMP AT TIME ZONE v_tz;
       win_end := (d::TEXT || ' ' || rec.end_time::TEXT)::TIMESTAMP   AT TIME ZONE v_tz;
@@ -4501,3 +4506,32 @@ END $$;
 --
 -- Then confirm it is being accepted (200, not 403):
 --   SELECT status_code, error_msg, created FROM net._http_response ORDER BY created DESC LIMIT 5;
+
+-- ── Merge contiguous availability windows (BUG-160, BUG-053) ──────────────────
+-- The legacy import wrote one row per hour, so a mentor available 18:00-23:00 arrived as five rows
+-- (18-19, 19-20, 20-21, 21-22, 22-23). That is what the mentor sees in their availability editor and
+-- the admin in the mentor detail panel: five separate one-hour offers instead of one evening. It also
+-- cost real bookable slots, since slot generation treats a 1-hour window as room for exactly one
+-- 45-minute session and cannot span the boundary.
+--
+-- Merges any run where one window ends exactly where the next begins, per mentor and weekday, keeping
+-- the earliest row and widening it. Idempotent: once merged no contiguous runs remain.
+WITH ordered AS (
+  SELECT id, mentor_id, weekday, start_time, end_time,
+         LAG(end_time) OVER (PARTITION BY mentor_id, weekday ORDER BY start_time) AS prev_end
+  FROM weekly_availability
+), grouped AS (
+  SELECT *, SUM(CASE WHEN prev_end IS NULL OR prev_end <> start_time THEN 1 ELSE 0 END)
+           OVER (PARTITION BY mentor_id, weekday ORDER BY start_time) AS run_id
+  FROM ordered
+), runs AS (
+  SELECT mentor_id, weekday, run_id, MIN(start_time) AS new_start, MAX(end_time) AS new_end,
+         (ARRAY_AGG(id ORDER BY start_time))[1] AS keep_id,
+         ARRAY_AGG(id ORDER BY start_time) AS all_ids
+  FROM grouped GROUP BY mentor_id, weekday, run_id HAVING COUNT(*) > 1
+), widened AS (
+  UPDATE weekly_availability w SET start_time = r.new_start, end_time = r.new_end
+    FROM runs r WHERE w.id = r.keep_id RETURNING w.id
+)
+DELETE FROM weekly_availability w USING runs r
+ WHERE w.id = ANY(r.all_ids) AND w.id <> r.keep_id;
