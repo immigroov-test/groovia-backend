@@ -25,4 +25,4 @@ psycopg[binary,pool]==3.3.4
 PyJWT==2.10.1
 cryptography==44.0.0
 tenacity==9.0.0
-python-json-logger==3.2.1
+python-json-logger==3.2.1boto3
