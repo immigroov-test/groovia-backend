@@ -1124,7 +1124,41 @@ def _contact_form(d: dict) -> tuple[str, str]:
     return f"Contact form: {topic}", _base(body)
 
 
+def _fx_stale_alert(d: dict) -> tuple[str, str]:
+    """Ops alarm: FX rates have stopped refreshing. Sent to admins only.
+
+    This is the one email nobody should ever receive. Every price on the platform is derived from
+    these rates, and compute_booking_price refuses to price at all once they pass fx_max_age_minutes,
+    so a silent refresh failure ends with every booking failing at checkout. The previous failure mode
+    was invisible: rates simply aged until customers could not pay."""
+    age_h = d.get("age_hours", "?")
+    limit_h = d.get("limit_hours", "?")
+    newest = d.get("newest", "unknown")
+    blocking = d.get("blocking", False)
+    head = ("FX rates are STALE - bookings are failing" if blocking
+            else "FX rates have not refreshed")
+    body = (
+        f'<p style="margin:0 0 16px">The newest exchange rate is <strong>{age_h} hours old</strong>. '
+        f'Bookings stop being priceable at <strong>{limit_h} hours</strong>.</p>'
+        f'<p style="margin:0 0 16px">Newest rate fetched: {newest}</p>'
+    )
+    if blocking:
+        body += ('<p style="margin:0 0 16px;color:#b91c1c"><strong>Customers cannot complete a booking '
+                 'right now.</strong> compute_booking_price refuses to price on rates this old rather '
+                 'than charge a wrong amount.</p>')
+    body += (
+        '<p style="margin:0 0 8px"><strong>What to check</strong></p>'
+        '<ul style="margin:0 0 16px;padding-left:18px">'
+        '<li>Is the dispatcher running? POST /payments/run-dispatcher should return ok, not 500</li>'
+        '<li>Can the backend reach the FX provider? Check the logs for refresh_fx_rates</li>'
+        '<li>Force one now: python -m scripts.refresh_fx_rates</li>'
+        '</ul>'
+    )
+    return f"[Immigroov] {head}", _base(f'<h2 style="margin:0 0 16px;font-size:18px">{head}</h2>' + body)
+
+
 _TEMPLATES = {
+    "fx_stale_alert": _fx_stale_alert,
     "booking_admin_notice": _booking_admin_notice,
     "payment_failed": _payment_failed,
     "refund_issued": _refund_issued,

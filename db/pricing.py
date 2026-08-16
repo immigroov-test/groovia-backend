@@ -227,3 +227,33 @@ def fx_or_null(base: str, quote: str) -> Optional[float]:
     except Exception:
         logger.exception("fx_or_null failed %s->%s", base, quote)
         return None
+
+
+def fx_newest_fetched_at() -> Optional[datetime]:
+    """When the most recent FX rate was fetched, or None if the table is empty.
+
+    Used by the dispatcher's staleness alert. Reads the table directly rather than going through
+    get_fx, because the point is to observe age even when the rates are too old to be usable."""
+    try:
+        res = (_supabase.table("fx_rates").select("fetched_at")
+               .order("fetched_at", desc=True).limit(1).execute())
+        if not res.data:
+            return None
+        ts = datetime.fromisoformat(str(res.data[0]["fetched_at"]).replace("Z", "+00:00"))
+        return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+    except Exception:
+        logger.exception("fx_newest_fetched_at failed")
+        return None
+
+
+def fx_max_age_minutes() -> int:
+    """The configured staleness limit. Same value compute_booking_price enforces, read from
+    platform_settings so the alert threshold can never drift from the hard limit."""
+    try:
+        res = (_supabase.table("platform_settings").select("value")
+               .eq("key", "fx_max_age_minutes").limit(1).execute())
+        if res.data:
+            return int(float(res.data[0]["value"]))
+    except Exception:
+        logger.exception("fx_max_age_minutes lookup failed")
+    return 2880
