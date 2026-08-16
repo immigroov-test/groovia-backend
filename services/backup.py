@@ -112,7 +112,13 @@ def run_backup(force: bool = False) -> dict:
     packed = gzip.compress(raw, compresslevel=9)
     blob = Fernet(os.environ["BACKUP_KEY"].encode()).encrypt(packed)
 
-    key = f"immigroov-{datetime.now(timezone.utc):%Y-%m-%d}.sql.gz.enc"
+    # Namespaced by environment. Both environments share this bucket, and with a common filename
+    # whichever ran last silently overwrote the other, so a file labelled as production could in fact
+    # be staging - discovered only during a restore, which is the worst possible moment.
+    env_name = (os.getenv("BACKUP_ENV") or ("prod" if "prod" in (config.FRONTEND_URL or "")
+                                            or "immigroov.com" in (config.FRONTEND_URL or "")
+                                            else "staging")).strip()
+    key = f"{env_name}/immigroov-{datetime.now(timezone.utc):%Y-%m-%d}.sql.gz.enc"
     s3 = boto3.client(
         "s3",
         endpoint_url=f"https://{os.environ['R2_ACCOUNT_ID']}.r2.cloudflarestorage.com",
@@ -127,7 +133,10 @@ def run_backup(force: bool = False) -> dict:
     cutoff = datetime.now(timezone.utc) - timedelta(days=RETENTION_DAYS)
     pruned = 0
     try:
-        for page in s3.get_paginator("list_objects_v2").paginate(Bucket=os.environ["R2_BUCKET"]):
+        # Scoped to this environment's prefix: without it, staging's 30-day prune would delete
+        # production's older backups too.
+        for page in s3.get_paginator("list_objects_v2").paginate(
+                Bucket=os.environ["R2_BUCKET"], Prefix=f"{env_name}/"):
             for obj in page.get("Contents", []):
                 if obj["Key"] != key and obj["LastModified"] < cutoff:
                     s3.delete_object(Bucket=os.environ["R2_BUCKET"], Key=obj["Key"])
