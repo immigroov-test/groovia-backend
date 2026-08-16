@@ -59,8 +59,16 @@ def _reconcile_payments_if_due() -> dict:
 
 # Money-correctness jobs run first (FX freshness, hold expiry), then the
 # webhook-backstop sweeps. No hard dependency between any two.
+def _daily_backup() -> dict:
+    """Encrypted database backup to R2. Self-gates to once a day, so the 5-minute tick costs
+    one job_run_history lookup. Lives here because Render cron jobs need a paid plan."""
+    from services import backup
+    return backup.run_backup()
+
+
 _JOBS = [
     ("refresh_fx_rates", _refresh_fx_rates_if_stale),
+    ("backup_to_r2", _daily_backup),
     ("expire_stale_holds", db.expire_stale_holds),
     ("sweep_verify_payments", db.sweep_verify_payments),
     ("process_refunds", db.process_refunds),
