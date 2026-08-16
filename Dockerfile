@@ -21,6 +21,11 @@ COPY --chown=app:app db ./db
 COPY --chown=app:app services ./services
 COPY --chown=app:app ai ./ai
 COPY --chown=app:app routers ./routers
+# jobs/ holds the dispatcher (run_due). routers/payments.py imports it at request time, so
+# without this the /payments/run-dispatcher endpoint 500s with ModuleNotFoundError and NOTHING
+# scheduled ever runs: reminders, refunds, expiring holds, reconciliation, the FX refresh and
+# the daily backup. It failed silently because the endpoint is the only thing that imports it.
+COPY --chown=app:app jobs ./jobs
 
 USER app
 
