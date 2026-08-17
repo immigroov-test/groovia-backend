@@ -1,3 +1,4 @@
+import json
 import logging
 import re
 from datetime import datetime
@@ -179,9 +180,37 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
     payment_events.error for follow-up instead."""
     raw_body = await request.body()
     signature = request.headers.get("x-razorpay-signature")
-    # MOCK_SERVICES=true skips signature verification for local dev/tests.
-    if not config.MOCK_SERVICES and not db.verify_webhook_signature(raw_body, signature):
+    sig_ok = config.MOCK_SERVICES or db.verify_webhook_signature(raw_body, signature)
+
+    # Log EVERY delivery, verified or not, BEFORE deciding what to do with it. A rejected webhook used
+    # to be discarded with no record in any table, which made "Razorpay never called us" and "we
+    # rejected everything Razorpay sent" indistinguishable from the database. That cost hours: the
+    # live webhook had no secret configured, so ~50 payment.captured events were 400'd and thrown
+    # away, and one customer's captured payment was cancelled as an abandoned hold.
+    try:
+        preview = json.loads(raw_body or b"{}")
+    except Exception:
+        preview = {"unparseable_body": True}
+    intake_id = db.log_webhook_event(
+        provider="razorpay",
+        event_type=preview.get("event") or "unknown",
+        external_id=request.headers.get("x-razorpay-event-id"),
+        signature_ok=bool(sig_ok),
+        payload=preview,
+    )
+
+    if not sig_ok:
+        # Loud, because this means money can move without a booking being confirmed. The signature
+        # itself is not logged: it is derived from the shared secret.
+        logger.error(
+            "RAZORPAY WEBHOOK REJECTED: signature mismatch. event=%s signature_present=%s. "
+            "Check the Secret on the LIVE webhook in Razorpay matches RAZORPAY_WEBHOOK_SECRET. "
+            "Payments may be captured without their bookings being confirmed.",
+            preview.get("event") or "unknown", bool(signature),
+        )
+        db.mark_webhook_processed(intake_id, error="signature mismatch")
         raise HTTPException(status_code=400, detail="Invalid webhook signature")
+    db.mark_webhook_processed(intake_id)
 
     payload = await request.json()
     event_type = payload.get("event", "")
