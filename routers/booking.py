@@ -937,6 +937,26 @@ def list_requests(booking_id: str, user: AuthUser = Depends(get_current_user)):
 
 # ── Background helpers ─────────────────────────────────────────────────────────
 
+def _send_one(to: str, template: str, data: dict, attachments=None) -> bool:
+    """Send one email, isolated. Returns True on success.
+
+    Every confirmation used to sit in a single try block, sequentially: customer, then mentor, then
+    admins. One failure aborted the rest, so a bounced customer address silently cost the mentor their
+    notification too, and the log said only "booking confirmation email failed" without naming who.
+    Each recipient is now independent and named in the log.
+    """
+    if not to:
+        logger.warning("email skipped: no address for template=%s", template)
+        return False
+    try:
+        mailer.send_transactional(to, template, data, attachments=attachments)
+        logger.info("email sent template=%s to=%s", template, to)
+        return True
+    except Exception:
+        logger.exception("EMAIL FAILED template=%s to=%s", template, to)
+        return False
+
+
 def _send_booking_confirmation(
     booking_id: str, mentor_id: str, candidate_email: str, candidate_name: Optional[str],
 ):
@@ -997,7 +1017,7 @@ def _send_booking_confirmation(
         except Exception:
             ics_att = None
 
-        mailer.send_transactional(
+        sent_ok = _send_one(
             candidate_email,
             "booking_confirmed_candidate",
             {
@@ -1019,9 +1039,13 @@ def _send_booking_confirmation(
             },
             attachments=ics_att,
         )
+        if not sent_ok:
+            # Loud: the customer has paid and has no record of what they booked or how to join.
+            logger.error("CUSTOMER CONFIRMATION NOT SENT booking=%s to=%s - they have paid and have "
+                         "no session details. Resend manually.", booking_id, candidate_email)
 
         if mentor_email:
-            mailer.send_transactional(
+            _send_one(
                 mentor_email,
                 "booking_confirmed_mentor",
                 {
@@ -1040,7 +1064,7 @@ def _send_booking_confirmation(
             )
 
         for admin_email in db.admin_notify_emails():
-            mailer.send_transactional(
+            _send_one(
                 admin_email,
                 "booking_admin_notice",
                 {
