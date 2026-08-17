@@ -1023,8 +1023,23 @@ GRANT EXECUTE ON FUNCTION booking_times_display(UUID) TO authenticated;
 -- ============================================================================
 CREATE OR REPLACE FUNCTION avail_add_weekly(p_mentor_id UUID, p_day TEXT, p_start TIME, p_end TIME)
 RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE
+  v_clash RECORD;
 BEGIN
   IF p_end <= p_start THEN RAISE EXCEPTION 'End must be after start'; END IF;
+  -- BUG-157/BUG-112: overlapping windows on one day were accepted, producing duplicate slots at the
+  -- same moment on the booking page. The frontend checks too, but a form check is not a rule: it can
+  -- be bypassed, and it cannot see rows that arrived from the legacy import already overlapping.
+  -- Touching ends (09:00-10:00 then 10:00-11:00) stay allowed: contiguous is not overlapping, and
+  -- the merge pass folds those into one window anyway.
+  SELECT start_time, end_time INTO v_clash
+  FROM weekly_availability
+  WHERE mentor_id = p_mentor_id AND TRIM(weekday) = TRIM(p_day)
+    AND p_start < end_time AND p_end > start_time
+  LIMIT 1;
+  IF FOUND THEN
+    RAISE EXCEPTION 'Those hours overlap % - % on %', v_clash.start_time, v_clash.end_time, p_day;
+  END IF;
   INSERT INTO weekly_availability(mentor_id, weekday, start_time, end_time, timezone, is_active)
   SELECT p_mentor_id, p_day, p_start, p_end, COALESCE(app_timezone, 'UTC'), TRUE
   FROM mentors WHERE id = p_mentor_id;
