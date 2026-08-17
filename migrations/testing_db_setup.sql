@@ -719,6 +719,7 @@ DECLARE
   v_min_notice INTERVAL;
   v_window     INTERVAL;
   v_duration   INTERVAL;
+  v_increment  INTEGER;
   v_step       INTERVAL;
   d            DATE;
   rec          RECORD;
@@ -730,7 +731,8 @@ BEGIN
          COALESCE(app_buffertime, INTERVAL '0'),
          COALESCE(app_minimum_notice, INTERVAL '0'),
          COALESCE(app_booking_window, INTERVAL '365 days')
-    INTO v_tz, v_buffer, v_min_notice, v_window
+         , slot_increment_minutes
+    INTO v_tz, v_buffer, v_min_notice, v_window, v_increment
   FROM mentors WHERE id = p_mentor_id;
 
   SELECT MAKE_INTERVAL(mins => duration) INTO v_duration
@@ -740,7 +742,12 @@ BEGIN
     RAISE EXCEPTION 'Active service % not found or has no duration', p_service_id;
   END IF;
 
-  v_step := v_duration + v_buffer;
+  -- Step by the session length (or the mentor's chosen increment), NOT length + buffer.
+  -- Adding the buffer here shifted the whole grid: with a 15-minute buffer every mentor's 30-minute
+  -- sessions were offered at 16:00, 16:45, 17:30, 18:15 - times drifting further from the hour as
+  -- the day went on, even when nothing was booked. The buffer belongs at the conflict check below,
+  -- where it does its real job of keeping a gap around sessions that are ACTUALLY booked.
+  v_step := COALESCE(MAKE_INTERVAL(mins => v_increment), v_duration);
 
   FOR d IN SELECT generate_series(p_from, p_to, INTERVAL '1 day')::DATE LOOP
     IF EXISTS (
@@ -783,7 +790,10 @@ BEGIN
              WHERE b.mentor_id = p_mentor_id
                AND b.status NOT IN ('cancelled', 'no_show')
                AND b.slot_range IS NOT NULL
-               AND b.slot_range && tstzrange(s, e)
+               -- Pad the booked range by the buffer on both sides, so a booking blocks the
+               -- slots immediately around it. This is what the buffer is for; applying it to the
+               -- step instead only corrupted the times.
+               AND b.slot_range && tstzrange(s - v_buffer, e + v_buffer)
            )
         THEN
           slot_start := s;
@@ -5233,3 +5243,9 @@ WITH ordered AS (
 )
 DELETE FROM weekly_availability w USING runs r
  WHERE w.id = ANY(r.all_ids) AND w.id <> r.keep_id;
+
+-- Optional denser slot grid (Calendly's "start time increments"). NULL = start a slot every
+-- `duration` minutes, which is the sane default. Set to 15 or 30 and a 60-minute session becomes
+-- bookable at :00 and :30 rather than only on the hour, which recovers most of the gap left by a
+-- short booking without ever producing an irregular start time.
+ALTER TABLE mentors ADD COLUMN IF NOT EXISTS slot_increment_minutes INTEGER;
