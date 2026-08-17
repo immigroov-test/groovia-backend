@@ -9,6 +9,7 @@ import logging
 from datetime import datetime
 
 import config
+from services import access_token
 import db
 from services import mailer, policy
 
@@ -55,7 +56,10 @@ def send_session_reminders() -> dict:
                 continue
             info = db.get_booking_notify_info(bid) or {}
             times = db.get_booking_times_display(bid)
-            meeting_url = f"{config.FRONTEND_URL}/meeting/{bid}"
+            # Per-party tokenised links: the reminder is often the message someone actually clicks,
+            # and a guest has no account, so a link that redirects to /login is useless to them.
+            urls = {"customer_local": access_token.session_url(bid, "candidate"),
+                    "mentor_local": access_token.session_url(bid, "mentor")}
             recipients = (
                 (info.get("candidate_email"), info.get("candidate_name"),
                  info.get("mentor_name") or "your mentor", "customer_local", "customer_tz"),
@@ -69,7 +73,7 @@ def send_session_reminders() -> dict:
                     mailer.send_transactional(to, f"session_reminder_{kind}", {
                         "recipient_name": recipient_name or "there",
                         "other_party_name": other_name,
-                        "meeting_url": meeting_url,
+                        "meeting_url": urls[local_key],
                         "session_time": _fmt_time(times, local_key, tz_key),
                     })
                     sent += 1
