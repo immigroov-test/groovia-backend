@@ -365,7 +365,7 @@ def _booking_confirmed_candidate(d: dict) -> tuple[str, str]:
         '<div style="margin:20px 0 0;padding:14px 16px;background:#fff7ed;border:1px solid #fed7aa;border-radius:12px">'
         '<p style="margin:0;font-size:14px;color:#7c2d12;line-height:1.6">'
         'You booked as a <strong>guest</strong>. Create a free account with <strong>this email</strong> '
-        'to join your session and manage it (reschedule or cancel).</p>'
+        'to reschedule or cancel this session and see it alongside any others.</p>'
         + (_btn(signup_url, "Create your free account") if signup_url else "")
         + '</div>'
     )
@@ -387,9 +387,13 @@ def _booking_confirmed_candidate(d: dict) -> tuple[str, str]:
         + '<p style="margin:16px 0 0;font-size:15px;color:#444;line-height:1.6">'
         f"You'll receive a reminder {policy.reminder_notice()} before the session."
         "</p>"
+        # The Join button goes to EVERYONE now. It used to be replaced by the guest block, written when
+        # a guest genuinely could not join without an account; the link now carries a signed token, so
+        # withholding the button left paying guests with no way in. The account nudge stays for guests,
+        # but as an addition rather than a substitute.
+        + (_btn(url, "Join meeting") if url else "")
         + (guest_block if is_guest else (
-            (_btn(url, "Join meeting") if url else "")
-            + '<p style="margin:20px 0 0;font-size:14px;color:#444;line-height:1.6">'
+            '<p style="margin:20px 0 0;font-size:14px;color:#444;line-height:1.6">'
             f'Need to change it? <a href="{config.FRONTEND_URL}/account/sessions" style="color:#6b7fff">Reschedule or cancel</a>'
             " anytime from your account.</p>"
         ))
