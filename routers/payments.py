@@ -200,15 +200,24 @@ async def webhook(request: Request, background_tasks: BackgroundTasks):
     )
 
     if not sig_ok:
+        # One False hides three different faults with three different fixes. Naming which one turns
+        # the next occurrence into a one-line diagnosis instead of a day's work.
+        if not config.RAZORPAY_WEBHOOK_SECRET:
+            reason = ("OUR secret is missing: RAZORPAY_WEBHOOK_SECRET is not set on this service. "
+                      "Set it on Render and redeploy.")
+        elif not signature:
+            reason = ("Razorpay sent NO signature, which means the webhook in Razorpay has no Secret "
+                      "configured. Note Razorpay keeps SEPARATE webhooks for Test and Live mode: check "
+                      "you are editing the LIVE one.")
+        else:
+            reason = ("Signature present but does not match. The Secret on Razorpay's LIVE webhook and "
+                      "RAZORPAY_WEBHOOK_SECRET on this service are different values.")
         # Loud, because this means money can move without a booking being confirmed. The signature
-        # itself is not logged: it is derived from the shared secret.
-        logger.error(
-            "RAZORPAY WEBHOOK REJECTED: signature mismatch. event=%s signature_present=%s. "
-            "Check the Secret on the LIVE webhook in Razorpay matches RAZORPAY_WEBHOOK_SECRET. "
-            "Payments may be captured without their bookings being confirmed.",
-            preview.get("event") or "unknown", bool(signature),
-        )
-        db.mark_webhook_processed(intake_id, error="signature mismatch")
+        # itself is never logged: it derives from the shared secret.
+        logger.error("RAZORPAY WEBHOOK REJECTED. event=%s cause=%s "
+                     "Consequence: payments may be captured without their bookings being confirmed.",
+                     preview.get("event") or "unknown", reason)
+        db.mark_webhook_processed(intake_id, error=f"signature rejected: {reason}")
         raise HTTPException(status_code=400, detail="Invalid webhook signature")
     db.mark_webhook_processed(intake_id)
 

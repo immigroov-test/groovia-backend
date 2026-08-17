@@ -69,3 +69,20 @@ def upsert_booking(fields: dict[str, Any], *, insert_only: bool = False) -> None
         on_conflict="external_id",
         ignore_duplicates=insert_only,
     ).execute()
+
+
+def recent_rejected_webhooks(since: datetime) -> list[dict]:
+    """Webhook deliveries rejected for a bad signature since `since`, newest first.
+
+    Feeds the dispatcher's alert. A rejection means the payment likely succeeded at the provider while
+    we never recorded it, so the booking gets cancelled as an abandoned hold."""
+    try:
+        res = (_supabase.table("webhook_events")
+               .select("id, event_type, error, received_at")
+               .eq("signature_ok", False)
+               .gte("received_at", since.isoformat())
+               .order("received_at", desc=True).limit(200).execute())
+        return res.data or []
+    except Exception:
+        logger.exception("recent_rejected_webhooks failed")
+        return []

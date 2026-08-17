@@ -1157,8 +1157,36 @@ def _fx_stale_alert(d: dict) -> tuple[str, str]:
     return f"[Immigroov] {head}", _base(f'<h2 style="margin:0 0 16px;font-size:18px">{head}</h2>' + body)
 
 
+def _webhook_rejected_alert(d: dict) -> tuple[str, str]:
+    """Ops alarm: Razorpay webhooks are being rejected. Admins only.
+
+    This is the alert that would have saved a day. Roughly 50 payment.captured events were rejected
+    for a missing webhook secret, one customer's captured payment was cancelled as an abandoned hold,
+    and nothing raised its hand. Money can move without a booking being confirmed, so it is urgent."""
+    n = d.get("count", "?")
+    cause = d.get("cause") or "signature rejected"
+    head = "Razorpay webhooks are being REJECTED"
+    body = (
+        f'<p style="margin:0 0 16px"><strong>{n} webhook(s) rejected in the last hour.</strong></p>'
+        f'<p style="margin:0 0 16px;color:#b91c1c">Customers may be paying successfully and having '
+        f'their bookings cancelled as unpaid. Razorpay keeps their money; we record a failure.</p>'
+        f'<p style="margin:0 0 8px"><strong>Most recent cause</strong></p>'
+        f'<p style="margin:0 0 16px">{cause}</p>'
+        '<p style="margin:0 0 8px"><strong>What to check</strong></p>'
+        '<ul style="margin:0 0 16px;padding-left:18px">'
+        '<li>Razorpay -> Settings -> Webhooks, in <strong>LIVE</strong> mode (test and live are separate)</li>'
+        '<li>The webhook Secret there must equal RAZORPAY_WEBHOOK_SECRET on the backend, exactly</li>'
+        '<li>Events subscribed: payment.captured, payment.failed, refund.created, refund.processed</li>'
+        '</ul>'
+        '<p style="margin:0">Recently affected payments can be recovered: the verify sweep re-checks '
+        'Razorpay every 5 minutes and will confirm anything it finds captured.</p>'
+    )
+    return f"[Immigroov] {head}", _base(f'<h2 style="margin:0 0 16px;font-size:18px">{head}</h2>' + body)
+
+
 _TEMPLATES = {
     "fx_stale_alert": _fx_stale_alert,
+    "webhook_rejected_alert": _webhook_rejected_alert,
     "booking_admin_notice": _booking_admin_notice,
     "payment_failed": _payment_failed,
     "refund_issued": _refund_issued,

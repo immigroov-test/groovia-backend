@@ -116,9 +116,45 @@ def _fx_staleness_alert() -> dict:
     return {"stale": True, "age_hours": round(age_h, 1), "alerted": len(recipients), "blocking": blocking}
 
 
+def _webhook_rejection_alert() -> dict:
+    """Alert when Razorpay webhooks are being rejected, because money moves and bookings do not.
+
+    A rejected webhook means the payment succeeded at Razorpay while our side never heard, so
+    expire_stale_holds cancels the booking as abandoned. The customer has paid and has nothing. This
+    ran for a full day with ~50 rejections in the logs and nobody knew, which is what this exists to
+    prevent. Re-alerts at most once every 3 hours."""
+    from datetime import datetime, timedelta, timezone
+    from db import jobs as job_db
+
+    since = datetime.now(timezone.utc) - timedelta(hours=1)
+    rejects = db.recent_rejected_webhooks(since)
+    if not rejects:
+        return {"ok": True, "rejected_last_hour": 0}
+
+    if not job_db.job_is_due("webhook_reject_alert", timedelta(hours=3)):
+        return {"rejected_last_hour": len(rejects), "skipped": "alerted within 3h"}
+
+    recipients = db.admin_notify_emails()
+    if not recipients:
+        logger.error("%d webhook(s) REJECTED in the last hour but no admin recipients configured",
+                     len(rejects))
+        return {"rejected_last_hour": len(rejects), "error": "no admin recipients"}
+
+    cause = (rejects[0].get("error") or "signature rejected")
+    for to in recipients:
+        try:
+            mailer.send_transactional(to, "webhook_rejected_alert",
+                                      {"count": len(rejects), "cause": cause})
+        except Exception:
+            logger.exception("could not send webhook_rejected_alert to %s", to)
+    job_db.mark_job_run("webhook_reject_alert")
+    return {"rejected_last_hour": len(rejects), "alerted": len(recipients)}
+
+
 _JOBS = [
     ("refresh_fx_rates", _refresh_fx_rates_if_stale),
     ("fx_staleness_alert", _fx_staleness_alert),
+    ("webhook_rejection_alert", _webhook_rejection_alert),
     ("backup_to_r2", _daily_backup),
     ("expire_stale_holds", db.expire_stale_holds),
     ("sweep_verify_payments", db.sweep_verify_payments),
