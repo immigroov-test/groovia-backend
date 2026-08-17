@@ -18,6 +18,7 @@ records, and R2 is a third party.
 
 Required env (on the Render web service, since that is what the dispatcher hits):
   R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_BUCKET
+  R2_JURISDICTION   set to "eu" for an EU-jurisdiction bucket (or set R2_ENDPOINT outright)
   BACKUP_KEY   a Fernet key. LOSE IT AND EVERY BACKUP IS UNREADABLE.
                generate: python -c "from cryptography.fernet import Fernet;print(Fernet.generate_key().decode())"
 
@@ -119,9 +120,16 @@ def run_backup(force: bool = False) -> dict:
                                             or "immigroov.com" in (config.FRONTEND_URL or "")
                                             else "staging")).strip()
     key = f"{env_name}/immigroov-{datetime.now(timezone.utc):%Y-%m-%d}.sql.gz.enc"
+    # An EU-jurisdiction bucket is ONLY reachable through the .eu. endpoint; the default endpoint
+    # returns NoSuchBucket for it. R2_ENDPOINT overrides outright, otherwise R2_JURISDICTION=eu
+    # selects the EU host. EU jurisdiction keeps the (encrypted) backups inside the EU, which is the
+    # cleaner GDPR posture now that we have Dutch customers.
+    juris = (os.getenv("R2_JURISDICTION") or "").strip().lower()
+    default_host = (f"https://{os.environ['R2_ACCOUNT_ID']}"
+                    f"{'.eu' if juris == 'eu' else ''}.r2.cloudflarestorage.com")
     s3 = boto3.client(
         "s3",
-        endpoint_url=f"https://{os.environ['R2_ACCOUNT_ID']}.r2.cloudflarestorage.com",
+        endpoint_url=os.getenv("R2_ENDPOINT") or default_host,
         aws_access_key_id=os.environ["R2_ACCESS_KEY_ID"],
         aws_secret_access_key=os.environ["R2_SECRET_ACCESS_KEY"],
         region_name="auto",
