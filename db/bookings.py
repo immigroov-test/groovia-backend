@@ -86,3 +86,20 @@ def recent_rejected_webhooks(since: datetime) -> list[dict]:
     except Exception:
         logger.exception("recent_rejected_webhooks failed")
         return []
+
+
+def payout_consistency_issues() -> list[dict]:
+    """Bookings whose payout record contradicts their status, or [] when the books agree.
+
+    Backs the dispatcher's alert. payout_state used to be written by three functions, one of which
+    only ever voided, so a session the mentor had genuinely earned could sit recorded as owing
+    nothing. Payouts are settled by hand against that record and the admin payout list filters on it,
+    so a wrong row is invisible: it is simply absent from the list, and the mentor is underpaid with
+    nothing raising its hand. One trigger owns the column now, and this reads the same invariant so
+    any future drift arrives by email instead of via a mentor complaining."""
+    try:
+        res = _supabase.rpc("payout_consistency_check", {}).execute()
+        return res.data or []
+    except Exception:
+        logger.exception("payout_consistency_issues failed")
+        return []

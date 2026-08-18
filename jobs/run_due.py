@@ -151,10 +151,45 @@ def _webhook_rejection_alert() -> dict:
     return {"rejected_last_hour": len(rejects), "alerted": len(recipients)}
 
 
+def _payout_consistency_alert() -> dict:
+    """Alert when a payout record contradicts its booking's status.
+
+    Mentors are paid by hand against these records, and the admin payout list filters on
+    payout_state, so a wrongly voided session is not shown as a discrepancy: it is simply absent, and
+    the mentor is underpaid silently. One such row sat wrong for days and was found only by accident
+    while investigating something else. Re-alerts at most once a day, since resolving it is a human
+    decision rather than something a retry fixes."""
+    from datetime import timedelta
+    from db import jobs as job_db
+
+    issues = db.payout_consistency_issues()
+    if not issues:
+        return {"ok": True, "mismatches": 0}
+
+    if not job_db.job_is_due("payout_mismatch_alert", timedelta(hours=24)):
+        return {"mismatches": len(issues), "skipped": "alerted within 24h"}
+
+    recipients = db.admin_notify_emails()
+    if not recipients:
+        logger.error("%d payout record(s) contradict their booking but no admin recipients configured",
+                     len(issues))
+        return {"mismatches": len(issues), "error": "no admin recipients"}
+
+    for to in recipients:
+        try:
+            mailer.send_transactional(to, "payout_mismatch_alert",
+                                      {"count": len(issues), "rows": issues[:20]})
+        except Exception:
+            logger.exception("could not send payout_mismatch_alert to %s", to)
+    job_db.mark_job_run("payout_mismatch_alert")
+    return {"mismatches": len(issues), "alerted": len(recipients)}
+
+
 _JOBS = [
     ("refresh_fx_rates", _refresh_fx_rates_if_stale),
     ("fx_staleness_alert", _fx_staleness_alert),
     ("webhook_rejection_alert", _webhook_rejection_alert),
+    ("payout_consistency_alert", _payout_consistency_alert),
     ("backup_to_r2", _daily_backup),
     ("expire_stale_holds", db.expire_stale_holds),
     ("sweep_verify_payments", db.sweep_verify_payments),

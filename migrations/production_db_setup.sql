@@ -2890,6 +2890,20 @@ UPDATE mentor_payouts
 SET net_amount_mentor_currency = ROUND(amount * (1 - COALESCE(fee_pct, 0) / 100.0), 2)
 WHERE amount IS NOT NULL AND net_amount_mentor_currency IS NULL;
 
+-- Correction: payout_state used to be written by three different functions, one of which only ever
+-- voided, so a booking brought back out of cancelled/no_show kept a real earning recorded as 'void'.
+-- Re-derives the column from bookings.status using exactly the rule trg_sync_payout_state_fn now
+-- enforces, so any database this script runs against is brought onto the invariant in both
+-- directions. Idempotent: it matches only rows that actually disagree. 'paid'/'blocked' are admin
+-- settlement decisions and are never touched.
+UPDATE mentor_payouts po
+SET payout_state = CASE WHEN b.status IN ('cancelled','no_show') THEN 'void' ELSE 'pending' END
+FROM bookings b
+WHERE b.id = po.booking_id
+  AND po.payout_state NOT IN ('paid','blocked')
+  AND po.payout_state IS DISTINCT FROM
+      (CASE WHEN b.status IN ('cancelled','no_show') THEN 'void' ELSE 'pending' END);
+
 CREATE TABLE IF NOT EXISTS payment_refunds (
   id                          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   payment_id                  UUID NOT NULL REFERENCES customer_payments(id) ON DELETE CASCADE,
@@ -3029,6 +3043,9 @@ BEGIN
   END IF;
   IF v_ment > 0 THEN
     IF p_mentor_penalty_pct > 0 THEN PERFORM add_ledger(p_booking,'mentor','penalty', ROUND(v_ment*p_mentor_penalty_pct/100.0,2), p_mentor_penalty_pct, p_reason); END IF;
+    -- Ledger only. payout_state belongs solely to trg_sync_payout_state_fn: a mentor credit always
+    -- accompanies a status change (no_show -> completed) that the trigger already handles. Writing it
+    -- here as well is what gave the column three writers and let a transition slip through unhandled.
     IF p_mentor_credit_pct > 0 THEN PERFORM add_ledger(p_booking,'mentor','credit', ROUND(v_ment*p_mentor_credit_pct/100.0,2), p_mentor_credit_pct, p_reason); END IF;
   END IF;
 END;
@@ -3110,21 +3127,58 @@ END;
 $$;
 GRANT EXECUTE ON FUNCTION set_payout_blocked(UUID, TEXT) TO authenticated;
 
--- A cancelled/no-show booking's payout is automatically voided (unless already
--- paid or blocked). Idempotent: only fires when status actually CHANGES.
-CREATE OR REPLACE FUNCTION trg_void_payout_fn()
+-- payout_state has exactly ONE writer: this trigger, deriving it from bookings.status.
+--
+-- It used to be written in three places (here, settle_booking, confirm_booking_payment), each
+-- covering a different subset of transitions, and this one only ever voided. So every path that
+-- brought a booking back OUT of cancelled/no_show left a real earning recorded as 'void':
+-- resolve_customer_no_show('reject') credits the mentor 100% in booking_ledger while this said
+-- nothing was owed, and the admin payout list (which filters on payout_state) simply omitted the
+-- session, so the owner would underpay and the mentor saw 'void' on work they did.
+--
+-- Written as a CASE over every status rather than a pair of one-way branches: the same status always
+-- yields the same value, in both directions, so there is no transition left to forget. That is what
+-- makes the class of bug structurally impossible rather than merely fixed.
+--   cancelled / no_show -> 'void'      nothing owed
+--   anything else       -> 'pending'   owed, not yet settled
+-- 'paid' and 'blocked' record an ADMIN decision about settlement, which is a separate concern from
+-- whether the session was earned, so a status change never overwrites them.
+DROP TRIGGER IF EXISTS trg_void_payout ON bookings;
+DROP FUNCTION IF EXISTS trg_void_payout_fn();
+
+CREATE OR REPLACE FUNCTION trg_sync_payout_state_fn()
 RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 BEGIN
-  IF NEW.status IN ('cancelled','no_show') AND NEW.status IS DISTINCT FROM OLD.status THEN
-    UPDATE mentor_payouts SET payout_state = 'void'
-      WHERE booking_id = NEW.id AND payout_state NOT IN ('paid','blocked');
+  IF NEW.status IS DISTINCT FROM OLD.status THEN
+    UPDATE mentor_payouts
+       SET payout_state = CASE WHEN NEW.status IN ('cancelled','no_show') THEN 'void'
+                               ELSE 'pending' END
+     WHERE booking_id = NEW.id
+       AND payout_state NOT IN ('paid','blocked');
   END IF;
   RETURN NEW;
 END;
 $$;
-DROP TRIGGER IF EXISTS trg_void_payout ON bookings;
-CREATE TRIGGER trg_void_payout AFTER UPDATE OF status ON bookings
-  FOR EACH ROW EXECUTE FUNCTION trg_void_payout_fn();
+DROP TRIGGER IF EXISTS trg_sync_payout_state ON bookings;
+CREATE TRIGGER trg_sync_payout_state AFTER UPDATE OF status ON bookings
+  FOR EACH ROW EXECUTE FUNCTION trg_sync_payout_state_fn();
+
+-- Invariant behind the trigger, so drift is detected rather than discovered by a mentor complaining.
+-- Read by the dispatcher's payout_consistency_alert. Returns nothing when the records agree.
+CREATE OR REPLACE FUNCTION payout_consistency_check()
+RETURNS TABLE(booking_id UUID, status_now TEXT, state_now TEXT, problem TEXT)
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT b.id, b.status, po.payout_state,
+         'active or completed booking recorded as owing nothing'::TEXT
+    FROM bookings b JOIN mentor_payouts po ON po.booking_id = b.id
+   WHERE b.status NOT IN ('cancelled','no_show') AND po.payout_state = 'void'
+  UNION ALL
+  SELECT b.id, b.status, po.payout_state,
+         'cancelled or no-show booking recorded as owed'::TEXT
+    FROM bookings b JOIN mentor_payouts po ON po.booking_id = b.id
+   WHERE b.status IN ('cancelled','no_show') AND po.payout_state = 'pending';
+$$;
+REVOKE ALL ON FUNCTION payout_consistency_check() FROM PUBLIC, anon, authenticated;
 
 -- Whitelisted public read of platform_settings — only 'payments_enabled'.
 CREATE OR REPLACE FUNCTION public_setting(p_key TEXT)
@@ -3303,8 +3357,12 @@ BEGIN
   UPDATE bookings SET status = 'confirmed', payment_hold_expires_at = NULL WHERE id = p_booking_id;
   UPDATE customer_payments SET state = 'captured', provider = 'razorpay', provider_payment_id = p_provider_ref
     WHERE booking_id = p_booking_id AND state = 'created';
-  UPDATE mentor_payouts SET method = COALESCE(method, 'manual'), payout_state = COALESCE(payout_state, 'pending')
-    WHERE booking_id = p_booking_id;
+  -- method only. payout_state follows from the status change above, via trg_sync_payout_state_fn.
+  -- The COALESCE(payout_state,'pending') that used to be here could never fire in any case: the
+  -- column is NOT NULL DEFAULT 'pending' and reserve_booking sets it explicitly, so it was dead code
+  -- that merely looked like it was arming the payout.
+  UPDATE mentor_payouts SET method = COALESCE(method, 'manual')
+   WHERE booking_id = p_booking_id;
 
   RETURN 'confirmed';
 END;
