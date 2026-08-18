@@ -1188,9 +1188,42 @@ def _webhook_rejected_alert(d: dict) -> tuple[str, str]:
     return f"[Immigroov] {head}", _base(f'<h2 style="margin:0 0 16px;font-size:18px">{head}</h2>' + body)
 
 
+def _payout_mismatch_alert(d: dict) -> tuple[str, str]:
+    """Ops alarm: a mentor payout record contradicts its booking. Admins only.
+
+    Mentors are settled by hand from these records, so a wrong one is money quietly not sent. It is
+    worse than a visible error because the admin payout list filters on payout_state: a wrongly voided
+    session does not appear as a problem, it simply is not in the list."""
+    n = d.get("count", "?")
+    rows = d.get("rows") or []
+    items = "".join(
+        f'<li style="margin:0 0 8px"><code>{r.get("booking_id", "?")}</code><br>'
+        f'booking is <strong>{r.get("status_now", "?")}</strong>, '
+        f'payout says <strong>{r.get("state_now", "?")}</strong><br>'
+        f'<span style="color:#6b7280">{r.get("problem", "")}</span></li>'
+        for r in rows
+    )
+    head = "Mentor payout records disagree with their bookings"
+    body = (
+        f'<p style="margin:0 0 16px"><strong>{n} payout record(s) contradict their booking.</strong></p>'
+        '<p style="margin:0 0 16px;color:#b91c1c">Mentors are paid by hand against these records. A '
+        'session recorded as owing nothing is absent from the payout list altogether, so it gets paid '
+        'short with nothing flagging it.</p>'
+        f'<ul style="margin:0 0 16px;padding-left:18px">{items}</ul>'
+        '<p style="margin:0 0 8px"><strong>The rule that should hold</strong></p>'
+        '<p style="margin:0 0 16px">cancelled or no_show gives <code>void</code>; any other status '
+        'gives <code>pending</code>. <code>paid</code> and <code>blocked</code> are settlement '
+        'decisions and are never changed automatically.</p>'
+        '<p style="margin:0">Re-running the setup script re-derives the column and clears this. If it '
+        'comes back, something is writing payout_state outside trg_sync_payout_state_fn.</p>'
+    )
+    return f"[Immigroov] {head}", _base(f'<h2 style="margin:0 0 16px;font-size:18px">{head}</h2>' + body)
+
+
 _TEMPLATES = {
     "fx_stale_alert": _fx_stale_alert,
     "webhook_rejected_alert": _webhook_rejected_alert,
+    "payout_mismatch_alert": _payout_mismatch_alert,
     "booking_admin_notice": _booking_admin_notice,
     "payment_failed": _payment_failed,
     "refund_issued": _refund_issued,
