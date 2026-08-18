@@ -13,6 +13,10 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 import config
 import db
 import ai.graph as backend  # accessed at request-time so we read the lifespan-initialized app
+
+# Bump when the resume-consent wording changes, so an old record still says what was agreed to.
+# Mirrors UI_CONTENT.report.consent in the frontend.
+CONSENT_POLICY_VERSION = "2026-08-18"
 from core.auth import AuthUser, get_current_user, get_current_user_optional
 from ai.graph import _text
 from ai.smalltalk import smalltalk_reply
@@ -102,6 +106,10 @@ async def chat_handler(
     message: str = Form(...),
     thread_id: str = Form(...),
     file: Optional[UploadFile] = File(None),
+    # BUG-143: a resume is personal data and we run it through a model, so it needs its own consent.
+    # Enforced here rather than only in the browser: a client-side checkbox is a prompt, not a
+    # control, and this endpoint is what actually does the processing.
+    ai_consent: Optional[str] = Form(None),
     user: Optional[AuthUser] = Depends(get_current_user_optional),
 ):
     """Main chat endpoint. Guests get a couple of free, short questions (the frontend counts them
@@ -116,6 +124,19 @@ async def chat_handler(
 
     resume_text = None
     if file:
+        if (ai_consent or "").strip().lower() not in ("1", "true", "yes", "on"):
+            raise HTTPException(
+                status_code=400,
+                detail="Please agree to your resume being analysed before uploading it.",
+            )
+        db.record_consent(
+            kind="resume_ai_analysis",
+            user_id=user.id if user else None,
+            thread_id=thread_id,
+            policy_version=CONSENT_POLICY_VERSION,
+            ip=(request.client.host if request.client else None),
+            user_agent=request.headers.get("user-agent"),
+        )
         file_bytes = await file.read()
         if len(file_bytes) > config.MAX_FILE_BYTES:
             raise HTTPException(

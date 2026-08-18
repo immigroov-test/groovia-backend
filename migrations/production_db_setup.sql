@@ -3389,6 +3389,29 @@ END;
 $$;
 REVOKE ALL ON FUNCTION expire_stale_holds() FROM PUBLIC, anon, authenticated;
 
+-- ── Consent records (BUG-143) ────────────────────────────────────────────────
+-- GDPR Art 7(1) requires consent to be DEMONSTRABLE, so a ticked box that leaves no trace does not
+-- satisfy it. One row per grant: who, what they agreed to, and when.
+--
+-- Scoped to processing that genuinely needs consent, which for us is running a resume through an AI
+-- model. Auth cookies are strictly necessary and exempt; the AI disclaimer under the chat composer is
+-- a transparency notice rather than consent and needs no record.
+--
+-- user_id is nullable on purpose: a guest can reach the resume step before signing in, and their
+-- consent still has to be recorded.
+CREATE TABLE IF NOT EXISTS consent_events (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id     UUID REFERENCES auth.users(id) ON DELETE SET NULL,
+  thread_id   UUID,
+  kind        TEXT NOT NULL,           -- e.g. 'resume_ai_analysis'
+  granted     BOOLEAN NOT NULL DEFAULT TRUE,
+  policy_version TEXT,                 -- which wording they agreed to, so a later change is provable
+  ip          TEXT,
+  user_agent  TEXT,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_consent_events_user ON consent_events(user_id, kind, created_at DESC);
+
 -- ── Dispatcher lease lock + job self-gating (Render Cron Job has no mutex) ────
 -- TTL-based lease row (not pg_advisory_lock — supabase-py's stateless RPC calls
 -- can't hold a session-level lock across two calls). A UNIQUE collision on
