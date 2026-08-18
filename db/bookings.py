@@ -88,6 +88,29 @@ def recent_rejected_webhooks(since: datetime) -> list[dict]:
         return []
 
 
+def record_consent(*, kind: str, user_id: Optional[str] = None, thread_id: Optional[str] = None,
+                   granted: bool = True, policy_version: Optional[str] = None,
+                   ip: Optional[str] = None, user_agent: Optional[str] = None) -> None:
+    """Record one consent grant (BUG-143).
+
+    GDPR Art 7(1) puts the burden of proof on us: we must be able to demonstrate that the person
+    consented, which a ticked box leaving no trace cannot do. Never raises: a failure to write the
+    record must not stop the person using the feature they just agreed to, so it logs instead.
+    """
+    try:
+        _supabase.table("consent_events").insert({
+            "kind": kind,
+            "user_id": user_id,
+            "thread_id": thread_id,
+            "granted": granted,
+            "policy_version": policy_version,
+            "ip": ip,
+            "user_agent": (user_agent or "")[:500] or None,
+        }).execute()
+    except Exception:
+        logger.exception("record_consent failed kind=%s user=%s", kind, user_id)
+
+
 def payout_consistency_issues() -> list[dict]:
     """Bookings whose payout record contradicts their status, or [] when the books agree.
 
