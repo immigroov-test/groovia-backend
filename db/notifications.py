@@ -109,7 +109,11 @@ def due_review_requests(
             .select("booking_id")
             .eq("kind", "review_request")
             .in_("booking_id", ids)
-            .lte("created_at", cutoff)
+            # booking_reminders records the send time as sent_at; it has no created_at. Filtering on
+            # a column that does not exist made the query fail, the except below swallowed it, and
+            # `ready` came back empty every time, so the 3-day review reminder never sent once. The
+            # first review email went out and the follow-up silently did not.
+            .lte("sent_at", cutoff)
             .execute()
         ).data or []
     except Exception:
