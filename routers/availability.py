@@ -180,6 +180,50 @@ def block_date(body: BlockDateBody, user: AuthUser = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail="Failed to block date")
 
 
+class BlockDatesBody(BaseModel):
+    """BUG-158: several dates blocked in one request, so a mentor blocking a holiday does not have
+    to make one round trip per day."""
+    slot_dates: list[date]
+
+    @field_validator("slot_dates")
+    @classmethod
+    def validate_dates(cls, v: list[date]) -> list[date]:
+        if not v:
+            raise ValueError("Select at least one date to block")
+        # A year's worth is far more than anyone blocks by hand; past that it is a runaway client
+        # rather than a real request, and each date costs a write.
+        if len(v) > 366:
+            raise ValueError("Too many dates in one request (max 366)")
+        return v
+
+
+@router.post("/block-dates")
+def block_dates(body: BlockDatesBody, user: AuthUser = Depends(get_current_user)):
+    """Block every date in `slot_dates`.
+
+    Each date is written separately (avail_block_date is delete-then-insert per date, so this is
+    idempotent and a repeat is harmless). One bad date therefore does not lose the rest: the
+    successes stand and the failures come back in `failed`, which lets the client say exactly what
+    did not happen instead of reporting the whole action as failed. Only a request where NOTHING
+    could be written is an error.
+    """
+    mentor_id = _get_mentor_id(user)
+    blocked: list[str] = []
+    failed: list[str] = []
+    # dict.fromkeys de-dupes while keeping the order the mentor picked, so the response reads back
+    # the way their selection looked.
+    for slot_date in dict.fromkeys(str(d) for d in body.slot_dates):
+        try:
+            db.block_date(mentor_id=mentor_id, slot_date=slot_date)
+            blocked.append(slot_date)
+        except Exception:
+            logger.exception("block_dates failed mentor=%s date=%s", mentor_id, slot_date)
+            failed.append(slot_date)
+    if failed and not blocked:
+        raise HTTPException(status_code=500, detail="Failed to block the selected dates")
+    return {"blocked": blocked, "failed": failed}
+
+
 class OverrideDateBody(BaseModel):
     slot_date: date
     start_time: str
