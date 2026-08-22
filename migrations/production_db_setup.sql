@@ -29,6 +29,12 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 -- 'changes_requested': admin asked the applicant to revise (editable + can resubmit),
 -- distinct from 'rejected' (declined). Idempotent add for DBs that predate it.
 ALTER TYPE mentor_status ADD VALUE IF NOT EXISTS 'changes_requested';
+-- FEAT-020: self-service states. 'deactivated' = paused by the mentor, reactivate any time.
+-- 'deletion_pending' = the mentor asked to leave; reactivate within 90 days, then the personal
+-- fields are scrubbed. Both are distinct from 'suspended', which is an admin action the mentor
+-- cannot undo themselves.
+ALTER TYPE mentor_status ADD VALUE IF NOT EXISTS 'deactivated';
+ALTER TYPE mentor_status ADD VALUE IF NOT EXISTS 'deletion_pending';
 
 DO $$ BEGIN
   CREATE TYPE booking_status AS ENUM
@@ -327,6 +333,26 @@ ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS years_professional_experience INTE
 ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS served_countries JSONB NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS legacy_id TEXT UNIQUE;
 ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS legacy_data JSONB;
+
+-- FEAT-020: a mentor can hide their own profile without an admin. Two self-service states, both
+-- caught by the sync_mentor_is_active trigger further down (is_active := status = 'approved'), so
+-- either one drops them out of browse and out of every bookable query with no extra filtering:
+--   'deactivated'      - a pause. Reactivate whenever; nothing is ever deleted.
+--   'deletion_pending' - a leave. Reactivate within 90 days, after which the purge job clears the
+--                        personal fields (jobs/run_due.py -> db.purge_due_mentor_deletions).
+-- Note the profile is only ever hidden, never row-deleted: bookings.mentor_id is ON DELETE RESTRICT
+-- and mentor_payouts cascades, so deleting the row would either fail outright for any mentor who
+-- has traded, or take the financial history with it. The purge scrubs the personal columns and
+-- leaves bookings/payments/payouts intact.
+-- deactivated_at is when the mentor asked; purge_due_at is when the scrub becomes due (NULL for a
+-- plain deactivation, which never expires); anonymized_at is stamped once the scrub has run, so the
+-- job is idempotent and an already-scrubbed row is never picked up twice.
+ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS deactivated_at TIMESTAMPTZ;
+ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS purge_due_at   TIMESTAMPTZ;
+ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS anonymized_at  TIMESTAMPTZ;
+-- The purge scan: due, not yet done. Tiny partial index; the job runs on every dispatcher tick.
+CREATE INDEX IF NOT EXISTS idx_mentors_purge_due
+  ON mentors(purge_due_at) WHERE purge_due_at IS NOT NULL AND anonymized_at IS NULL;
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS candidate_phone TEXT;
 ALTER TABLE services ADD COLUMN IF NOT EXISTS tags TEXT[] NOT NULL DEFAULT '{}';
 

@@ -822,16 +822,67 @@ def set_availability(body: AvailabilityBody, user: AuthUser = Depends(get_curren
     return {"saved": len(inserted), "session_duration_minutes": body.session_duration_minutes}
 
 
+class DeactivateBody(BaseModel):
+    """FEAT-020. `delete=False` pauses the profile indefinitely; `delete=True` also starts the
+    grace clock, after which the personal fields are scrubbed."""
+    delete: bool = False
+
+
+@router.get("/me/deactivation")
+def deactivation_status(user: AuthUser = Depends(get_current_user)):
+    """What the mentor needs to decide, and to see afterwards: which self-service state they are in,
+    when the grace window runs out, and how many booked sessions they are still expected to attend.
+
+    Those sessions are honoured rather than cancelled when a profile is hidden, so the number is
+    shown BEFORE they confirm - otherwise the mentor has no way to know they still owe them."""
+    mentor = db.get_mentor_by_profile_id(user.id)
+    if not mentor:
+        raise HTTPException(status_code=404, detail="No mentor profile for this account")
+    return {
+        "status": mentor.get("status"),
+        "deactivated_at": mentor.get("deactivated_at"),
+        "purge_due_at": mentor.get("purge_due_at"),
+        "anonymized_at": mentor.get("anonymized_at"),
+        "grace_days": db.DELETION_GRACE_DAYS,
+        "upcoming_sessions": db.count_upcoming_mentor_sessions(mentor["id"]),
+    }
+
+
 @router.post("/me/deactivate")
-def deactivate_mentor(user: AuthUser = Depends(get_current_user)):
-    """Self-service pause - sets mentor status to 'suspended', hiding them from browse."""
+def deactivate_mentor(body: DeactivateBody, user: AuthUser = Depends(get_current_user)):
+    """Hide the mentor's own profile.
+
+    Deliberately NOT the admin 'suspended' status, which this used to set: suspended is an admin
+    action the mentor cannot undo, and the hub renders it as a dead end telling them to contact
+    support - so a mentor who paused their own profile was locked out of restoring it.
+
+    Confirmed future sessions are left alone. The profile stops being discoverable and cannot take
+    new bookings (is_active follows status), but commitments already made to mentees stand."""
     mentor = db.get_mentor_by_profile_id(user.id)
     if not mentor:
         raise HTTPException(status_code=404, detail="No mentor profile for this account")
     if mentor["status"] != "approved":
-        raise HTTPException(status_code=400, detail="Only approved mentors can deactivate their profile")
+        raise HTTPException(status_code=400, detail="Only an approved profile can be deactivated")
     try:
-        db.set_mentor_status(mentor["id"], "suspended")
-    except ValueError:
-        raise HTTPException(status_code=404, detail="Mentor not found")
-    return {"deactivated": True}
+        row = db.set_mentor_self_status(mentor["id"], delete=body.delete)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {
+        "status": row.get("status"),
+        "purge_due_at": row.get("purge_due_at"),
+        "grace_days": db.DELETION_GRACE_DAYS,
+    }
+
+
+@router.post("/me/reactivate")
+def reactivate_mentor(user: AuthUser = Depends(get_current_user)):
+    """Restore a profile the mentor hid themselves. Intentionally reachable without require_mentor,
+    which blocks the very states this endpoint exists to undo."""
+    mentor = db.get_mentor_by_profile_id(user.id)
+    if not mentor:
+        raise HTTPException(status_code=404, detail="No mentor profile for this account")
+    try:
+        row = db.reactivate_mentor(mentor["id"])
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": row.get("status")}

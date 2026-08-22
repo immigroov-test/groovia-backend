@@ -198,6 +198,10 @@ _JOBS = [
     ("session_reminders", notifications.send_session_reminders),
     ("attendance_checks", notifications.send_attendance_checks),
     ("review_requests", notifications.send_review_requests),
+    # FEAT-020: scrub the personal fields of mentors whose 90-day deletion grace has run out. Safe
+    # under overlap - a row is selected only while anonymized_at IS NULL and that is stamped by the
+    # same update, so a second tick finds nothing left to do.
+    ("purge_mentor_deletions", db.purge_due_mentor_deletions),
 ]
 
 

@@ -1,7 +1,7 @@
 import logging
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from supabase import Client, create_client
@@ -1563,3 +1563,137 @@ def upsert_ai_event(
     except Exception:
         logger.exception("Failed to log ai_event (thread=%s)", thread_id)
 
+
+
+# ── FEAT-020: mentor-initiated deactivation / deletion ────────────────────────
+# Two self-service states, both distinct from the admin-imposed 'suspended':
+#   'deactivated'      - a pause. Hidden from browse, reactivate whenever, nothing is deleted.
+#   'deletion_pending' - a leave. Hidden, reactivate within the grace window, then scrubbed.
+# Neither ever deletes the mentors ROW. bookings.mentor_id is ON DELETE RESTRICT and mentor_payouts
+# cascades, so a row delete would fail outright for any mentor who has traded, or take the financial
+# history with it. The purge below clears the personal columns and leaves the ledger alone.
+
+DELETION_GRACE_DAYS = 90
+
+# Cleared when a deletion is purged. Structural/aggregate columns (ratings, counts, currency) and
+# everything on bookings/payments/payouts are deliberately NOT here - those are business records,
+# not personal data, and the ledger has to survive.
+_PURGE_NULL_FIELDS = (
+    "headline", "bio", "photo_url", "phone", "email", "city", "home_country_code",
+    "public_notes", "booking_url", "legacy_data",
+)
+
+
+def set_mentor_self_status(mentor_id: str, *, delete: bool) -> dict[str, Any]:
+    """Mentor hides their own profile. `delete=True` starts the grace clock; a plain deactivation
+    has no expiry (purge_due_at stays NULL) so it is never picked up by the purge job."""
+    now = datetime.now(timezone.utc)
+    payload: dict[str, Any] = {
+        "status": "deletion_pending" if delete else "deactivated",
+        # The trigger sets this too; written here as well so a DB without the trigger still hides them.
+        "is_active": False,
+        "deactivated_at": now.isoformat(),
+        "purge_due_at": (now + timedelta(days=DELETION_GRACE_DAYS)).isoformat() if delete else None,
+        "updated_at": now.isoformat(),
+    }
+    res = _supabase.table("mentors").update(payload).eq("id", mentor_id).execute()
+    if not res.data:
+        raise ValueError(f"Mentor {mentor_id!r} not found")
+    return res.data[0]
+
+
+def reactivate_mentor(mentor_id: str) -> dict[str, Any]:
+    """Undo a self-deactivation or a pending deletion, back to a live profile. Refuses once the
+    scrub has run: there is no profile left to restore at that point, only an empty shell."""
+    cur = (_supabase.table("mentors")
+           .select("status, anonymized_at").eq("id", mentor_id).limit(1).execute())
+    if not cur.data:
+        raise ValueError(f"Mentor {mentor_id!r} not found")
+    row = cur.data[0]
+    if row.get("anonymized_at"):
+        raise ValueError("This profile has already been deleted and cannot be restored")
+    if row.get("status") not in ("deactivated", "deletion_pending"):
+        raise ValueError("This profile is not deactivated")
+    now = datetime.now(timezone.utc)
+    res = _supabase.table("mentors").update({
+        "status": "approved",
+        "is_active": True,
+        "deactivated_at": None,
+        "purge_due_at": None,
+        "updated_at": now.isoformat(),
+    }).eq("id", mentor_id).execute()
+    if not res.data:
+        raise ValueError(f"Mentor {mentor_id!r} not found")
+    return res.data[0]
+
+
+def count_upcoming_mentor_sessions(mentor_id: str) -> int:
+    """Confirmed sessions still ahead of the mentor. Shown before they deactivate: those bookings
+    are honoured rather than cancelled, so they need to know they are still expected to turn up."""
+    try:
+        res = (_supabase.table("bookings")
+               .select("id", count="exact")
+               .eq("mentor_id", mentor_id)
+               .in_("status", ["confirmed", "rescheduled"])
+               .gte("slot_time", datetime.now(timezone.utc).isoformat())
+               .execute())
+        return res.count or 0
+    except Exception:
+        logger.exception("count_upcoming_mentor_sessions failed mentor=%s", mentor_id)
+        return 0
+
+
+def purge_due_mentor_deletions(limit: int = 50) -> int:
+    """Scrub mentors whose grace window has run out. Returns how many were scrubbed.
+
+    Idempotent by anonymized_at: a row is only picked up while that is NULL, and it is stamped as
+    part of the same update, so a repeated or overlapping tick cannot scrub twice. Each mentor is
+    handled in its own try/except - one bad row must not stop the rest."""
+    try:
+        due = (_supabase.table("mentors")
+               .select("id, slug")
+               .eq("status", "deletion_pending")
+               .lte("purge_due_at", datetime.now(timezone.utc).isoformat())
+               .is_("anonymized_at", "null")
+               .limit(limit)
+               .execute()).data or []
+    except Exception:
+        logger.exception("purge_due_mentor_deletions: could not list due mentors")
+        return 0
+
+    purged = 0
+    for row in due:
+        mentor_id = row["id"]
+        try:
+            now = datetime.now(timezone.utc)
+            payload: dict[str, Any] = {k: None for k in _PURGE_NULL_FIELDS}
+            payload.update({
+                "display_name": "Former mentor",
+                # The slug is part of a public URL and usually carries their real name, so it is
+                # replaced rather than blanked - it is NOT NULL and has to stay unique.
+                "slug": f"former-mentor-{uuid.uuid4().hex[:12]}",
+                "social_links": [],
+                # Unlink the auth account: without this, link_mentor_by_email would happily
+                # reattach this shell to them at the next sign-in.
+                "profile_id": None,
+                "is_active": False,
+                "anonymized_at": now.isoformat(),
+                "updated_at": now.isoformat(),
+            })
+            _supabase.table("mentors").update(payload).eq("id", mentor_id).execute()
+            # Payout details are personal data with no reason to outlive the profile. The booking
+            # and payment rows that reference past payouts are untouched.
+            try:
+                _supabase.table("mentor_bank_accounts").delete().eq("mentor_id", mentor_id).execute()
+            except Exception:
+                logger.exception("purge: bank wipe failed mentor=%s", mentor_id)
+            # Nothing should remain bookable under a purged profile.
+            try:
+                _supabase.table("services").update({"is_active": False}).eq("mentor_id", mentor_id).execute()
+            except Exception:
+                logger.exception("purge: service deactivation failed mentor=%s", mentor_id)
+            purged += 1
+            logger.info("purged mentor profile %s", mentor_id)
+        except Exception:
+            logger.exception("purge_due_mentor_deletions: failed mentor=%s", mentor_id)
+    return purged
