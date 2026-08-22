@@ -25,7 +25,9 @@ class ServiceCreateBody(BaseModel):
     set_offer_price: Optional[float] = None
     currency_prices: list[dict] = []     # explicit per-currency prices [{currency, base_price, offer_price?}]
     is_active: bool = True
-    is_ppp: bool = False
+    # is_ppp is deliberately NOT accepted from the client. Fair pricing is a property of the
+    # mentor, not of one session, and letting the browser set it is how new sessions ended up
+    # opted out while the mentor's own flag said otherwise. db.create_service derives it.
     tags: list[str] = []
 
     @field_validator("tags")
@@ -102,7 +104,7 @@ def create_service(body: ServiceCreateBody, mentor: dict = Depends(require_mento
             category=(body.category or "").strip() or None,
             set_price=body.set_price,
             is_active=body.is_active,
-            is_ppp=body.is_ppp,
+            # is_ppp omitted on purpose: derived from the mentor's smart_pricing.
             tags=body.tags,
             set_currency=primary_ccy,   # hub-created services are priced in the mentor's own currency
             set_offer_price=body.set_offer_price,
