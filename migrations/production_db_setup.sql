@@ -790,7 +790,12 @@ DECLARE
   e            TIMESTAMPTZ;
   win_end      TIMESTAMPTZ;
 BEGIN
-  SELECT COALESCE(app_timezone, 'UTC'),
+  -- BUG-091: prefer a real app_timezone, else the profile timezone. create_mentor only ever
+  -- writes mentors.timezone, so app_timezone sits at its 'UTC' default for every self-signup
+  -- mentor - and this function INTERPRETS their stored local hours, so a bare 'UTC' here does
+  -- not just mislabel the slots, it offers them at the wrong real-world time. Same expression
+  -- as BUG-114 used for booking emails.
+  SELECT COALESCE(NULLIF(app_timezone, 'UTC'), timezone, 'UTC'),
          COALESCE(app_buffertime, INTERVAL '0'),
          COALESCE(app_minimum_notice, INTERVAL '0'),
          COALESCE(app_booking_window, INTERVAL '365 days')
@@ -1106,7 +1111,8 @@ BEGIN
     RAISE EXCEPTION 'Those hours overlap % - % on %', v_clash.start_time, v_clash.end_time, p_day;
   END IF;
   INSERT INTO weekly_availability(mentor_id, weekday, start_time, end_time, timezone, is_active)
-  SELECT p_mentor_id, p_day, p_start, p_end, COALESCE(app_timezone, 'UTC'), TRUE
+  SELECT p_mentor_id, p_day, p_start, p_end,
+         COALESCE(NULLIF(mentors.app_timezone, 'UTC'), mentors.timezone, 'UTC'), TRUE   -- BUG-091
   FROM mentors WHERE id = p_mentor_id;
 END;
 $$;
@@ -1133,7 +1139,8 @@ RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 BEGIN
   DELETE FROM specific_availability WHERE mentor_id = p_mentor_id AND slot_date = p_date;
   INSERT INTO specific_availability(mentor_id, slot_date, timezone, is_blackout)
-  SELECT p_mentor_id, p_date, COALESCE(app_timezone, 'UTC'), TRUE
+  SELECT p_mentor_id, p_date,
+         COALESCE(NULLIF(mentors.app_timezone, 'UTC'), mentors.timezone, 'UTC'), TRUE   -- BUG-091
   FROM mentors WHERE id = p_mentor_id;
 END;
 $$;
@@ -1145,7 +1152,8 @@ BEGIN
   DELETE FROM specific_availability
     WHERE mentor_id = p_mentor_id AND slot_date = p_date;
   INSERT INTO specific_availability(mentor_id, slot_date, start_time, end_time, timezone, is_blackout)
-  SELECT p_mentor_id, p_date, p_start, p_end, COALESCE(app_timezone, 'UTC'), FALSE
+  SELECT p_mentor_id, p_date, p_start, p_end,
+         COALESCE(NULLIF(mentors.app_timezone, 'UTC'), mentors.timezone, 'UTC'), FALSE  -- BUG-091
   FROM mentors WHERE id = p_mentor_id;
 END;
 $$;
@@ -1188,7 +1196,8 @@ LANGUAGE sql SECURITY DEFINER SET search_path = public AS $$
     COALESCE(EXTRACT(day FROM app_booking_window)::INTEGER, 30),
     ROUND((COALESCE(EXTRACT(epoch FROM app_minimum_notice), 0) / 3600.0)::NUMERIC, 1),
     COALESCE(cancel_notice_hours, 24),
-    COALESCE(app_timezone, 'UTC')
+    -- BUG-091: the timezone the availability dashboard labels its hours with.
+    COALESCE(NULLIF(app_timezone, 'UTC'), timezone, 'UTC')
   FROM mentors WHERE id = p_mentor_id;
 $$;
 
@@ -2077,7 +2086,7 @@ RETURNS TABLE (
     b.id, b.status::TEXT, b.slot_time, b.slot_end, b.meeting_url,
     s.title, s.duration,
     m.display_name, m.slug,
-    COALESCE(m.app_timezone, 'UTC'),
+    COALESCE(NULLIF(m.app_timezone, 'UTC'), m.timezone, 'UTC'),   -- BUG-091
     m.country,
     COALESCE(b.attendee_timezone, p.timezone, 'UTC'),
     b.reschedule_count, b.no_show_by, booking_deadline_state(b.slot_time, COALESCE(m.cancel_notice_hours, 24)),
@@ -2149,7 +2158,7 @@ RETURNS TABLE (
     s.title, s.duration,
     COALESCE(p.display_name, p.full_name, b.candidate_name, b.candidate_email),
     COALESCE(b.candidate_email, p.email),
-    COALESCE(m.app_timezone, 'UTC'),
+    COALESCE(NULLIF(m.app_timezone, 'UTC'), m.timezone, 'UTC'),   -- BUG-091
     COALESCE(b.attendee_timezone, p.timezone, 'UTC'),
     b.mentor_confirmed_at, b.reschedule_count, b.no_show_by,
     booking_deadline_state(b.slot_time, COALESCE(m.cancel_notice_hours, 24)),
@@ -4218,7 +4227,7 @@ RETURNS TABLE (
     b.id, b.status::TEXT, b.slot_time, b.slot_end, b.meeting_url,
     s.title, s.duration,
     m.display_name, m.slug,
-    COALESCE(m.app_timezone, 'UTC'),
+    COALESCE(NULLIF(m.app_timezone, 'UTC'), m.timezone, 'UTC'),   -- BUG-091
     m.country,
     COALESCE(b.attendee_timezone, p.timezone, 'UTC'),
     b.reschedule_count, b.no_show_by, booking_deadline_state(b.slot_time, COALESCE(m.cancel_notice_hours, 24)),

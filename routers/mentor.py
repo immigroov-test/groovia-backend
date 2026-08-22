@@ -712,6 +712,11 @@ def update_profile(body: ProfileUpdateBody, background_tasks: BackgroundTasks, u
         fields["city"] = body.city.strip() or None
     if body.timezone is not None:
         fields["timezone"] = body.timezone
+        # BUG-091: keep the pair in step. app_timezone is the column the availability dashboard,
+        # the slot generator and the booking emails read, so a mentor who set their timezone here
+        # saw nothing change - the banner telling them to "set your timezone on the Profile tab"
+        # was pointing at a field that fed a different column.
+        fields["app_timezone"] = body.timezone
     if body.languages is not None:
         fields["languages"] = body.languages
     if body.social_links is not None:

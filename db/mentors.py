@@ -514,6 +514,11 @@ def create_mentor_signup(
         "display_name": display_name,
         "headline": headline,
         "timezone": timezone_name,
+        # BUG-091: write BOTH. The availability dashboard, the slot generator and the booking
+        # emails all read app_timezone, which defaults to 'UTC' - so writing only `timezone` left
+        # every self-signup mentor with their real zone in one column and a bare 'UTC' in the one
+        # that actually gets used.
+        "app_timezone": timezone_name,
         "status": "pending_review",
         "submission_count": 1,
         "expertise_country_codes": expertise_country_codes or [],
@@ -580,7 +585,9 @@ _CRITICAL_MENTOR_FIELDS = {
 _EDITABLE_PROFILE_FIELDS = {
     "display_name", "headline", "bio", "photo_url",
     "phone", "city", "country", "home_country_code", "served_countries",
-    "social_links", "public_notes", "languages", "timezone",
+    # BUG-091: app_timezone is not client-supplied - the profile handler mirrors `timezone` into it
+    # so the two columns cannot drift. It is listed here only so that write survives this filter.
+    "social_links", "public_notes", "languages", "timezone", "app_timezone",
     "expertise_country_codes", "expertise_categories", "years_lived_experience",
     "years_professional_experience", "professional_domains", "specializations",
     "hourly_rate", "currency", "currency_rates", "smart_pricing",
