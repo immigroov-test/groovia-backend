@@ -446,3 +446,43 @@ def reject_service(service_id: str, user: AuthUser = Depends(require_admin)):
         return db.set_service_status(service_id, "rejected")
     except ValueError:
         raise HTTPException(status_code=404, detail="Service not found")
+
+
+# ── Bug board (BUG-162) ────────────────────────────────────────────────────────
+# The board is a separate Supabase project (db/bug_board.py owns that client). Every response
+# carries `configured`, so the dashboard can show a "not set up" panel instead of an error when the
+# env vars are absent - which is the normal state locally and on a fresh staging box.
+
+class BugStatusBody(BaseModel):
+    status: str
+
+
+@router.get("/bugs")
+def list_bugs(status: Optional[str] = None, user: AuthUser = Depends(require_admin)):
+    """The bug board, newest first. Never 500s on a missing configuration: an unconfigured board is
+    a deployment state, not a failure, and the dashboard renders it as such."""
+    if not db.bug_board.enabled():
+        return {"configured": False, "bugs": [], "statuses": list(db.bug_board.BUG_STATUSES)}
+    if status and status not in db.bug_board.BUG_STATUSES:
+        raise HTTPException(status_code=422, detail="Unknown status")
+    try:
+        bugs = db.bug_board.list_bugs(status=status)
+    except Exception:
+        logger.exception("bug board: list failed")
+        raise HTTPException(status_code=502, detail="Could not reach the bug board")
+    return {"configured": True, "bugs": bugs, "statuses": list(db.bug_board.BUG_STATUSES)}
+
+
+@router.post("/bugs/{bug_id}/status")
+def set_bug_status(bug_id: str, body: BugStatusBody, user: AuthUser = Depends(require_admin)):
+    """Move one item between columns. Status is validated against the board's own vocabulary first,
+    so a bad value is a 422 here rather than an opaque CHECK-constraint failure from Postgres."""
+    if not db.bug_board.enabled():
+        raise HTTPException(status_code=503, detail="Bug board is not configured")
+    try:
+        return db.bug_board.set_bug_status(bug_id, body.status)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception:
+        logger.exception("bug board: status update failed bug=%s", bug_id)
+        raise HTTPException(status_code=502, detail="Could not reach the bug board")

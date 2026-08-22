@@ -91,6 +91,17 @@ INTERNAL_GEO_TOKEN = os.getenv("INTERNAL_GEO_TOKEN", "")
 # Cron Job. Empty = the trigger endpoint is disabled (403).
 DISPATCHER_TOKEN = os.getenv("DISPATCHER_TOKEN", "")
 
+# BUG-162: the Immigroov bug board lives in its OWN Supabase project, so the admin dashboard reads
+# it through a second client rather than the main one. Both unset = the feature is simply off and
+# the endpoint says so, rather than erroring - staging and local dev should not need these to boot.
+# The ANON key is deliberate, not a shortcut: the board's own RLS (sql/004_rls_policies.sql in
+# immigroov-bug-board) grants the anon role full read/write on `bugs`, so anon is all this needs.
+# A service-role key for a second project would sit in this backend's environment with far more
+# reach than reading a bug list justifies.
+BUG_BOARD_SUPABASE_URL = os.getenv("BUG_BOARD_SUPABASE_URL", "").strip()
+BUG_BOARD_SUPABASE_ANON_KEY = os.getenv("BUG_BOARD_SUPABASE_ANON_KEY", "").strip()
+BUG_BOARD_ENABLED = bool(BUG_BOARD_SUPABASE_URL and BUG_BOARD_SUPABASE_ANON_KEY)
+
 # Feature flags, default ON. Keep in sync with groovia-frontend/lib/features.ts.
 def _flag(name: str, default: bool = True) -> bool:
     raw = os.getenv(name)
