@@ -1418,7 +1418,9 @@ def list_all_bookings(
     try:
         query = (
             _supabase.table("bookings")
-            .select("id, status, slot_time, candidate_name, candidate_email, "
+            # BUG-098: `reference` is the human-readable booking id (IMG-00001) the admin table
+            # leads with; bookings.id stays the key but is unreadable and unsearchable by hand.
+            .select("id, reference, status, slot_time, candidate_name, candidate_email, "
                     "reschedule_count, no_show_by, created_at, mentor_id")
             .order("created_at", desc=True)
             .limit(limit)
@@ -1430,7 +1432,10 @@ def list_all_bookings(
         if q:
             safe = re.sub(r"[(),%*]", "", q).strip()
             if safe:
-                ors = [f"candidate_email.ilike.*{safe}*", f"candidate_name.ilike.*{safe}*"]
+                # BUG-098: the booking reference is the thing a support email actually quotes, so
+                # it has to be searchable alongside the names.
+                ors = [f"candidate_email.ilike.*{safe}*", f"candidate_name.ilike.*{safe}*",
+                       f"reference.ilike.*{safe}*"]
                 # Also match by mentor name: resolve matching mentor ids, then OR them into the filter.
                 try:
                     mm = _supabase.table("mentors").select("id").ilike("display_name", f"*{safe}*").execute().data or []

@@ -308,6 +308,45 @@ CREATE INDEX IF NOT EXISTS idx_bookings_external_id
 
 -- Idempotency: dedupes a retried booking request (dropped network response, double-click).
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS idempotency_key text;
+
+-- BUG-098: a booking id a person can actually read out. bookings.id is a random UUID, which is
+-- fine as a key and useless as a reference: it cannot be quoted in an email, searched for from
+-- memory, or sorted into any meaningful order. `reference` is a short sequential handle
+-- (IMG-00001) shown in the admin table and usable for support.
+--
+-- Left nullable on purpose. The default below covers every new booking, and the backfill covers
+-- every existing one, but a NOT NULL would turn any row that somehow slipped through into a hard
+-- insert failure on a table that takes money. The admin UI falls back to the UUID prefix instead.
+CREATE SEQUENCE IF NOT EXISTS booking_reference_seq;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reference TEXT;
+
+-- Backfill in creation order, so the oldest booking is IMG-00001. Re-running is a no-op: rows that
+-- already have a reference are skipped.
+WITH ordered AS (
+  SELECT id, ROW_NUMBER() OVER (ORDER BY created_at, id) AS rn
+    FROM bookings
+   WHERE reference IS NULL
+)
+UPDATE bookings b
+   SET reference = 'IMG-' || LPAD(o.rn::TEXT, 5, '0')
+  FROM ordered o
+ WHERE b.id = o.id;
+
+-- Point the sequence past whatever the backfill used, so new bookings continue the run rather than
+-- colliding with it. is_called = false means the next nextval() returns exactly this number.
+SELECT setval(
+  'booking_reference_seq',
+  COALESCE((SELECT MAX(SUBSTRING(reference FROM 5)::BIGINT)
+              FROM bookings WHERE reference ~ '^IMG-[0-9]+$'), 0) + 1,
+  false
+);
+
+-- Set the default only AFTER the backfill, or new rows would draw numbers the backfill is still
+-- handing out.
+ALTER TABLE bookings ALTER COLUMN reference
+  SET DEFAULT 'IMG-' || LPAD(nextval('booking_reference_seq')::TEXT, 5, '0');
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_bookings_reference ON bookings(reference);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_bookings_idempotency
   ON bookings(idempotency_key) WHERE idempotency_key IS NOT NULL;
 
