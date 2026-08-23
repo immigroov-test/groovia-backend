@@ -3463,6 +3463,75 @@ END;
 $$;
 REVOKE ALL ON FUNCTION expire_stale_holds() FROM PUBLIC, anon, authenticated;
 
+-- ── Chat history: append + retention (FEAT-033) ──────────────────────────────
+-- The full conversation already lives in LangGraph's checkpoint tables, but those hold serialized
+-- state keyed for resuming a thread. They cannot answer "which countries do people ask about", which
+-- is the entire reason for keeping chats. chat_messages is the queryable copy.
+--
+-- One function rather than two inserts and an update from the client: the message rows and the
+-- thread's counter must move together, or a failure between them leaves a count that disagrees with
+-- the rows it counts. message_count was previously read by the history list and never written, so it
+-- showed 0 on every thread.
+CREATE OR REPLACE FUNCTION append_chat_messages(p_thread_id UUID, p_messages JSONB)
+RETURNS INT LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_added INT;
+BEGIN
+  INSERT INTO chat_messages(thread_id, role, content)
+  SELECT p_thread_id, m->>'role', m->>'content'
+    FROM jsonb_array_elements(p_messages) m
+   WHERE m->>'content' IS NOT NULL AND m->>'content' <> ''
+     AND m->>'role' IN ('user','assistant');
+  GET DIAGNOSTICS v_added = ROW_COUNT;
+
+  UPDATE chat_threads
+     SET message_count = message_count + v_added,
+         last_message_at = NOW(),
+         updated_at = NOW()
+   WHERE id = p_thread_id;
+
+  RETURN v_added;
+END;
+$$;
+REVOKE ALL ON FUNCTION append_chat_messages(UUID, JSONB) FROM PUBLIC, anon, authenticated;
+
+-- Retention. Chat contains what people tell us about their circumstances, so "keep it forever" is not
+-- a defensible answer under GDPR and is not worth the storage either.
+--
+-- Guest threads expire sooner on purpose. They have no owner, so if that person later asks us to
+-- delete their data we have no way to find it; a shorter window is the only control we have. An owned
+-- thread can be found and deleted on request, so it can be kept longer.
+--
+-- Checkpoints are pruned with the same sweep. They grow per turn forever, are excluded from backups,
+-- and a conversation nobody has touched in months does not need to be resumable.
+CREATE OR REPLACE FUNCTION prune_chat_history(p_guest_days INT DEFAULT 90, p_user_days INT DEFAULT 365)
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_threads INT; v_msgs INT; v_ckpt INT := 0;
+BEGIN
+  WITH doomed AS (
+    SELECT id FROM chat_threads
+     WHERE (user_id IS NULL     AND last_message_at < NOW() - MAKE_INTERVAL(days => p_guest_days))
+        OR (user_id IS NOT NULL AND last_message_at < NOW() - MAKE_INTERVAL(days => p_user_days))
+  ), del_msg AS (
+    DELETE FROM chat_messages WHERE thread_id IN (SELECT id FROM doomed) RETURNING 1
+  ), del_thread AS (
+    DELETE FROM chat_threads WHERE id IN (SELECT id FROM doomed) RETURNING 1
+  )
+  SELECT (SELECT count(*) FROM del_msg), (SELECT count(*) FROM del_thread) INTO v_msgs, v_threads;
+
+  -- LangGraph keys checkpoints by thread_id as TEXT; a thread we just deleted can never be resumed.
+  BEGIN
+    DELETE FROM checkpoints
+     WHERE thread_id NOT IN (SELECT id::text FROM chat_threads);
+    GET DIAGNOSTICS v_ckpt = ROW_COUNT;
+  EXCEPTION WHEN undefined_table OR undefined_column THEN
+    v_ckpt := 0;   -- checkpointer not initialised yet on a fresh database
+  END;
+
+  RETURN jsonb_build_object('threads', v_threads, 'messages', v_msgs, 'checkpoints', v_ckpt);
+END;
+$$;
+REVOKE ALL ON FUNCTION prune_chat_history(INT, INT) FROM PUBLIC, anon, authenticated;
+
 -- ── Consent records (BUG-143) ────────────────────────────────────────────────
 -- GDPR Art 7(1) requires consent to be DEMONSTRABLE, so a ticked box that leaves no trace does not
 -- satisfy it. One row per grant: who, what they agreed to, and when.

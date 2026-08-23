@@ -23,6 +23,7 @@ Run directly for a manual/local tick:  python -m jobs.run_due
 import logging
 from datetime import timedelta
 
+import config
 import db
 from services import mailer
 from services import notifications
@@ -185,12 +186,32 @@ def _payout_consistency_alert() -> dict:
     return {"mismatches": len(issues), "alerted": len(recipients)}
 
 
+def _prune_chat_history() -> dict:
+    """Delete chat history past its retention window (FEAT-033). Once a day.
+
+    Guest threads go sooner than owned ones on purpose. A guest thread has no owner, so if that person
+    later asks us to delete their data we have no way to find it, and a shorter window is the only
+    control we have. An owned thread can be found and deleted on request, so it can be kept longer.
+    """
+    from db import jobs as job_db
+
+    if not job_db.job_is_due("prune_chat_history", timedelta(hours=23)):
+        return {"skipped": "pruned within the last 23h"}
+    result = db.prune_chat_history(
+        guest_days=config.CHAT_RETENTION_GUEST_DAYS,
+        user_days=config.CHAT_RETENTION_USER_DAYS,
+    )
+    job_db.mark_job_run("prune_chat_history")
+    return result
+
+
 _JOBS = [
     ("refresh_fx_rates", _refresh_fx_rates_if_stale),
     ("fx_staleness_alert", _fx_staleness_alert),
     ("webhook_rejection_alert", _webhook_rejection_alert),
     ("payout_consistency_alert", _payout_consistency_alert),
     ("backup_to_r2", _daily_backup),
+    ("prune_chat_history", _prune_chat_history),
     ("expire_stale_holds", db.expire_stale_holds),
     ("sweep_verify_payments", db.sweep_verify_payments),
     ("process_refunds", db.process_refunds),

@@ -182,3 +182,9 @@ JITSI_APP_ID      = os.getenv("JITSI_APP_ID", "").strip()
 JITSI_PRIVATE_KEY = os.getenv("JITSI_PRIVATE_KEY", "").strip().replace("\\n", "\n")
 JITSI_KID         = os.getenv("JITSI_KID", "").strip()
 JITSI_JAAS_READY  = bool(JITSI_APP_ID and JITSI_PRIVATE_KEY and JITSI_KID)
+
+# FEAT-033: how long chat history is kept. Guest threads expire sooner because they have no owner: if
+# that person later asks us to delete their data we cannot find it, so a shorter window is the only
+# control we have. An owned thread can be found on request, so it can be kept longer.
+CHAT_RETENTION_GUEST_DAYS = int(os.getenv("CHAT_RETENTION_GUEST_DAYS", "90"))
+CHAT_RETENTION_USER_DAYS  = int(os.getenv("CHAT_RETENTION_USER_DAYS", "365"))

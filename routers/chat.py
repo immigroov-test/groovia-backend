@@ -222,6 +222,20 @@ async def chat_handler(
         title_seed=title_seed,
     )
 
+    # FEAT-033: store the exchange in queryable form. The full state is already in LangGraph's
+    # checkpoints, but that is serialized state for resuming a thread and cannot answer "what do
+    # people ask about", which is the reason for keeping chats at all. Guests included: the row keys
+    # on thread_id, so when they later sign in, claim_thread makes the whole history theirs with one
+    # UPDATE. System markers like [SYSTEM_RESUME_UPLOADED] are not conversation and are skipped; the
+    # resume text itself never reaches here, it goes into agent state.
+    if not message.strip().startswith("[SYSTEM_"):
+        reply_text = _text(final_state["messages"][-1].content) if final_state.get("messages") else ""
+        await asyncio.to_thread(
+            db.append_chat_messages,
+            thread_id,
+            [{"role": "user", "content": message}, {"role": "assistant", "content": reply_text}],
+        )
+
     # Mirror compressed resume onto the user's profile, write-once (manual edits stay).
     if user and final_state.get("resume_processed") and final_state.get("resume_text"):
         await asyncio.to_thread(

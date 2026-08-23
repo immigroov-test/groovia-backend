@@ -42,6 +42,46 @@ def upsert_chat_thread(
         logger.exception("Failed to upsert chat_thread %s", thread_id)
 
 
+def append_chat_messages(thread_id: str, turns: list[dict[str, str]]) -> int:
+    """Store one exchange (FEAT-033). Returns how many rows were written.
+
+    Identifiers are stripped first: we keep conversations to learn what people ask about, not to hold
+    their contact details. See services/pii.redact for what that does and does not catch.
+
+    Never raises. A failure to log must not cost the person the answer they just got, so this is
+    best-effort in exactly the way the reply itself is not.
+    """
+    from services import pii
+
+    rows = []
+    for t in turns:
+        content = pii.redact((t.get("content") or "").strip())
+        if content and t.get("role") in ("user", "assistant"):
+            rows.append({"role": t["role"], "content": content})
+    if not rows:
+        return 0
+    try:
+        res = _supabase.rpc(
+            "append_chat_messages", {"p_thread_id": thread_id, "p_messages": rows}
+        ).execute()
+        return int(res.data or 0)
+    except Exception:
+        logger.exception("append_chat_messages failed thread=%s", thread_id)
+        return 0
+
+
+def prune_chat_history(guest_days: int = 90, user_days: int = 365) -> dict:
+    """Delete chat history past its retention window, and the checkpoints of deleted threads."""
+    try:
+        res = _supabase.rpc(
+            "prune_chat_history", {"p_guest_days": guest_days, "p_user_days": user_days}
+        ).execute()
+        return res.data or {}
+    except Exception:
+        logger.exception("prune_chat_history failed")
+        return {"error": "prune failed"}
+
+
 def claim_thread(thread_id: str, user_id: str) -> bool:
     """Link a guest thread (user_id IS NULL) to the now-authenticated user.
     Idempotent: returns True if it linked or if it was already owned by this user."""
