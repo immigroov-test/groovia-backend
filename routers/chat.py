@@ -124,19 +124,10 @@ async def chat_handler(
 
     resume_text = None
     if file:
-        if (ai_consent or "").strip().lower() not in ("1", "true", "yes", "on"):
-            raise HTTPException(
-                status_code=400,
-                detail="Please agree to your resume being analysed before uploading it.",
-            )
-        db.record_consent(
-            kind="resume_ai_analysis",
-            user_id=user.id if user else None,
-            thread_id=thread_id,
-            policy_version=CONSENT_POLICY_VERSION,
-            ip=(request.client.host if request.client else None),
-            user_agent=request.headers.get("user-agent"),
-        )
+        # Reject a file on its own merits BEFORE asking about consent. A 50MB .exe is refused whether
+        # or not the box was ticked, and telling someone "please agree" about a file we were never
+        # going to accept is both wrong and confusing. It also stops us recording a consent for
+        # processing that never happens.
         file_bytes = await file.read()
         if len(file_bytes) > config.MAX_FILE_BYTES:
             raise HTTPException(
@@ -150,6 +141,22 @@ async def chat_handler(
                 status_code=415,
                 detail="Unsupported or mismatched file type. Upload PDF or DOCX only.",
             )
+
+        # BUG-143: consent gates the PROCESSING, so it sits immediately before the parse. Reading the
+        # bytes to measure and identify them is not analysis; extracting the text is.
+        if (ai_consent or "").strip().lower() not in ("1", "true", "yes", "on"):
+            raise HTTPException(
+                status_code=400,
+                detail="Please agree to your resume being analysed before uploading it.",
+            )
+        db.record_consent(
+            kind="resume_ai_analysis",
+            user_id=user.id if user else None,
+            thread_id=thread_id,
+            policy_version=CONSENT_POLICY_VERSION,
+            ip=(request.client.host if request.client else None),
+            user_agent=request.headers.get("user-agent"),
+        )
         resume_text = (
             parse_pdf_to_text(file_bytes) if file_type == "pdf" else parse_docx_to_text(file_bytes)
         )
