@@ -103,6 +103,31 @@ def _frankfurter_rates(symbols: list[str]) -> tuple[dict[str, float], Optional[s
     raise ValueError("Frankfurter: unexpected payload")
 
 
+def _currencyapi_rates() -> tuple[dict[str, float], Optional[str]]:
+    """currency-api: free, no key, served from a CDN, and covers everything we price.
+
+    Third provider so a single upstream cannot stop pricing. It is worth having precisely because it
+    fails differently from the others: er-api and Frankfurter are single origins, this is jsDelivr
+    with an independent fallback host, so a DNS or origin problem at one is unlikely to hit all three.
+
+    The payload includes crypto alongside fiat. Harmless: we only ever read the symbols we asked for.
+    """
+    last: Optional[Exception] = None
+    for host in ("https://cdn.jsdelivr.net/npm/@fawazahmed0/currency-api@latest/v1",
+                 "https://latest.currency-api.pages.dev/v1"):
+        try:
+            resp = httpx.get(f"{host}/currencies/eur.json", timeout=15.0)
+            resp.raise_for_status()
+            data = resp.json()
+            rates = data.get("eur")
+            if not isinstance(rates, dict):
+                raise ValueError("currency-api: no eur map in payload")
+            return ({str(k).upper(): float(v) for k, v in rates.items()}, data.get("date"))
+        except Exception as e:  # noqa: BLE001
+            last = e
+    raise ValueError(f"currency-api: all hosts failed ({last})")
+
+
 def _fetch_fx_rates_with_retry(symbols: list[str]) -> tuple[list[dict[str, Any]], str]:
     """Latest EUR-pivot rates for `symbols`, newest source wins. open.er-api.com is primary (covers every
     currency we price); Frankfurter (ECB) fills anything still missing; USD-pegged currencies are derived
@@ -132,6 +157,20 @@ def _fetch_fx_rates_with_retry(symbols: list[str]) -> tuple[list[dict[str, Any]]
             provider = provider or "frankfurter"
         except Exception as e:  # noqa: BLE001
             errs.append(f"frankfurter:{e}")
+
+    # Third provider, tried only if something is still missing. Frankfurter is ECB and therefore
+    # majors only, so a currency both it and er-api lack (and that is not USD-pegged) would otherwise
+    # have no source at all and the whole refresh would return a short row set.
+    missing = [s for s in symbols if s.upper() not in rates and s.upper() != "EUR"]
+    if missing:
+        try:
+            ca, ca_as_of = _currencyapi_rates()
+            for k, v in ca.items():
+                rates.setdefault(k, v)
+            as_of = as_of or ca_as_of
+            provider = provider or "currency-api"
+        except Exception as e:  # noqa: BLE001
+            errs.append(f"currency-api:{e}")
     usd = rates.get("USD")                            # derive USD-pegged from the live peg if still gone
     if usd:
         for ccy, peg in _USD_PEGGED.items():
@@ -151,7 +190,19 @@ def fx_rates_are_stale(max_age: timedelta) -> bool:
     res = _supabase.table("fx_rates").select("fetched_at").order("fetched_at", desc=True).limit(1).execute()
     if not res.data:
         return True
-    fetched_at = datetime.fromisoformat(res.data[0]["fetched_at"])
+    # Same normalisation the other two readers of this column already do, and this one lacked. A 'Z'
+    # suffix or a naive value made the subtraction below raise TypeError, which the dispatcher caught
+    # and logged as a failed job. The refresh then never ran while the staleness ALERT, which parses
+    # the same column defensively, kept firing: rates stuck, warnings arriving, and the two disagreeing
+    # about a value they both read from one row.
+    raw = str(res.data[0]["fetched_at"]).replace("Z", "+00:00")
+    try:
+        fetched_at = datetime.fromisoformat(raw)
+    except ValueError:
+        logger.warning("fx_rates_are_stale: unparseable fetched_at %r; treating as stale", raw)
+        return True
+    if fetched_at.tzinfo is None:
+        fetched_at = fetched_at.replace(tzinfo=timezone.utc)
     return datetime.now(timezone.utc) - fetched_at >= max_age
 
 
