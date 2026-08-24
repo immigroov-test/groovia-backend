@@ -135,10 +135,26 @@ LangGraph uses `AsyncPostgresSaver` on Supabase Postgres via the **Session poole
 | `production_clear_users.sql` | Promotes the admin, then deletes mentee accounts only (keeps mentors). |
 | `testing_db_setup.sql` | Full schema + 14 seed mentors with services & availability. Run once. |
 | `testing_db_reset.sql` | Promotes the admin, clears test data, keeps seed mentors. Re-run between test runs. |
+| `legal_documents_setup.sql` | Legal Documents CMS. Already folded into both `*_db_setup.sql`; run this one **on an existing database** to add the feature without re-running the full schema. |
 
 **First-time setup:** run the `*_db_setup.sql` → sign up once as the admin email →
 run the matching clear/reset file (it promotes that account to `admin`). Setup files are
 re-runnable (functions whose return type changed are dropped first).
+
+### Legal Documents CMS
+
+Schema only creates the 14 catalogue rows; the document text lives in `content/legal/*.md`
+and is loaded separately, so a 6,000-word contract never sits inside a schema file:
+
+```bash
+python -m scripts.seed_legal_documents --dry-run   # report what would happen
+python -m scripts.seed_legal_documents             # publish v1.0 where nothing is published
+```
+
+Re-running is safe: a document that already has a published version is skipped, because
+once v1.0 exists the CMS owns the text and the file on disk is only the initial import.
+Use `--as-draft` to load a revised file into the draft slot instead, leaving the decision
+to publish with an admin.
 
 ## Deployment (Render)
 
