@@ -27,6 +27,7 @@ from routers import booking as booking_router
 from routers import chat as chat_router
 from routers import consent as consent_router
 from routers import contact as contact_router
+from routers import legal as legal_router
 from routers import mentor as mentor_router
 from routers import mentors as mentors_router
 from routers import payments as payments_router
@@ -168,6 +169,7 @@ api.include_router(booking_router.router)
 api.include_router(chat_router.router)
 api.include_router(consent_router.router)
 api.include_router(contact_router.router)
+api.include_router(legal_router.router)
 api.include_router(mentor_router.router)
 api.include_router(mentors_router.router)
 api.include_router(payments_router.router)

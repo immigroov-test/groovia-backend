@@ -9,6 +9,7 @@ from .notifications import *
 from .bank import *
 from .referrals import *
 from .reviews import *
+from .legal import *
 
 
 def client():
