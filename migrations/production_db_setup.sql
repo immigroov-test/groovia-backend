@@ -2695,14 +2695,15 @@ DECLARE
   v_provider        CONSTANT TEXT := 'frankfurter';
   v_mentor_id UUID; v_set NUMERIC; v_set_offer NUMERIC; v_ment_ccy TEXT; v_is_ppp BOOLEAN;
   v_prices JSONB; v_pfee_pct NUMERIC; v_tax_pct NUMERIC; v_comm_pct NUMERIC; v_mentor_country TEXT;
+  v_base_ccy TEXT;   -- the MENTOR's base currency: what PPP anchors to, distinct from the service's
   v_cust_ccy TEXT; v_ppp NUMERIC := 1; v_source TEXT; v_explicit NUMERIC; v_base NUMERIC; v_mentor_amt NUMERIC;
   v_fx_mc NUMERIC; v_fx_c_inr NUMERIC; v_fx_m_inr NUMERIC;
   v_gross NUMERIC; v_platform_fee NUMERIC; v_commission NUMERIC; v_subtotal NUMERIC;
   v_tax_amt NUMERIC; v_net_cust NUMERIC; v_net_mentor NUMERIC; v_mentor_base NUMERIC;
 BEGIN
   SELECT s.mentor_id, s.set_price, s.set_offer_price, COALESCE(s.set_currency, 'USD'), s.is_ppp,
-         COALESCE(s.currency_prices, '[]'::jsonb), m.country
-    INTO v_mentor_id, v_set, v_set_offer, v_ment_ccy, v_is_ppp, v_prices, v_mentor_country
+         COALESCE(s.currency_prices, '[]'::jsonb), m.country, UPPER(COALESCE(m.currency, s.set_currency, 'USD'))
+    INTO v_mentor_id, v_set, v_set_offer, v_ment_ccy, v_is_ppp, v_prices, v_mentor_country, v_base_ccy
   FROM services s JOIN mentors m ON m.id = s.mentor_id
   WHERE s.id = p_service_id AND s.is_active AND s.status = 'approved';
   IF v_set IS NULL THEN RAISE EXCEPTION 'Service not available' USING errcode = 'P0001'; END IF;
@@ -2737,7 +2738,7 @@ BEGIN
   ELSE
     -- Fallback: localise the primary rate to the customer currency (+ PPP).
     v_source     := 'converted';
-    v_ppp        := CASE WHEN v_is_ppp THEN ppp_relative(p_customer_country, currency_anchor_country(v_ment_ccy)) ELSE 1 END;
+    v_ppp        := CASE WHEN v_is_ppp THEN ppp_relative(p_customer_country, currency_anchor_country(v_base_ccy)) ELSE 1 END;
     v_fx_mc      := get_fx_or_null(v_ment_ccy, v_cust_ccy);   -- SOFT (see fallback below)
     v_base       := COALESCE(v_set_offer, v_set);
     IF v_fx_mc IS NULL THEN
@@ -2846,13 +2847,13 @@ RETURNS TABLE(key TEXT, you NUMERIC, you0 NUMERIC, customer_currency TEXT, fx_ok
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
 DECLARE
   sid UUID; v_mentor_id UUID; v_set NUMERIC; v_set_offer NUMERIC; v_ment_ccy TEXT; v_is_ppp BOOLEAN;
-  v_prices JSONB; v_mentor_country TEXT; v_cust TEXT; v_explicit NUMERIC; v_ppp NUMERIC; v_fx NUMERIC; v_base NUMERIC;
+  v_prices JSONB; v_mentor_country TEXT; v_base_ccy TEXT; v_cust TEXT; v_explicit NUMERIC; v_ppp NUMERIC; v_fx NUMERIC; v_base NUMERIC;
 BEGIN
   v_cust := currency_for_country(p_customer_country);
   FOREACH sid IN ARRAY COALESCE(p_service_ids, ARRAY[]::UUID[]) LOOP
     SELECT s.mentor_id, s.set_price, s.set_offer_price, COALESCE(s.set_currency, 'USD'), s.is_ppp,
-           COALESCE(s.currency_prices, '[]'::jsonb), m.country
-      INTO v_mentor_id, v_set, v_set_offer, v_ment_ccy, v_is_ppp, v_prices, v_mentor_country
+           COALESCE(s.currency_prices, '[]'::jsonb), m.country, UPPER(COALESCE(m.currency, s.set_currency, 'USD'))
+      INTO v_mentor_id, v_set, v_set_offer, v_ment_ccy, v_is_ppp, v_prices, v_mentor_country, v_base_ccy
     FROM services s JOIN mentors m ON m.id = s.mentor_id
     WHERE s.id = sid AND s.is_active AND s.status = 'approved';
     IF v_set IS NULL THEN CONTINUE; END IF;   -- unknown/inactive/unapproved: skip (card falls back)
@@ -2874,7 +2875,7 @@ BEGIN
       customer_currency := v_cust; fx_ok := true;
     ELSE
       v_base := COALESCE(v_set_offer, v_set);
-      v_ppp  := CASE WHEN v_is_ppp THEN ppp_relative(p_customer_country, currency_anchor_country(v_ment_ccy)) ELSE 1 END;
+      v_ppp  := CASE WHEN v_is_ppp THEN ppp_relative(p_customer_country, currency_anchor_country(v_base_ccy)) ELSE 1 END;
       v_fx   := get_fx_or_null(v_ment_ccy, v_cust);   -- SOFT (checkout uses the strict get_fx)
       IF v_fx IS NULL THEN
         key := sid::text; you0 := ROUND(v_base, 2); you := ROUND(v_base * v_ppp, 2);
