@@ -4957,6 +4957,27 @@ RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $
     AND x.published_at > COALESCE((SELECT created_at FROM profiles WHERE id = p_user), NOW());
 $$;
 
+-- The same set as legal_pending_updates, but with full content - backs the single
+-- review page a user lands on from the notice. One notice, one page, one button:
+-- the Bundling Guide's rule (one acceptance click per bundle, informational documents
+-- never gated behind a click) generalizes cleanly to "one click for everything
+-- currently pending", because the set is already scoped to what actually applies to
+-- this user and has not yet been acknowledged.
+CREATE OR REPLACE FUNCTION legal_pending_updates_full(p_user UUID)
+RETURNS JSONB LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public AS $$
+  SELECT COALESCE(jsonb_agg(jsonb_build_object(
+           'document_id', x.document_id, 'code', x.code, 'slug', x.slug,
+           'title', x.title, 'summary', x.summary,
+           'audience', x.audience, 'audience_label', x.audience_label,
+           'version_id', x.version_id, 'version', x.version,
+           'last_updated', x.published_at, 'content', x.content
+         ) ORDER BY x.sort_order, x.code), '[]'::jsonb)
+  FROM legal_applicable_documents(p_user) x
+  WHERE NOT EXISTS (SELECT 1 FROM user_legal_acknowledgements ack
+                     WHERE ack.user_id = p_user AND ack.version_id = x.version_id)
+    AND x.published_at > COALESCE((SELECT created_at FROM profiles WHERE id = p_user), NOW());
+$$;
+
 -- Record that a user has reviewed a specific version.
 -- Idempotent: clicking twice, or on two devices, is one row.
 CREATE OR REPLACE FUNCTION legal_acknowledge(p_user UUID, p_version_id UUID)
@@ -4982,6 +5003,28 @@ BEGIN
   ON CONFLICT (user_id, version_id) DO NOTHING;
 
   RETURN jsonb_build_object('ok', TRUE, 'document_id', v.document_id, 'version', v.version);
+END $$;
+
+-- Acknowledge EVERY currently pending document in one write - the "single click"
+-- behind the bundled review page. Recomputes the pending set itself rather than
+-- trusting a list of version ids from the client: a caller cannot acknowledge a
+-- document that does not apply to them, or one that already has a newer version,
+-- by sending the "wrong" ids. One INSERT ... SELECT, so it is one round trip and one
+-- transaction - either every pending row lands or (on a genuine failure) none does.
+CREATE OR REPLACE FUNCTION legal_acknowledge_all(p_user UUID)
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_count INT;
+BEGIN
+  INSERT INTO user_legal_acknowledgements (user_id, document_id, version_id)
+  SELECT p_user, x.document_id, x.version_id
+  FROM legal_applicable_documents(p_user) x
+  WHERE NOT EXISTS (SELECT 1 FROM user_legal_acknowledgements ack
+                     WHERE ack.user_id = p_user AND ack.version_id = x.version_id)
+    AND x.published_at > COALESCE((SELECT created_at FROM profiles WHERE id = p_user), NOW())
+  ON CONFLICT (user_id, version_id) DO NOTHING;
+
+  GET DIAGNOSTICS v_count = ROW_COUNT;
+  RETURN jsonb_build_object('ok', TRUE, 'acknowledged_count', v_count);
 END $$;
 
 -- One document by slug, for the read-and-acknowledge page. Returns NULL when the
@@ -5083,6 +5126,8 @@ GRANT EXECUTE ON FUNCTION publish_legal_document(UUID, UUID, TEXT, BOOLEAN) TO s
 REVOKE ALL ON FUNCTION legal_user_documents(UUID)      FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION legal_user_document(UUID, TEXT) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION legal_pending_updates(UUID)     FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION legal_pending_updates_full(UUID) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION legal_acknowledge_all(UUID)      FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION legal_acknowledge(UUID, UUID)   FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION legal_applicable_documents(UUID) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION legal_user_region(UUID)          FROM PUBLIC, anon, authenticated;
@@ -5090,7 +5135,9 @@ REVOKE ALL ON FUNCTION legal_user_role(UUID)            FROM PUBLIC, anon, authe
 
 GRANT EXECUTE ON FUNCTION legal_user_documents(UUID)      TO service_role;
 GRANT EXECUTE ON FUNCTION legal_user_document(UUID, TEXT) TO service_role;
-GRANT EXECUTE ON FUNCTION legal_pending_updates(UUID)     TO service_role;
+GRANT EXECUTE ON FUNCTION legal_pending_updates(UUID)      TO service_role;
+GRANT EXECUTE ON FUNCTION legal_pending_updates_full(UUID)  TO service_role;
+GRANT EXECUTE ON FUNCTION legal_acknowledge_all(UUID)       TO service_role;
 GRANT EXECUTE ON FUNCTION legal_acknowledge(UUID, UUID)   TO service_role;
 GRANT EXECUTE ON FUNCTION legal_applicable_documents(UUID) TO service_role;
 GRANT EXECUTE ON FUNCTION legal_user_region(UUID)          TO service_role;

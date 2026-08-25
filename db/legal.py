@@ -95,6 +95,23 @@ def legal_pending_updates(user_id: str) -> list[dict[str, Any]]:
     return res.data or []
 
 
+def legal_pending_updates_full(user_id: str) -> list[dict[str, Any]]:
+    """The same set as legal_pending_updates, with full content - backs the single
+    bundled review page a user lands on from the notice (one notice, one page, one
+    button covering everything currently pending for them)."""
+    res = _supabase.rpc("legal_pending_updates_full", {"p_user": user_id}).execute()
+    return res.data or []
+
+
+def legal_acknowledge_all(user_id: str) -> dict[str, Any]:
+    """Acknowledge every currently pending document in one write. The set is
+    recomputed server-side from the same rule as legal_pending_updates, not trusted
+    from the caller, so this can never be used to acknowledge a document that does
+    not apply to this user."""
+    res = _supabase.rpc("legal_acknowledge_all", {"p_user": user_id}).execute()
+    return res.data or {}
+
+
 def legal_acknowledge(user_id: str, version_id: str) -> dict[str, Any]:
     """Record that this user reviewed this exact version. Idempotent."""
     res = _supabase.rpc("legal_acknowledge", {

@@ -181,6 +181,25 @@ def pending_updates(user: AuthUser = Depends(get_current_user)):
     return db.legal_pending_updates(user.id)
 
 
+@router.get("/pending/full")
+def pending_updates_full(user: AuthUser = Depends(get_current_user)):
+    """The same set as /pending, with full content. Backs the single bundled review
+    page: everything the notice is about, on one page, behind one acknowledgement."""
+    return db.legal_pending_updates_full(user.id)
+
+
+@router.post("/acknowledge-all")
+@limiter.limit("15/minute")
+def acknowledge_all(request: Request, user: AuthUser = Depends(get_current_user)):
+    """"I have reviewed these documents" for the whole pending set in one click.
+
+    Per the Bundling Guide: one acceptance click per session, but each document still
+    gets its own timestamped row in user_legal_acknowledgements - so a dispute over one
+    specific document (the Mentor Commission Terms, say) still has a precise,
+    per-document record to point to, even though the user only clicked once."""
+    return db.legal_acknowledge_all(user.id)
+
+
 @router.post("/acknowledge")
 @limiter.limit("30/minute")
 def acknowledge(request: Request, body: AcknowledgeBody,
