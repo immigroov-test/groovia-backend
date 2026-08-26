@@ -3,8 +3,9 @@
 An earlier version of the setup SQL re-derived every migrated session's price from a per-hour rate and
 corrupted them (a 399 INR session became ~10). The real prices still live in mentor_migration_raw.json.
 This restores services.set_price to the price the customer actually pays (the offer when set, else the
-base), clears any leftover set_offer_price, fixes set_currency, and seeds the mentor's hourly_rate from
-the highest session's per-hour equivalent (the first-login popup default).
+base), clears any leftover set_offer_price, fixes set_currency, and seeds the mentor's hourly_rate AND
+currency from the highest session's per-hour equivalent, compared across currencies via the EUR pivot
+(the first-login popup default).
 
 Scope: only mentors still in the first-login flow (needs_onboarding = TRUE), matched to the raw file by
 email; services matched by normalized title + duration. A mentor who already onboarded and set their
@@ -53,8 +54,13 @@ def main() -> int:
     sb = create_client(url, key)
     raw = json.load(open(RAW, encoding="utf-8"))
 
-    mentors = sb.table("mentors").select("id, email, display_name, needs_onboarding, currency").execute().data
+    mentors = sb.table("mentors").select("id, email, display_name, needs_onboarding, currency, hourly_rate").execute().data
     by_email = {(m.get("email") or "").lower(): m for m in mentors if m.get("email")}
+    # EUR-pivot rates, to compare per-hour figures that are quoted in different currencies.
+    fx: dict[str, float] = {"EUR": 1.0}
+    for r in (sb.table("fx_rates").select("quote, rate").eq("base", "EUR").execute().data or []):
+        if r.get("rate"):
+            fx[str(r["quote"]).upper()] = float(r["rate"])
     services = sb.table("services").select("id, mentor_id, title, duration, set_price, set_offer_price, set_currency").execute().data
     by_mentor: dict[str, list[dict]] = {}
     for s in services:
@@ -72,14 +78,14 @@ def main() -> int:
             skipped_onboarded += 1
             continue
         ours = by_mentor.get(m["id"], [])
-        sell_rates: list[float] = []
+        sell_rates: list[tuple[float, str]] = []
         for sv in e.get("services", []):
             pricing = (sv.get("pricing") or [{}])[0]
             sell = round(_sell(pricing), 2)
             ccy = (pricing.get("currency") or e.get("profile", {}).get("currency") or m.get("currency") or "USD").upper()
             dur = int(sv.get("duration") or 0)
             if sell > 0 and dur:
-                sell_rates.append(round(sell * 60.0 / dur, 2))
+                sell_rates.append((round(sell * 60.0 / dur, 2), ccy))
             match = [o for o in ours if _norm(o["title"]) == _norm(sv.get("title")) and int(o.get("duration") or 0) == dur]
             if len(match) != 1:
                 continue
@@ -93,12 +99,22 @@ def main() -> int:
                     sb.table("services").update({
                         "set_price": sell, "set_offer_price": None, "set_currency": ccy,
                     }).eq("id", o["id"]).execute()
-        seed_hourly = max(sell_rates) if sell_rates else None
-        if seed_hourly is not None:
-            print(f"  RATE {m['display_name'][:18]:18} hourly_rate -> {seed_hourly}")
-            rate_updates += 1
-            if not args.dry_run:
-                sb.table("mentors").update({"hourly_rate": seed_hourly}).eq("id", m["id"]).execute()
+        # Legacy mentors priced different sessions in different currencies, so comparing the raw
+        # per-hour numbers picks whichever currency has the smallest face value: INR 1998/hr "beats"
+        # AUD 53/hr, which is really ~INR 3050/hr. Normalize to the EUR pivot before taking the max,
+        # same rule as derive_rate_prefill(). And write the WINNING CURRENCY alongside the rate:
+        # seeding hourly_rate while leaving mentors.currency untouched is what left mentor rows in one
+        # currency and their services in another, breaking set_currency == mentors.currency.
+        if sell_rates:
+            top_rate, top_ccy = max(sell_rates, key=lambda rc: rc[0] / fx.get(rc[1], 1.0))
+            if (float(m.get("hourly_rate") or 0) != top_rate
+                    or (m.get("currency") or "").upper() != top_ccy):
+                print(f"  RATE {m['display_name'][:18]:18} hourly_rate -> {top_rate} {top_ccy}")
+                rate_updates += 1
+                if not args.dry_run:
+                    sb.table("mentors").update(
+                        {"hourly_rate": top_rate, "currency": top_ccy}
+                    ).eq("id", m["id"]).execute()
 
     tag = "(dry-run) " if args.dry_run else ""
     print(f"\n{tag}services repriced: {svc_updates}, mentor rates seeded: {rate_updates}, "

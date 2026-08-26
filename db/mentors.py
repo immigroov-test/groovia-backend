@@ -645,6 +645,13 @@ def save_mentor_profile_edit(mentor_id: str, fields: dict[str, Any]) -> dict[str
     if not res.data:
         raise ValueError(f"Mentor {mentor_id!r} not found")
     if status != "approved":   # changes_requested/rejected branch writes straight to the live row
+        if any(k in safe for k in _RATE_FIELDS):
+            # BUG-079 again: this branch writes hourly_rate/currency to the LIVE row, so it owes the
+            # same reprice every other live-write path does (save_mentor_profile_live,
+            # apply_pending_changes, signup). Without it the mentor row moves to the new currency
+            # while every service keeps the old one, breaking the set_currency == mentors.currency
+            # invariant and leaving PPP anchored to a currency the mentor no longer prices in.
+            reprice_mentor_services(mentor_id)
         _sync_services_ppp(mentor_id, safe)
     return res.data[0]
 
