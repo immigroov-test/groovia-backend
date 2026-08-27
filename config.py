@@ -46,6 +46,32 @@ TAVILY_MAX_RESULTS       = 5
 # A personal gmail/outlook address will be REJECTED by Resend (every send fails).
 RESEND_API_KEY = os.getenv("RESEND_API_KEY")
 EMAIL_FROM     = os.getenv("EMAIL_FROM", "Immigroov <support@immigroov.com>")
+# FEAT-038: separate sending identities per purpose, so one stream's reputation cannot
+# sink another's. Every stream falls back to EMAIL_FROM, so leaving these unset keeps the
+# current single-sender behaviour and nothing breaks before the DNS records exist.
+#
+# The point of the split is isolation. A review request is the one email here a recipient
+# might mark as spam; a password reset and a booking confirmation are the two that must
+# never be filtered. Sending them all from one domain means the first can damage delivery
+# of the other two. Mailbox providers score reputation per sending domain, so putting each
+# purpose on its own subdomain contains the damage to that purpose.
+#
+# Each subdomain has to be added and verified in Resend (its own SPF/DKIM/DMARC records),
+# and each should be warmed separately. Suggested layout, all under immigroov.com:
+#   auth.immigroov.com     security  - sign-in, signup confirmation, password recovery
+#   send.immigroov.com     bookings  - confirmations, reminders, reschedules, money
+#   hello.immigroov.com    account   - welcome, mentor application outcomes, legal updates
+#   updates.immigroov.com  updates   - review requests (the complaint-prone stream)
+#   alerts.immigroov.com   alerts    - internal only: ops alerts, admin copies, contact form
+EMAIL_FROM_AUTH     = os.getenv("EMAIL_FROM_AUTH", "") or EMAIL_FROM
+EMAIL_FROM_BOOKINGS = os.getenv("EMAIL_FROM_BOOKINGS", "") or EMAIL_FROM
+EMAIL_FROM_ACCOUNT  = os.getenv("EMAIL_FROM_ACCOUNT", "") or EMAIL_FROM
+EMAIL_FROM_UPDATES  = os.getenv("EMAIL_FROM_UPDATES", "") or EMAIL_FROM
+EMAIL_FROM_ALERTS   = os.getenv("EMAIL_FROM_ALERTS", "") or EMAIL_FROM
+# Where replies should land. A no-reply From with no Reply-To is a dead end for someone
+# answering a booking email; point it at the inbox a human actually reads.
+EMAIL_REPLY_TO = os.getenv("EMAIL_REPLY_TO", "").strip()
+
 # Ops inbox copied on every booking / reschedule / cancellation. Empty = no admin copy.
 ADMIN_EMAIL    = os.getenv("ADMIN_EMAIL", "")
 # Testing without a verified domain: when set, ALL transactional emails are routed to

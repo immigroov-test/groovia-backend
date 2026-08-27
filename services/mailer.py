@@ -1320,6 +1320,63 @@ _TEMPLATES = {
 }
 
 
+
+# FEAT-038: which sending identity each template goes out from.
+#
+# Grouped by what a spam complaint against the group would cost. Mailbox providers score
+# reputation per sending domain, so the streams are drawn to keep the emails that MUST be
+# delivered away from the ones a recipient might report.
+#
+#   security  sign-in and recovery. Filtering one of these locks someone out of their
+#             account, so it shares a domain with nothing else.
+#   bookings  the session and money trail: confirmations, reminders, reschedules, refunds.
+#             Expected mail with high engagement, and the other stream that must not fail.
+#   account   status changes people asked for: welcome, application outcomes, legal updates.
+#   updates   review requests. The one stream a recipient plausibly marks as spam, so it is
+#             deliberately isolated from everything above.
+#   alerts    internal only - ops alerts, admin copies, the contact form. Never reaches a
+#             customer, so its reputation is nobody's problem but ours.
+#
+# A template missing from this map falls back to `account`, which is the conservative
+# choice: a real address, not the alert stream, and not the two protected ones.
+_STREAMS: dict[str, str] = {
+    **{k: "security" for k in (
+        "auth_signup_confirm", "auth_magic_link", "auth_recovery", "auth_generic")},
+    **{k: "bookings" for k in (
+        "booking_confirmed_candidate", "booking_confirmed_mentor",
+        "booking_cancelled", "booking_rescheduled",
+        "reschedule_proposed", "reschedule_requested", "reschedule_counter",
+        "cancel_requested", "cancel_request_sent", "no_show_reported",
+        "session_reminder_24h", "session_reminder_1h", "session_reminder_30min",
+        "mentor_attendance_check",
+        "payment_failed", "refund_issued", "payout_paid")},
+    **{k: "account" for k in (
+        "welcome_candidate", "welcome_mentor",
+        "mentor_application_received", "mentor_approved", "mentor_rejected",
+        "mentor_changes_requested", "mentor_suspended", "mentor_reinstated",
+        "legal_document_updated")},
+    **{k: "updates" for k in (
+        "review_request",)},
+    **{k: "alerts" for k in (
+        "fx_stale_alert", "webhook_rejected_alert", "payout_mismatch_alert",
+        "booking_admin_notice", "payment_admin_notice", "contact_form",
+        "admin_mentor_application", "admin_mentor_change_request",
+        "admin_mentor_changes_submitted", "admin_mentor_suspended")},
+}
+
+
+def _from_for(template: str) -> str:
+    """The sending identity for a template's stream. Every stream falls back to EMAIL_FROM,
+    so this is a no-op until the subdomains are actually verified in Resend."""
+    return {
+        "security": config.EMAIL_FROM_AUTH,
+        "bookings": config.EMAIL_FROM_BOOKINGS,
+        "account":  config.EMAIL_FROM_ACCOUNT,
+        "updates":  config.EMAIL_FROM_UPDATES,
+        "alerts":   config.EMAIL_FROM_ALERTS,
+    }.get(_STREAMS.get(template, "account"), config.EMAIL_FROM)
+
+
 def send_transactional(
     to: str,
     template: str,
@@ -1354,11 +1411,15 @@ def send_transactional(
         recipient = config.EMAIL_TEST_REDIRECT
 
     payload: dict = {
-        "from": config.EMAIL_FROM,
+        "from": _from_for(template),
         "to": [recipient],
         "subject": subject,
         "html": html,
     }
+    # A no-reply From with no Reply-To is a dead end for anyone answering a booking email.
+    # Internal alert mail is exempt: replies to it would land back in our own ops inbox.
+    if config.EMAIL_REPLY_TO and _STREAMS.get(template) != "alerts":
+        payload["reply_to"] = config.EMAIL_REPLY_TO
     if scheduled_at:
         payload["scheduled_at"] = scheduled_at.isoformat()
     if attachments:
@@ -1381,7 +1442,7 @@ def send_transactional(
             # Surface Resend's actual reason (unverified domain, sandbox recipient, etc.)
             logger.error(
                 "Resend rejected %s to %s (from=%r): HTTP %s - %s",
-                template, recipient, config.EMAIL_FROM, resp.status_code, resp.text,
+                template, recipient, _from_for(template), resp.status_code, resp.text,
             )
         resp.raise_for_status()
         logger.info("Sent %s to %s", template, recipient)
