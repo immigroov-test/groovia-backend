@@ -34,10 +34,10 @@ def test_update_service_persists_title_description_category_tags():
 
 def test_update_service_allows_duration_matching_another_active_service():
     """Duration is no longer a unique key: two active services may share a length."""
-    body = ServiceEditBody(duration=90)
+    body = ServiceEditBody(duration=45)
     existing = [
         {"id": "svc-1", "is_active": True, "duration": 60, "set_price": 0},
-        {"id": "svc-2", "is_active": True, "duration": 90, "set_price": 0},
+        {"id": "svc-2", "is_active": True, "duration": 45, "set_price": 0},
     ]
     with patch.object(db, "get_service_mentor_id", return_value="mentor-1"), \
          patch.object(db, "list_services", return_value=existing), \
@@ -46,11 +46,11 @@ def test_update_service_allows_duration_matching_another_active_service():
 
     assert result == {"updated": True}
     fields = upd.call_args.args[1]
-    assert fields["duration"] == 90
+    assert fields["duration"] == 45
 
 
 def test_update_service_persists_duration_and_reprices():
-    body = ServiceEditBody(duration=90)
+    body = ServiceEditBody(duration=45)
     existing = [{"id": "svc-1", "is_active": True, "duration": 60, "set_price": 60.0}]
     with patch.object(db, "get_service_mentor_id", return_value="mentor-1"), \
          patch.object(db, "list_services", return_value=existing), \
@@ -58,8 +58,8 @@ def test_update_service_persists_duration_and_reprices():
         update_service("svc-1", body, mentor={"id": "mentor-1", "currency": "USD", "hourly_rate": 60})
 
     fields = upd.call_args.args[1]
-    assert fields["duration"] == 90
-    assert fields["set_price"] == 90.0
+    assert fields["duration"] == 45
+    assert fields["set_price"] == 45.0
 
 
 def test_update_service_rejects_non_owner():

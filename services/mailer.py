@@ -1361,7 +1361,8 @@ _STREAMS: dict[str, str] = {
         "fx_stale_alert", "webhook_rejected_alert", "payout_mismatch_alert",
         "booking_admin_notice", "payment_admin_notice", "contact_form",
         "admin_mentor_application", "admin_mentor_change_request",
-        "admin_mentor_changes_submitted", "admin_mentor_suspended")},
+        "admin_mentor_changes_submitted", "admin_mentor_suspended",
+        "data_subject_request")},
 }
 
 

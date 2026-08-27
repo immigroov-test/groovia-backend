@@ -9,7 +9,7 @@
 # BackgroundTasks()/AuthUser() ourselves and mock db.* without any auth scaffolding.
 import pytest
 from unittest.mock import patch
-from fastapi import BackgroundTasks, HTTPException
+from fastapi import BackgroundTasks, HTTPException, Request
 
 import db
 from core.auth import AuthUser
@@ -29,6 +29,13 @@ def _bank(**overrides):
 def _base_body(**overrides):
     fields = dict(
         display_name="Test Mentor", agreed_to_mentor_terms=True,
+        # Signup now requires both consent checkboxes (Consent Flow Spec Section 6). These
+        # tests are about the availability/service warning logic, so they tick both and
+        # leave the consent guard itself to its own tests.
+        agreed_to_mentor_bundle=True, agreed_to_mentor_dpa=True,
+        # A base rate is now validated against a per-currency floor, so the body needs a
+        # real one for these tests to reach the code they are actually about.
+        hourly_rate=60, currency="USD",
         expertise_country_codes=["NL"], languages=["en"],
         country="NL", home_country_code="IN", years_lived_experience=3, years_professional_experience=5,
         weekly_availability=[WeeklySlot(weekday="Monday", start_time="09:00", end_time="17:00")],
@@ -39,6 +46,15 @@ def _base_body(**overrides):
     return MentorSignupBody(**fields)
 
 
+def _request():
+    """A minimal ASGI Request. mentor_signup now takes one so the consent record can carry
+    the caller's IP and user-agent; nothing in these tests depends on those values."""
+    return Request({
+        "type": "http", "method": "POST", "path": "/mentor/signup",
+        "headers": [], "query_string": b"", "client": ("127.0.0.1", 0),
+    })
+
+
 def _run(body):
     # Bank details are mandatory: pretend the encryption key is configured and stub the encrypted
     # write, so these tests exercise the availability/service warning logic, not the crypto/DB.
@@ -47,7 +63,7 @@ def _run(body):
          patch.object(db, "get_mentor_email", return_value=("Test Mentor", None)), \
          patch.object(db, "upsert_mentor_bank"), \
          patch("routers.mentor.bank_crypto.is_configured", return_value=True):
-        return mentor_signup(body, BackgroundTasks(), user=_user())
+        return mentor_signup(_request(), body, BackgroundTasks(), user=_user())
 
 
 def test_signup_succeeds_with_no_warnings_when_everything_saves():
@@ -84,7 +100,7 @@ def test_signup_rejected_without_bank_details():
          patch.object(db, "create_mentor_signup") as created, \
          patch("routers.mentor.bank_crypto.is_configured", return_value=True):
         with pytest.raises(HTTPException) as exc:
-            mentor_signup(_base_body(bank=None), BackgroundTasks(), user=_user())
+            mentor_signup(_request(), _base_body(bank=None), BackgroundTasks(), user=_user())
     assert exc.value.status_code == 400
     created.assert_not_called()   # never leaves a half-created mentor
 
@@ -95,7 +111,7 @@ def test_signup_rejected_with_invalid_bank_details():
          patch.object(db, "create_mentor_signup") as created, \
          patch("routers.mentor.bank_crypto.is_configured", return_value=True):
         with pytest.raises(HTTPException) as exc:
-            mentor_signup(_base_body(bank=_bank(iban="NL00BAD")), BackgroundTasks(), user=_user())
+            mentor_signup(_request(), _base_body(bank=_bank(iban="NL00BAD")), BackgroundTasks(), user=_user())
     assert exc.value.status_code == 422
     created.assert_not_called()
 
