@@ -11,6 +11,7 @@ from pydantic import BaseModel, field_validator
 import config
 import db
 from core.auth import AuthUser, get_current_user, get_current_user_optional
+from routers.pricing import resolve_pricing_country
 
 logger = logging.getLogger("immigroov.routers.payments")
 
@@ -37,6 +38,10 @@ class ReserveBody(BaseModel):
     answers: list[BookingAnswerItem] = []
     specific_availability_id: Optional[str] = None
     referral_code: Optional[str] = None
+    # Consent Flow Spec Section 4: the bundled checkbox (Customer T&C + Privacy Policy +
+    # Payment Terms) plus the distinct Refund & Cancellation Policy link, both required
+    # at this exact step - "this checkpoint must exist even without an account."
+    accepted_terms: bool = False
 
     @field_validator("email")
     @classmethod
@@ -56,13 +61,16 @@ class ReserveBody(BaseModel):
 
 
 @router.post("/reserve")
-def reserve(body: ReserveBody, user: Optional[AuthUser] = Depends(get_current_user_optional)):
+def reserve(request: Request, body: ReserveBody,
+            user: Optional[AuthUser] = Depends(get_current_user_optional)):
     """Consume a binding price quote into a 10-minute payment-hold booking. Guest-allowed
     (flight-style checkout): a signed-in caller attaches candidate_id; a guest books with
     candidate_id NULL and their identity lives in candidate_email/name/phone, to be claimed
     when they later sign up with that email. The caller must follow up with
     /payments/razorpay/create-order (or, when payments are disabled, /payments/confirm-mock)
     before the hold expires."""
+    if not body.accepted_terms:
+        raise HTTPException(status_code=400, detail="You must accept the Terms, Privacy Policy, and Payment Terms")
     answers_json = [a.model_dump() for a in body.answers]
     candidate_id = user.id if user else None
     # A mentor must never pay for their own session (same account or same email). They can still test
@@ -91,6 +99,23 @@ def reserve(body: ReserveBody, user: Optional[AuthUser] = Depends(get_current_us
                 db.set_profile_phone_if_empty(candidate_id, body.phone)
         except Exception:
             logger.warning("could not save phone/notes for reserved booking %s", result.get("booking_id"))
+        # Consent Flow Spec Section 4: log against booking_id the moment one exists -
+        # "the only evidentiary record if a guest disputes later." Country is resolved
+        # server-side via the same trusted edge-geo signal PPP pricing already uses,
+        # never the client's claim, so the correct Customer T&C document is what was
+        # actually recorded regardless of what link the UI happened to render.
+        try:
+            country = resolve_pricing_country(request, None)
+            tc_slug = "customer-terms-india" if (country or "").upper() == "IN" else "customer-terms-row"
+            db.record_legal_consent(
+                [tc_slug, "privacy-policy", "payment-terms", "refund-cancellation-policy"],
+                user_id=candidate_id, booking_id=result["booking_id"],
+                consent_method="checkbox_guest_checkout" if not candidate_id else "checkbox_customer_checkout",
+                ip=(request.client.host if request.client else None),
+                user_agent=request.headers.get("user-agent"),
+            )
+        except Exception:
+            logger.exception("Checkout consent log failed for booking %s", result.get("booking_id"))
         return result
     except Exception as e:
         msg = str(e)

@@ -12,13 +12,14 @@ parameter a caller could point at someone else's contract.
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from postgrest.exceptions import APIError
 from pydantic import BaseModel, Field
 
 import db
-from core.auth import AuthUser, get_current_user, require_admin
+from core.auth import AuthUser, get_current_user, get_current_user_optional, require_admin
 from core.rate_limit import limiter
+from services import mailer
 
 logger = logging.getLogger("immigroov.routers.legal")
 
@@ -52,6 +53,24 @@ class PublishBody(BaseModel):
 
 class AcknowledgeBody(BaseModel):
     version_id: str
+
+
+class GrooviaTermsStatusBody(BaseModel):
+    # A guest has no bearer identity yet; this is the localStorage-persisted id the
+    # client mints once and reuses for every guest consent write before an account or
+    # booking exists (see lib/chatStorage.ts on the frontend).
+    session_id: Optional[str] = Field(None, max_length=100)
+
+
+class DataSubjectRequestBody(BaseModel):
+    name: str = Field(..., max_length=200)
+    email: str = Field(..., max_length=320)
+    request_type: str = Field(..., pattern="^(access|rectification|erasure|portability|other)$")
+    details: Optional[str] = Field(None, max_length=5000)
+
+
+class DataSubjectRequestStatusBody(BaseModel):
+    status: str = Field(..., pattern="^(open|in_progress|closed)$")
 
 
 # ── Admin ────────────────────────────────────────────────────────────────────
@@ -212,3 +231,83 @@ def acknowledge(request: Request, body: AcknowledgeBody,
         return db.legal_acknowledge(user.id, body.version_id)
     except Exception as e:
         _raise_legal_error(e, "Could not record your acknowledgement")
+
+
+# ── Groovia AI Terms — one-time gate on the first message sent to Groovia ────
+# Distinct from the AI Disclosure Notice (a passive transparency label, always visible):
+# this is the liability/usage agreement, and it is ACTIVE - the spec requires it be
+# clicked through once, not merely displayed.
+@router.get("/groovia-ai-terms/status")
+def groovia_terms_status(session_id: Optional[str] = None,
+                          user: Optional[AuthUser] = Depends(get_current_user_optional)):
+    """Has this identity already accepted the CURRENT version of the Groovia AI Terms?
+    Checked before the chat send action fires, so a returning user or guest is never
+    re-prompted for a version they already accepted. A signed-in user's own id always
+    wins over a stray session_id, since a signed-in acceptance is the stronger record."""
+    accepted = db.legal_has_current_consent(
+        "groovia-ai-terms", user_id=(user.id if user else None), session_id=session_id)
+    return {"accepted": accepted}
+
+
+@router.post("/groovia-ai-terms/accept")
+@limiter.limit("20/minute")
+def groovia_terms_accept(request: Request, body: GrooviaTermsStatusBody,
+                         user: Optional[AuthUser] = Depends(get_current_user_optional)):
+    """Record acceptance of the Groovia AI Terms - the modal's Accept button.
+
+    One-time per user, or per guest session. A guest who later creates an account is
+    NOT carried forward (recommended by the spec itself): their new user_id has no
+    prior row, so the gate fires again under the new identity - by design, not a bug."""
+    if not user and not body.session_id:
+        raise HTTPException(status_code=400, detail="Missing session identity")
+    ip = request.client.host if request.client else None
+    ua = request.headers.get("user-agent")
+    try:
+        return db.record_legal_consent(
+            ["groovia-ai-terms"],
+            user_id=(user.id if user else None),
+            session_id=(None if user else body.session_id),
+            consent_method="modal_groovia_ai_terms", ip=ip, user_agent=ua,
+        )
+    except Exception as e:
+        _raise_legal_error(e, "Could not record your acceptance")
+
+
+# ── Data Subject Rights — a rights-exercise page, not a consent document ─────
+# Intake only: this creates a ticket and notifies admins. It does not itself export or
+# delete anything - fulfillment is a manual operational workflow, matching the spec's
+# own caution ("confirm the deletion workflow exists... or you're creating a promise
+# the system can't yet keep").
+@router.post("/data-subject-requests")
+@limiter.limit("5/minute")
+def submit_data_subject_request(request: Request, body: DataSubjectRequestBody,
+                                background_tasks: BackgroundTasks,
+                                user: Optional[AuthUser] = Depends(get_current_user_optional)):
+    """Public on purpose: exercising your rights must not itself require an account."""
+    row = db.create_data_subject_request(
+        body.name.strip(), body.email.strip().lower(), body.request_type,
+        (body.details or "").strip() or None, user.id if user else None,
+    )
+    recipients = db.admin_notify_emails() or ["support@immigroov.com"]
+    for to in recipients:
+        background_tasks.add_task(
+            mailer.send_transactional, to, "data_subject_request",
+            {"name": body.name, "email": body.email, "request_type": body.request_type,
+             "details": body.details or "", "request_id": row.get("id", "")},
+        )
+    return {"ok": True}
+
+
+@router.get("/admin/data-subject-requests")
+def admin_list_data_subject_requests(status: Optional[str] = None,
+                                     user: AuthUser = Depends(require_admin)):
+    """Admin queue for Section 7 intake tickets."""
+    return db.list_data_subject_requests(status)
+
+
+@router.post("/admin/data-subject-requests/{request_id}/status")
+def admin_update_data_subject_request(request_id: str, body: DataSubjectRequestStatusBody,
+                                      user: AuthUser = Depends(require_admin)):
+    """Mark a request in_progress or closed once it has been handled outside this
+    table (a manual export/deletion workflow)."""
+    return db.close_data_subject_request(request_id, body.status)

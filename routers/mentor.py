@@ -3,7 +3,7 @@ import re
 from typing import Any, Optional
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from pydantic import BaseModel, field_validator, model_validator
 
 import config
@@ -281,7 +281,12 @@ class MentorSignupBody(BaseModel):
     years_professional_experience: Optional[int] = None
     professional_domains: list[str] = []
     specializations: list[str] = []
-    agreed_to_mentor_terms: bool = False
+    # Two independent checkboxes per the Consent Flow Spec: the commercial bundle
+    # (Mentor Agreement + Commission & Payout Terms + Code of Conduct) and the Data
+    # Processing Addendum, which regulators expect as a distinct consent - a
+    # controller/processor instrument, not something folded into the general agreement.
+    agreed_to_mentor_bundle: bool = False
+    agreed_to_mentor_dpa: bool = False
     hourly_rate: Optional[float] = None
     currency: str = "USD"
     currency_rates: list[dict] = []      # additional-currency base rates [{currency, hourly_rate}]
@@ -322,15 +327,18 @@ def _derive_expertise(country: Optional[str], extra_codes: list[str] | None = No
 
 
 @router.post("/signup")
-def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, user: AuthUser = Depends(get_current_user)):
+def mentor_signup(request: Request, body: MentorSignupBody, background_tasks: BackgroundTasks,
+                   user: AuthUser = Depends(get_current_user)):
     """Self-service mentor signup: creates a new mentor row, pending admin review."""
     if db.get_mentor_by_profile_id(user.id):
         raise HTTPException(status_code=409, detail="This account is already linked to a mentor profile")
     display_name = body.display_name.strip()
     if not display_name:
         raise HTTPException(status_code=400, detail="Display name is required")
-    if not body.agreed_to_mentor_terms:
-        raise HTTPException(status_code=400, detail="You must accept the mentor agreement")
+    if not body.agreed_to_mentor_bundle:
+        raise HTTPException(status_code=400, detail="You must accept the Mentor Agreement, Commission & Payout Terms, and Code of Conduct")
+    if not body.agreed_to_mentor_dpa:
+        raise HTTPException(status_code=400, detail="You must accept the Mentor Data Processing Addendum")
     if not body.languages:
         raise HTTPException(status_code=400, detail="Select at least one language")
     if not (body.country or "").strip():
@@ -394,6 +402,24 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
         smart_pricing=body.smart_pricing,
     )
     mentor_id = result["id"]
+    # Consent Flow Spec Section 6: two checkboxes, two consent records - the bundle
+    # (Agreement + Commission & Payout + Code of Conduct) and the DPA are logged
+    # separately, never combined into one row, since regulators expect the DPA's
+    # controller/processor consent to be distinct from the general agreement. Both
+    # writes happen only after body validation above already required both flags to be
+    # true, and are best-effort like the audit log they parallel: a failed write here
+    # must not undo a mentor signup that otherwise fully succeeded.
+    ip = request.client.host if request.client else None
+    ua = request.headers.get("user-agent")
+    try:
+        db.record_legal_consent(
+            ["mentor-agreement", "mentor-commission-payout", "mentor-code-of-conduct"],
+            user_id=user.id, consent_method="checkbox_mentor_onboarding_1", ip=ip, user_agent=ua)
+        db.record_legal_consent(
+            ["mentor-data-processing"],
+            user_id=user.id, consent_method="checkbox_mentor_onboarding_2", ip=ip, user_agent=ua)
+    except Exception:
+        logger.exception("Mentor onboarding consent log failed for profile %s", user.id)
     # BUG-012: these inserts used to fail silently (logged server-side only), so a
     # transient error left a mentor with a "successful" signup but an empty
     # Availability/Sessions tab and no idea why. Collect what failed and surface it

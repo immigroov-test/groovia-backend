@@ -139,6 +139,78 @@ def legal_public_document(slug: str) -> Optional[dict[str, Any]]:
     return res.data or None
 
 
+# ── Active-consent capture (Consent Flow Spec) ────────────────────────────────
+def record_legal_consent(
+    slugs: list[str], *, user_id: Optional[str] = None, session_id: Optional[str] = None,
+    booking_id: Optional[str] = None, consent_method: str = "checkbox",
+    ip: Optional[str] = None, user_agent: Optional[str] = None,
+) -> dict[str, Any]:
+    """Record active consent to one or more documents in a single call - one click,
+    one row per document, exactly like legal_acknowledge_all's bundling.
+
+    Resolves each slug to its CURRENT published version server-side; a slug with no
+    live version is silently skipped rather than blocking the caller's signup/checkout.
+    Exactly one of user_id/session_id/booking_id must be the caller's real identity at
+    that moment - the database CHECK constraint is the backstop if this is ever called
+    with none of the three."""
+    res = _supabase.rpc("record_legal_consent", {
+        "p_slugs": slugs, "p_user": user_id, "p_session_id": session_id,
+        "p_booking_id": booking_id, "p_consent_method": consent_method,
+        "p_ip": ip, "p_user_agent": user_agent,
+    }).execute()
+    return res.data or {}
+
+
+def legal_has_current_consent(slug: str, *, user_id: Optional[str] = None,
+                              session_id: Optional[str] = None) -> bool:
+    """Has this user or guest session already consented to a document's CURRENT
+    version? Backs the Groovia AI Terms one-time gate: check before showing the modal,
+    so a returning identity is never re-prompted for a version they already accepted."""
+    res = _supabase.rpc("legal_has_current_consent", {
+        "p_slug": slug, "p_user": user_id, "p_session_id": session_id,
+    }).execute()
+    return bool(res.data)
+
+
+# ── Data Subject Rights intake (Section 7 — a rights-exercise page, not a
+# consent document) ───────────────────────────────────────────────────────────
+def create_data_subject_request(
+    name: str, email: str, request_type: str, details: Optional[str], user_id: Optional[str],
+) -> dict[str, Any]:
+    """File a Data Subject Rights request. Intake only: this creates the ticket and
+    notifies admins; it does not itself execute an export or deletion. Fulfillment is
+    an operational workflow outside what this table automates."""
+    res = (
+        _supabase.table("data_subject_requests")
+        .insert({
+            "name": name, "email": email, "request_type": request_type,
+            "details": details, "user_id": user_id,
+        })
+        .execute()
+    )
+    return res.data[0] if res.data else {}
+
+
+def list_data_subject_requests(status: Optional[str] = None) -> list[dict[str, Any]]:
+    """Admin queue. Filtered by status when given, else every request newest first."""
+    q = _supabase.table("data_subject_requests").select("*").order("created_at", desc=True)
+    if status:
+        q = q.eq("status", status)
+    res = q.execute()
+    return res.data or []
+
+
+def close_data_subject_request(request_id: str, status: str) -> dict[str, Any]:
+    """Admin marks a request in_progress or closed. Fulfillment happened outside this
+    table (a manual export/deletion workflow); this just records that it did."""
+    from datetime import datetime, timezone
+    patch: dict[str, Any] = {"status": status}
+    if status == "closed":
+        patch["closed_at"] = datetime.now(timezone.utc).isoformat()
+    res = _supabase.table("data_subject_requests").update(patch).eq("id", request_id).execute()
+    return res.data[0] if res.data else {}
+
+
 # ── Helper for the seed script ───────────────────────────────────────────────
 def first_admin_profile_id() -> Optional[str]:
     """Any admin account, used as the publisher when the seed script is run without

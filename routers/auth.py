@@ -11,6 +11,7 @@ from pydantic import BaseModel
 import config
 import db
 from core.auth import AuthUser, get_current_user
+from routers.pricing import resolve_pricing_country
 from services import mailer
 
 logger = logging.getLogger("immigroov.routers.auth")
@@ -24,6 +25,11 @@ class CheckEmailBody(BaseModel):
 
 class SyncBody(BaseModel):
     full_name: Optional[str] = None
+    # Only sent by the ONE-TIME signup-completion call (AuthModal's password-setup
+    # step) - never by the routine sync calls that fire on every login/tab-focus, so
+    # this endpoint being "run on every login" does not repeatedly re-record consent.
+    accepted_terms: Optional[bool] = None
+    marketing_consent: Optional[bool] = None
 
 
 @router.post("/check-email")
@@ -44,16 +50,40 @@ def set_guest(user: AuthUser = Depends(get_current_user)):
 
 
 @router.post("/sync")
-def sync_account(background_tasks: BackgroundTasks, body: SyncBody = SyncBody(),
+def sync_account(request: Request, background_tasks: BackgroundTasks, body: SyncBody = SyncBody(),
                  user: AuthUser = Depends(get_current_user)):
-    """Run right after login/signup. Three idempotent jobs:
+    """Run right after login/signup. Idempotent jobs:
     1. Link a pre-approved mentor (mentors row matched by email, no account yet).
     2. Backfill the profile's name (the signup trigger left it null; the name is
        entered later during password setup).
-    3. Attach any guest bookings this email made before signing up."""
+    3. Attach any guest bookings this email made before signing up.
+    4. Record signup consent (Consent Flow Spec Section 3), only when accepted_terms
+       is explicitly sent by the one-time completion call."""
     mentor = db.link_mentor_by_email(user.id, user.email)
     db.backfill_profile_name(user.id, body.full_name)
     linked_bookings = db.link_guest_bookings(user.id, user.email)
+    if body.accepted_terms:
+        # Guard against a retried/duplicated request re-recording the same signup:
+        # if this user already has a live consent record for the Privacy Policy
+        # (present in every bundle - signup, checkout, cookie banner), signup consent
+        # has already been captured and this is a repeat call, not a fresh signup.
+        if not db.legal_has_current_consent("privacy-policy", user_id=user.id):
+            try:
+                country = resolve_pricing_country(request, None)
+                tc_slug = "customer-terms-india" if (country or "").upper() == "IN" else "customer-terms-row"
+                ip = request.client.host if request.client else None
+                ua = request.headers.get("user-agent")
+                db.record_legal_consent(
+                    [tc_slug, "privacy-policy", "payment-terms"],
+                    user_id=user.id, consent_method="checkbox_signup", ip=ip, user_agent=ua)
+                # Marketing consent (spec: "must be a separate, unbundled checkbox").
+                # Logged in our own consent_events table for now; HubSpot contact sync
+                # is a separate task once a portal ID/API key exists - not wired here.
+                if body.marketing_consent is not None:
+                    db.record_consent(kind="marketing:signup", user_id=user.id,
+                                      granted=body.marketing_consent, ip=ip, user_agent=ua)
+            except Exception:
+                logger.exception("Signup consent log failed for user %s", user.id)
     # BUG-147: new customers never got a welcome (mentors get theirs on approval). Claimed once per
     # account, since this endpoint runs on every login, and skipped for mentors who get their own.
     if not mentor and user.email and db.claim_welcome_email(user.id):

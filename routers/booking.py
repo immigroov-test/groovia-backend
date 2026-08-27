@@ -4,13 +4,14 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import quote
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from postgrest.exceptions import APIError
 from pydantic import BaseModel, EmailStr, field_validator
 
 import config
 import db
 from core.auth import AuthUser, get_current_user, get_current_user_optional
+from routers.pricing import resolve_pricing_country
 from services import mailer, policy
 from services.ics import build_ics
 
@@ -433,6 +434,10 @@ class BookSessionBody(BaseModel):
     specific_availability_id: Optional[str] = None
     idempotency_key: Optional[str] = None
     referral_code: Optional[str] = None
+    # Consent Flow Spec Section 4: this free/mock-confirm path is the other half of
+    # checkout (routers/payments.py's /reserve is the paid half) - the same checkbox in
+    # the widget gates both, so both must record the same consent bundle.
+    accepted_terms: bool = False
 
     @field_validator("email")
     @classmethod
@@ -460,6 +465,7 @@ class BookSessionBody(BaseModel):
 
 @router.post("")
 def book_session(
+    request: Request,
     body: BookSessionBody,
     background_tasks: BackgroundTasks,
     user: Optional[AuthUser] = Depends(get_current_user_optional),
@@ -468,6 +474,8 @@ def book_session(
     a signed-in caller attaches candidate_id; a guest books with candidate_id NULL and their
     identity lives in candidate_email/name/phone, claimed when they later sign up with that
     email. The quote/reserve/confirm flow in routers/payments.py is the paid equivalent."""
+    if not body.accepted_terms:
+        raise HTTPException(status_code=400, detail="You must accept the Terms, Privacy Policy, and Payment Terms")
     # Idempotency: a retried/duplicated request (e.g. after a dropped network response)
     # returns the original booking instead of creating a second one.
     if body.idempotency_key:
@@ -506,6 +514,20 @@ def book_session(
             db.set_booking_notes(booking_id, body.notes)   # BUG-113: persist for email + dashboard
             if candidate_id:
                 db.set_profile_phone_if_empty(candidate_id, body.phone)
+            # Consent Flow Spec Section 4 - same write as the paid /reserve path, keyed to
+            # this booking_id the moment it exists.
+            try:
+                country = resolve_pricing_country(request, None)
+                tc_slug = "customer-terms-india" if (country or "").upper() == "IN" else "customer-terms-row"
+                db.record_legal_consent(
+                    [tc_slug, "privacy-policy", "payment-terms", "refund-cancellation-policy"],
+                    user_id=candidate_id, booking_id=booking_id,
+                    consent_method="checkbox_guest_checkout" if not candidate_id else "checkbox_customer_checkout",
+                    ip=(request.client.host if request.client else None),
+                    user_agent=request.headers.get("user-agent"),
+                )
+            except Exception:
+                logger.exception("Checkout consent log failed for booking %s", booking_id)
             background_tasks.add_task(
                 _send_booking_confirmation, booking_id, body.mentor_id, body.email, body.name
             )
