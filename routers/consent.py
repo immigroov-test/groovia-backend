@@ -23,6 +23,10 @@ class ConsentBody(BaseModel):
     analytics: bool = False
     marketing: bool = False
     policy_version: Optional[str] = Field(default=None, max_length=40)
+    # A guest has no user_id yet; this is the same localStorage-persisted identity used
+    # by the Groovia AI Terms gate (see lib/guestSession.ts on the frontend), so both
+    # guest consent events before an account exists share one identity.
+    session_id: Optional[str] = Field(default=None, max_length=100)
 
 
 @router.post("")
@@ -53,4 +57,18 @@ def record(request: Request, body: ConsentBody,
             ip=ip,
             user_agent=ua,
         )
+
+    # Consent Flow Spec Section 1/8: the banner is also the Cookie Policy's active-consent
+    # trigger point, logged once to the central table regardless of which choice was made
+    # (Accept/Reject/Customize) - all three mean the document was shown and answered. This
+    # is separate from the per-category analytics/marketing preference rows above, which
+    # track WHAT was chosen; this records THAT the document itself was consented to.
+    if body.kind == "cookies":
+        try:
+            db.record_legal_consent(
+                ["cookie-policy"], user_id=uid, session_id=(None if uid else body.session_id),
+                consent_method="cookie_banner", ip=ip, user_agent=ua,
+            )
+        except Exception:
+            logger.exception("Cookie Policy consent log failed")
     return {"ok": True}

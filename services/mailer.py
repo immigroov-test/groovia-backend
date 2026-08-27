@@ -1128,6 +1128,21 @@ def _contact_form(d: dict) -> tuple[str, str]:
     return f"Contact form: {topic}", _base(body)
 
 
+def _data_subject_request(d: dict) -> tuple[str, str]:
+    """Section 7 intake ticket notification, delivered to admins. Intake only - this
+    email is the alert that a request came in, not proof it was fulfilled."""
+    name = _e(d.get("name", ""))
+    email = _e(d.get("email", ""))
+    request_type = _e(d.get("request_type", ""))
+    details = _e(d.get("details", "")).replace("\n", "<br>")
+    body = (
+        '<h1 style="margin:0 0 12px;font-size:20px;font-weight:700;color:#0a0a0a">Data subject request</h1>'
+        + _details_card([("From", name), ("Email", email), ("Type", request_type)])
+        + (f'<p style="margin:16px 0 0;font-size:15px;color:#444;line-height:1.6">{details}</p>' if details else '')
+    )
+    return f"Data subject request: {request_type}", _base(body)
+
+
 def _fx_stale_alert(d: dict) -> tuple[str, str]:
     """Ops alarm: FX rates have stopped refreshing. Sent to admins only.
 
@@ -1269,6 +1284,7 @@ _TEMPLATES = {
     "payout_paid": _payout_paid,
     "payment_admin_notice": _payment_admin_notice,
     "contact_form": _contact_form,
+    "data_subject_request": _data_subject_request,
     "mentor_application_received": _mentor_application_received,
     "admin_mentor_application": _admin_mentor_application,
     "admin_mentor_change_request": _admin_mentor_change_request,

@@ -555,14 +555,11 @@ def create_mentor_signup(
         logger.exception("Profile role update failed; mentor row rolled back for profile %s", profile_id)
         raise RuntimeError("Failed to update profile role")
 
-    try:
-        _supabase.table("consent_log").insert({
-            "user_id": profile_id,
-            "consent_type": "mentor_agreement",
-            "version": "v1",
-        }).execute()
-    except Exception:
-        logger.warning("Consent log insert failed for profile %s (non-fatal)", profile_id)
+    # The real, version-aware consent record (Mentor Agreement + Commission & Payout +
+    # Code of Conduct bundle, and the DPA separately) is written by the caller via
+    # db.record_legal_consent immediately after this function returns - this used to
+    # write a hardcoded {"version": "v1"} row here, never tied to an actual published
+    # document, which is why that write has moved out to the real mechanism instead.
 
     return mentor_row
 
