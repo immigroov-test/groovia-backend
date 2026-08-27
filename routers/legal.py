@@ -12,13 +12,14 @@ parameter a caller could point at someone else's contract.
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from postgrest.exceptions import APIError
 from pydantic import BaseModel, Field
 
 import db
 from core.auth import AuthUser, get_current_user, require_admin
 from core.rate_limit import limiter
+from services import mailer
 
 logger = logging.getLogger("immigroov.routers.legal")
 
@@ -106,10 +107,44 @@ def discard_draft(document_id: str, user: AuthUser = Depends(require_admin)):
         _raise_legal_error(e, "Could not discard the draft")
 
 
+
+def _email_legal_update(document_id: str, version: str, change_note: Optional[str]) -> None:
+    """Tell everyone a materially-revised document binds that it changed.
+
+    Best-effort and per-recipient: one bad address must not stop the rest of the send, and
+    a mail failure must never make a successful publish look like it failed. The document
+    is already live either way - the email is a notification, not part of publishing."""
+    # legal_publish returns the version, not the document, so the title is looked up here
+    # rather than threaded through the response shape.
+    try:
+        doc = db.legal_admin_document(document_id) or {}
+        title = doc.get("title") or "legal document"
+        recipients = db.legal_document_recipients(document_id)
+    except Exception:
+        logger.exception("legal update email: could not resolve recipients for %s", document_id)
+        return
+    sent = 0
+    for r in recipients:
+        email = (r.get("email") or "").strip()
+        if not email:
+            continue
+        try:
+            mailer.send_transactional(email, "legal_document_updated", {
+                "recipient_name": r.get("name") or "",
+                "doc_title": title,
+                "version": version,
+                "change_note": change_note,
+            })
+            sent += 1
+        except Exception:
+            logger.exception("legal update email failed for %s", email)
+    logger.info("legal update email: %s/%s sent for %s", sent, len(recipients), title)
+
+
 @router.post("/admin/documents/{document_id}/publish")
 @limiter.limit("20/minute")
 def publish(request: Request, document_id: str, body: PublishBody,
-            user: AuthUser = Depends(require_admin)):
+            background_tasks: BackgroundTasks, user: AuthUser = Depends(require_admin)):
     """Publish Official Update.
 
     Creates the next version from the draft, stamps the date and publisher, and makes it
@@ -121,9 +156,17 @@ def publish(request: Request, document_id: str, body: PublishBody,
     Rejected with a 400 when there is no draft, or when the draft is identical to the
     live version (a double-click on Publish, or a re-save with no real change)."""
     try:
-        return db.legal_publish(document_id, user.id, body.change_note, body.major)
+        result = db.legal_publish(document_id, user.id, body.change_note, body.major)
     except Exception as e:
         _raise_legal_error(e, "Could not publish the update")
+        raise   # unreachable: _raise_legal_error always raises. Keeps the type checker honest.
+    # FEAT-030: notify only on a MATERIAL revision. Emailing everyone about a corrected
+    # typo is how a notice stops being read, and then the one that matters goes unread too.
+    if body.major:
+        background_tasks.add_task(
+            _email_legal_update, document_id, (result or {}).get("version") or "", body.change_note,
+        )
+    return result
 
 
 # ── Public ───────────────────────────────────────────────────────────────────

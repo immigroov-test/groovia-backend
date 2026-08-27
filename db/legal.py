@@ -139,6 +139,13 @@ def legal_public_document(slug: str) -> Optional[dict[str, Any]]:
     return res.data or None
 
 
+def legal_document_recipients(document_id: str) -> list[dict[str, Any]]:
+    """Everyone a document binds: [{email, name}]. Audience decides the roles, region_scope
+    decides which of the two Customer T&C editions a given customer belongs to."""
+    res = _supabase.rpc("legal_document_recipients", {"p_document_id": document_id}).execute()
+    return res.data or []
+
+
 # ── Helper for the seed script ───────────────────────────────────────────────
 def first_admin_profile_id() -> Optional[str]:
     """Any admin account, used as the publisher when the seed script is run without

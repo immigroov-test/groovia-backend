@@ -1220,6 +1220,45 @@ def _payout_mismatch_alert(d: dict) -> tuple[str, str]:
     return f"[Immigroov] {head}", _base(f'<h2 style="margin:0 0 16px;font-size:18px">{head}</h2>' + body)
 
 
+def _legal_document_updated(d: dict) -> tuple[str, str]:
+    """A legal document that binds this recipient has a new published version.
+
+    Sent only for MATERIAL revisions (a major version bump). Telling people about every
+    corrected typo is how a notice stops being read, and the one that matters then goes
+    the same way. The email states what changed and links straight to the document rather
+    than to the top of a page holding fourteen of them."""
+    name = _e(d.get("recipient_name") or "there")
+    title = _e(d.get("doc_title", "a legal document"))
+    version = _e(d.get("version", ""))
+    note = (d.get("change_note") or "").strip()
+    platform = d.get("platform_url", config.FRONTEND_URL)
+    review_url = d.get("review_url") or f"{platform}/legal/updates"
+
+    note_html = ""
+    if note:
+        note_html = (
+            '<div style="margin:16px 0;padding:12px 14px;border-left:3px solid #d4d4d8;background:#fafafa">'
+            f'<p style="margin:0;font-size:14px;color:#444;line-height:1.6"><strong>What changed:</strong> {_e(note)}</p>'
+            "</div>"
+        )
+
+    body = (
+        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">We have updated our ' + title + "</h1>"
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {name},</p>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
+        f"We have published a new version of the <strong>{title}</strong>"
+        + (f" ({version})" if version else "")
+        + ", which applies to your Immigroov account."
+        "</p>"
+        + note_html
+        + '<p style="margin:0;font-size:15px;color:#444;line-height:1.6">'
+        "Please review and accept the updated version. You will be asked to do this next time you sign in."
+        "</p>"
+        + _btn(review_url, "Review and accept")
+    )
+    return f"Update to our {d.get('doc_title', 'legal terms')}", _base(body)
+
+
 _TEMPLATES = {
     "fx_stale_alert": _fx_stale_alert,
     "webhook_rejected_alert": _webhook_rejected_alert,
@@ -1261,6 +1300,7 @@ _TEMPLATES = {
     "auth_magic_link": _auth_magic_link,
     "auth_recovery": _auth_recovery,
     "auth_generic": _auth_generic,
+    "legal_document_updated": _legal_document_updated,
 }
 
 
