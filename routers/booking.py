@@ -720,7 +720,8 @@ class ConfirmRescheduleBody(BaseModel):
 
 
 @router.post("/reschedule/confirm")
-def confirm_reschedule(body: ConfirmRescheduleBody, user: AuthUser = Depends(get_current_user)):
+def confirm_reschedule(body: ConfirmRescheduleBody, background_tasks: BackgroundTasks,
+                       user: AuthUser = Depends(get_current_user)):
     """Mentor confirms the time the mentee selected."""
     principals = db.get_offer_booking_principals(body.offer_id)
     if not principals:
@@ -728,8 +729,14 @@ def confirm_reschedule(body: ConfirmRescheduleBody, user: AuthUser = Depends(get
     mentor = db.get_mentor_by_profile_id(user.id)
     if not mentor or mentor.get("id") != principals.get("mentor_id"):
         raise HTTPException(status_code=403, detail="Only the booking's mentor can confirm a reschedule")
+    old_slot = (db.get_booking_reschedule_target(principals["booking_id"]) or {}).get("slot_time")         if principals.get("booking_id") else None
     try:
         booking = db.mentor_confirm_reschedule(body.offer_id)
+        # This is the step that MOVES the session, and it told nobody. The mentee picked a
+        # time and then heard nothing about whether it stood; the mentor got no confirmation
+        # of their own calendar change either.
+        if booking and booking.get("id"):
+            background_tasks.add_task(_notify_parties, booking["id"], "rescheduled", old_slot)
         return booking
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -770,7 +777,8 @@ class RespondRequestBody(BaseModel):
 
 
 @router.post("/request/respond")
-def respond_request(body: RespondRequestBody, user: AuthUser = Depends(get_current_user)):
+def respond_request(body: RespondRequestBody, background_tasks: BackgroundTasks,
+                    user: AuthUser = Depends(get_current_user)):
     """Mentor approves/rejects a user's pending cancel or reschedule request."""
     principals = db.get_request_booking_principals(body.request_id)
     if not principals:
@@ -780,6 +788,18 @@ def respond_request(body: RespondRequestBody, user: AuthUser = Depends(get_curre
         raise HTTPException(status_code=403, detail="Only the booking's mentor can respond to this request")
     try:
         db.respond_booking_request(body.request_id, body.accept)
+        # A cancel request ends the booking either way, and settles money with it: approving
+        # refunds the customer in full, refusing keeps 50%. That happened silently. The
+        # reschedule kind only changes what the customer may do next, so it carries its own
+        # wording rather than borrowing the cancellation email.
+        kind = (principals.get("kind") or "").lower()
+        if kind == "cancel":
+            background_tasks.add_task(_notify_parties, principals["booking_id"], "cancelled",
+                                      None, "mentor")
+        elif kind == "reschedule":
+            background_tasks.add_task(
+                _notify_parties, principals["booking_id"],
+                "reschedule_approved" if body.accept else "reschedule_rejected")
         return {"ok": True}
     except Exception as e:
         if "no longer open" in str(e).lower():
@@ -1264,6 +1284,25 @@ def _notify_parties(booking_id: str, event: str, old_slot: Optional[str] = None,
                                                  "service_title": service_title,
                                                  "booking_ref": _booking_ref(booking_id),
                                                  "session_time": session_time, "session_url": mentor_hub})
+        elif event in ("reschedule_approved", "reschedule_rejected"):
+            # The mentor answered a reschedule REQUEST. Nothing has moved yet either way: on
+            # approval the customer still has to pick a time, and on refusal the session
+            # stands. Both sides are told, because the customer is waiting on the answer and
+            # the mentor needs a record of what they decided.
+            times = db.get_booking_times_display(booking_id) or {}
+            template = ("reschedule_request_approved" if event == "reschedule_approved"
+                        else "reschedule_request_declined")
+            common = {"service_title": service_title, "booking_ref": _booking_ref(booking_id)}
+            send(c_email, template, {
+                **common, "recipient_name": c_name, "other_name": m_name,
+                "session_time": _local_stamp(times, "customer_local", "customer_tz") or session_time,
+                "approved_by_you": False, "manage_url": session_url,
+            })
+            send(m_email, template, {
+                **common, "recipient_name": m_name, "other_name": c_name,
+                "session_time": _local_stamp(times, "mentor_local", "mentor_tz") or session_time,
+                "approved_by_you": True, "manage_url": mentor_hub,
+            })
         elif event == "reschedule_requested":
             times = db.get_booking_times_display(booking_id) or {}
             send(m_email, "reschedule_requested", {
