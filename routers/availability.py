@@ -266,9 +266,12 @@ def list_specific(user: AuthUser = Depends(get_current_user)):
 
 @router.post("/specific/{entry_id}/delete")
 def delete_specific(entry_id: str, user: AuthUser = Depends(get_current_user)):
-    _get_mentor_id(user)
+    # The caller's own mentor id is passed through, not just checked: this endpoint used to
+    # confirm the caller was A mentor and then delete by id alone, so one mentor holding
+    # another's entry id could remove their date override.
+    mentor_id = _get_mentor_id(user)
     try:
-        db.remove_specific_availability(entry_id)
+        db.remove_specific_availability(entry_id, mentor_id)
         return {"deleted": True}
     except Exception:
         raise HTTPException(status_code=500, detail="Failed to delete entry")

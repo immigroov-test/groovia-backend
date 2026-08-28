@@ -753,8 +753,10 @@ def list_specific_availability(mentor_id: str) -> list[dict]:
     return res.data or []
 
 
-def remove_specific_availability(entry_id: str) -> None:
-    _supabase.rpc("avail_remove_specific", {"p_id": entry_id}).execute()
+def remove_specific_availability(entry_id: str, mentor_id: str) -> None:
+    """Delete one date override. Scoped to its owner: the RPC matches on mentor_id too, so
+    an id belonging to another mentor deletes nothing rather than deleting theirs."""
+    _supabase.rpc("avail_remove_specific", {"p_id": entry_id, "p_mentor_id": mentor_id}).execute()
 
 
 def list_mentor_sessions(mentor_id: str) -> list[dict]:
