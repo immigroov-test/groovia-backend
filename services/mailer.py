@@ -1216,6 +1216,65 @@ def _payout_mismatch_alert(d: dict) -> tuple[str, str]:
     return f"[Immigroov] {head}", _base(f'<h2 style="margin:0 0 16px;font-size:18px">{head}</h2>' + body)
 
 
+def _reschedule_request_approved(d: dict) -> tuple[str, str]:
+    """The mentor agreed to a reschedule request. The session has NOT moved yet - the
+    customer still has to pick a time - so the email says what to do next rather than
+    implying it is settled."""
+    name = _e(d.get("recipient_name", "there"))
+    other = _e(d.get("other_name", "your mentor"))
+    mine = bool(d.get("approved_by_you"))
+    if mine:
+        body = (
+            '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">You approved a reschedule</h1>'
+            f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {name},</p>'
+            f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
+            f"You approved <strong>{other}</strong>'s request to reschedule. They will pick a new "
+            "time from your availability, and the session moves once they do.</p>"
+            + _session_rows(d)
+            + _btn(d.get("manage_url") or config.FRONTEND_URL + "/mentor", "View session")
+        )
+        return "You approved a reschedule request", _base(body)
+    body = (
+        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Your reschedule was approved</h1>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {name},</p>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
+        f"<strong>{other}</strong> approved your request to reschedule. Pick a new time that suits "
+        "you and the session will move to it.</p>"
+        + _session_rows(d)
+        + _btn(d.get("manage_url") or config.FRONTEND_URL, "Pick a new time")
+    )
+    return "Your reschedule request was approved", _base(body)
+
+
+def _reschedule_request_declined(d: dict) -> tuple[str, str]:
+    """The mentor declined. The session stands at its original time, which is the one thing
+    the recipient most needs to know - silence here would leave them assuming it moved."""
+    name = _e(d.get("recipient_name", "there"))
+    other = _e(d.get("other_name", "your mentor"))
+    mine = bool(d.get("approved_by_you"))
+    if mine:
+        body = (
+            '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">You declined a reschedule</h1>'
+            f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {name},</p>'
+            f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
+            f"You declined <strong>{other}</strong>'s request to reschedule. The session stays at "
+            "its original time.</p>"
+            + _session_rows(d)
+            + _btn(d.get("manage_url") or config.FRONTEND_URL + "/mentor", "View session")
+        )
+        return "You declined a reschedule request", _base(body)
+    body = (
+        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Your reschedule was declined</h1>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {name},</p>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
+        f"<strong>{other}</strong> could not move this session, so it stays at its original time "
+        "below. If you cannot make it, you can still cancel from your session page.</p>"
+        + _session_rows(d)
+        + _btn(d.get("manage_url") or config.FRONTEND_URL, "View session")
+    )
+    return "Your reschedule request was declined", _base(body)
+
+
 _TEMPLATES = {
     "fx_stale_alert": _fx_stale_alert,
     "webhook_rejected_alert": _webhook_rejected_alert,
@@ -1250,6 +1309,8 @@ _TEMPLATES = {
     "reschedule_proposed": _reschedule_proposed,
     "reschedule_requested": _reschedule_requested,
     "reschedule_counter": _reschedule_counter,
+    "reschedule_request_approved": _reschedule_request_approved,
+    "reschedule_request_declined": _reschedule_request_declined,
     "cancel_requested": _cancel_requested,
     "cancel_request_sent": _cancel_request_sent,
     "no_show_reported": _no_show_reported,

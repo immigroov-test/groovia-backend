@@ -441,13 +441,20 @@ def resolve_customer_no_show(booking_id: str, choice: str) -> dict:
 
 
 def get_request_booking_principals(request_id: str) -> Optional[dict[str, Any]]:
-    """Return {candidate_id, mentor_id} for the booking behind a booking_request."""
+    """Return {candidate_id, mentor_id, booking_id, kind} for the booking behind a request.
+
+    `kind` ('cancel' | 'reschedule') comes back too because the caller has to know which
+    outcome it is announcing: a cancel request ends the booking and settles money either way,
+    while a reschedule request only changes what the customer may do next."""
     try:
         res = (_supabase.table("booking_requests")
-               .select("booking_id").eq("id", request_id).single().execute())
+               .select("booking_id, kind").eq("id", request_id).single().execute())
         if not res.data:
             return None
-        return get_booking_principals(res.data["booking_id"])
+        principals = get_booking_principals(res.data["booking_id"])
+        if not principals:
+            return None
+        return {**principals, "kind": res.data.get("kind")}
     except Exception:
         return None
 
