@@ -353,7 +353,8 @@ def reschedule_slots(
     # "see all my available times" option). offer = {id, range_start, range_end} or None.
     offer = db.get_active_mentor_proposal(booking_id)
     try:
-        slots = db.get_available_slots(target["mentor_id"], target["service_id"], str(p_from), str(p_to))
+        slots = db.get_available_slots(target["mentor_id"], target["service_id"], str(p_from), str(p_to),
+                                       require_active=False)
         return {
             "slots": slots, "current_slot": slot_iso, "deadline_state": deadline, "offer": offer,
             "cancel_notice_hours": free_hours,
@@ -385,6 +386,7 @@ def proposal_slots(booking_id: str, user: AuthUser = Depends(get_current_user)):
     try:
         all_slots = db.get_available_slots(
             target["mentor_id"], target["service_id"], str(r_start.date()), str(r_end.date()),
+            require_active=False,
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
