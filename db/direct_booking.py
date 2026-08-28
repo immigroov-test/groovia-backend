@@ -19,13 +19,19 @@ def get_available_slots(
     service_id: str,
     p_from: str,
     p_to: str,
+    require_active: bool = True,
 ) -> list[dict[str, Any]]:
-    """Call the get_available_slots PostgreSQL RPC and return results as a list of dicts."""
+    """Call the get_available_slots PostgreSQL RPC and return results as a list of dicts.
+
+    require_active=False for a booking that ALREADY exists (reschedule, or accepting a
+    mentor's proposed range). A booking outlives the catalogue entry it came from, so a
+    mentor retiring a session type must not strand the sessions already sold under it."""
     res = _supabase.rpc("get_available_slots", {
-        "p_mentor_id":  mentor_id,
-        "p_service_id": service_id,
-        "p_from":       p_from,
-        "p_to":         p_to,
+        "p_mentor_id":      mentor_id,
+        "p_service_id":     service_id,
+        "p_from":           p_from,
+        "p_to":             p_to,
+        "p_require_active": require_active,
     }).execute()
     if not res.data:
         return []
