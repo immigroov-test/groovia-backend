@@ -30,6 +30,12 @@ class SyncBody(BaseModel):
     # this endpoint being "run on every login" does not repeatedly re-record consent.
     accepted_terms: Optional[bool] = None
     marketing_consent: Optional[bool] = None
+    # Where the tick happened. Signing IN is a consent event in its own right: the box is on
+    # the first step of the modal and has to be ticked every time, so a returning user agrees
+    # to whatever is live at that moment. Recording it is what makes that agreement provable
+    # (GDPR Art. 7(1) puts the burden of demonstrating consent on the controller); a UI gate
+    # with no row behind it proves nothing.
+    consent_context: Optional[str] = None      # 'signup' | 'signin'
 
 
 @router.post("/check-email")
@@ -57,8 +63,15 @@ def sync_account(request: Request, background_tasks: BackgroundTasks, body: Sync
     2. Backfill the profile's name (the signup trigger left it null; the name is
        entered later during password setup).
     3. Attach any guest bookings this email made before signing up.
-    4. Record signup consent (Consent Flow Spec Section 3), only when accepted_terms
-       is explicitly sent by the one-time completion call."""
+    4. Record consent, when accepted_terms is sent - by the signup completion call, or by a
+       sign-in, where the same checkbox is ticked again.
+
+    The recording guard is what makes re-consent work without any separate machinery. It
+    skips when the user already holds a live record for the CURRENT Privacy Policy version,
+    so a repeated call records nothing; but publishing a new version moves
+    current_version_id, the guard opens, and the next sign-in captures agreement to the new
+    text. What it cannot cover is someone who never signs in again because their session is
+    still valid, which is what the material-change prompt in the app is for."""
     mentor = db.link_mentor_by_email(user.id, user.email)
     db.backfill_profile_name(user.id, body.full_name)
     linked_bookings = db.link_guest_bookings(user.id, user.email)
@@ -73,9 +86,11 @@ def sync_account(request: Request, background_tasks: BackgroundTasks, body: Sync
                 tc_slug = "customer-terms-india" if (country or "").upper() == "IN" else "customer-terms-row"
                 ip = request.client.host if request.client else None
                 ua = request.headers.get("user-agent")
+                method = ("checkbox_signin" if body.consent_context == "signin"
+                          else "checkbox_signup")
                 db.record_legal_consent(
                     [tc_slug, "privacy-policy", "payment-terms"],
-                    user_id=user.id, consent_method="checkbox_signup", ip=ip, user_agent=ua)
+                    user_id=user.id, consent_method=method, ip=ip, user_agent=ua)
                 # Marketing consent (spec: "must be a separate, unbundled checkbox").
                 # Logged in our own consent_events table for now; HubSpot contact sync
                 # is a separate task once a portal ID/API key exists - not wired here.

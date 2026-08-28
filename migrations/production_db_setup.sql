@@ -361,6 +361,7 @@ ALTER TABLE services ALTER COLUMN is_ppp        SET DEFAULT TRUE;
 -- Additional-currency base rates [{currency, hourly_rate}]; the primary is (currency, hourly_rate).
 -- Each service's currency_prices are derived from these by duration.
 ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS currency_rates JSONB NOT NULL DEFAULT '[]';
+
 -- These were added to the CREATE TABLE above, but CREATE TABLE IF NOT EXISTS is a no-op on an
 -- existing DB, so they MUST also be ALTERed in (or the mentor-list SELECT breaks on old databases).
 ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS home_country_code CHAR(2);
@@ -1158,9 +1159,10 @@ BEGIN
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION avail_remove_specific(p_id UUID)
+CREATE OR REPLACE FUNCTION avail_remove_specific(p_id UUID, p_mentor_id UUID)
 RETURNS VOID LANGUAGE sql SECURITY DEFINER SET search_path = public AS $$
-  DELETE FROM specific_availability WHERE id = p_id;
+  DELETE FROM specific_availability
+   WHERE id = p_id AND mentor_id = p_mentor_id;
 $$;
 
 CREATE OR REPLACE FUNCTION avail_list_specific(p_mentor_id UUID)
@@ -2407,6 +2409,172 @@ ALTER TABLE mentors ADD COLUMN IF NOT EXISTS onboarded_at          TIMESTAMPTZ;
 -- re-flagged by a re-run.
 UPDATE mentors SET needs_onboarding = TRUE
  WHERE legacy_id IS NOT NULL AND onboarded_at IS NULL AND needs_onboarding = FALSE;
+-- ── Re-anchor services onto the mentor's base currency ────────────────────────────────────────
+-- INVARIANT: services.set_currency == mentors.currency. set_price is "base price in the mentor's
+-- PRIMARY currency"; anything in another currency belongs in currency_prices, never in set_currency.
+-- Two defects broke it: (a) the legacy import seeded hourly_rate as max() across per-hour figures in
+-- MIXED currencies (an INR number always beats an AUD one) and never updated mentors.currency, and
+-- (b) the changes_requested/rejected profile-edit path wrote the new currency to the live mentor row
+-- without repricing services. Either way the mentor row says one currency and the services say
+-- another, so PPP anchors to a currency the mentor does not price in and the customer is charged
+-- against the wrong base.
+-- This is a no-op once the invariant holds (the WHERE matches nothing), so it is safe on every run.
+-- Mirrors reprice_mentor_services() exactly: free intros (set_price <= 0) stay free, set_price is
+-- duration x hourly rate, any stale set_offer_price is cleared, and currency_prices is rebuilt from
+-- mentors.currency_rates.
+WITH rebased AS (
+  SELECT s.id,
+         ROUND(m.hourly_rate * s.duration / 60.0, 2) AS new_price,
+         UPPER(m.currency)                           AS new_currency,
+         COALESCE((
+           SELECT jsonb_agg(jsonb_build_object(
+                    'currency',   UPPER(r->>'currency'),
+                    'base_price', ROUND((r->>'hourly_rate')::numeric * s.duration / 60.0, 2)))
+             FROM jsonb_array_elements(COALESCE(m.currency_rates, '[]'::jsonb)) r
+            WHERE UPPER(COALESCE(r->>'currency','')) <> UPPER(m.currency)
+              AND COALESCE(NULLIF(r->>'hourly_rate','')::numeric, 0) > 0
+         ), '[]'::jsonb)                             AS new_currency_prices
+    FROM services s
+    JOIN mentors  m ON m.id = s.mentor_id
+   WHERE UPPER(COALESCE(s.set_currency, '')) <> UPPER(COALESCE(m.currency, ''))
+     AND COALESCE(m.currency, '')   <> ''
+     AND COALESCE(m.hourly_rate, 0) > 0    -- no base rate to anchor to: leave the row untouched
+     AND COALESCE(s.set_price, 0)   > 0    -- free intro stays free
+     AND COALESCE(s.duration, 0)    > 0
+     -- Only anchor to a base the MENTOR actually chose. A migrated mentor who has not yet been
+     -- through first-login onboarding still carries the seeded base, and that seed is the highest
+     -- per-hour figure across their legacy sessions -- which for a mentor who priced different
+     -- sessions in different currencies can be a number from one currency stored under another
+     -- (e.g. a base of "USD 4400" that is really an INR-magnitude figure). Anchoring live prices to
+     -- a seed like that multiplies the error instead of fixing it, so those rows are left alone and
+     -- settle when the mentor confirms their rate at first login.
+     AND NOT (m.legacy_id IS NOT NULL AND COALESCE(m.needs_onboarding, FALSE))
+)
+UPDATE services s
+   SET set_price       = r.new_price,
+       set_currency    = r.new_currency,
+       set_offer_price = NULL,
+       currency_prices = r.new_currency_prices
+  FROM rebased r
+ WHERE s.id = r.id;
+
+-- ── Legacy multi-currency mentors: put the base currency and the extra currencies where they belong
+-- These mentors priced each session individually in the old portal, sometimes in two currencies. The
+-- import kept every service's own currency and seeded the base from the highest session, so a mentor
+-- can hold a base in one currency and sessions in another. PPP then measures purchasing power against
+-- a currency the price is not written in.
+--
+-- Two distinct faults, fixed in order:
+--   1. The mentor has NO priced session in their base currency -> the BASE CURRENCY is the error.
+--      Move it to the currency of their highest-value session, compared via the EUR pivot so an INR
+--      face value cannot beat an AUD one. The rate itself is unchanged.
+--   2. The mentor DOES have sessions in their base currency -> those are right, and the odd-currency
+--      ones are an additional-currency price. Put the legacy amount into currency_prices (so buyers in
+--      that currency pay EXACTLY what they pay today) and set the base price in the base currency.
+--
+-- Scope is deliberately only migrated mentors who have not yet been through first-login onboarding:
+-- everyone else either chose their base or is covered by the re-anchor block.
+-- Both statements are no-ops once clean, so the script stays safe to re-run.
+
+-- 1. base currency follows the mentor's own priciest session
+WITH ranked AS (
+  SELECT m.id AS mentor_id,
+         UPPER(s.set_currency) AS ccy,
+         ROW_NUMBER() OVER (
+           PARTITION BY m.id
+           ORDER BY (s.set_price * 60.0 / s.duration) / COALESCE(fx.rate, 1) DESC
+         ) AS rn
+    FROM mentors m
+    JOIN services s  ON s.mentor_id = m.id
+    LEFT JOIN fx_rates fx ON fx.base = 'EUR' AND fx.quote = UPPER(s.set_currency)
+   WHERE m.legacy_id IS NOT NULL
+     AND COALESCE(m.needs_onboarding, FALSE)
+     AND COALESCE(s.set_price, 0) > 0
+     AND COALESCE(s.duration, 0)  > 0
+     AND NOT EXISTS (
+           SELECT 1 FROM services s2
+            WHERE s2.mentor_id = m.id
+              AND COALESCE(s2.set_price, 0) > 0
+              AND UPPER(s2.set_currency) = UPPER(COALESCE(m.currency, ''))
+         )
+)
+UPDATE mentors m
+   SET currency = r.ccy
+  FROM ranked r
+ WHERE m.id = r.mentor_id AND r.rn = 1
+   AND UPPER(COALESCE(m.currency, '')) <> r.ccy;
+
+-- 2. the odd-currency sessions become additional-currency prices against the base
+WITH moved AS (
+  SELECT s.id,
+         ROUND(m.hourly_rate * s.duration / 60.0, 2) AS base_price,
+         UPPER(m.currency)                           AS base_ccy,
+         COALESCE((SELECT jsonb_agg(e)
+                     FROM jsonb_array_elements(COALESCE(s.currency_prices, '[]'::jsonb)) e
+                    WHERE UPPER(e->>'currency') <> UPPER(s.set_currency)), '[]'::jsonb)
+           || jsonb_build_array(jsonb_build_object(
+                'currency',   UPPER(s.set_currency),
+                'base_price', s.set_price))          AS new_cprices
+    FROM services s
+    JOIN mentors  m ON m.id = s.mentor_id
+   WHERE m.legacy_id IS NOT NULL
+     AND COALESCE(m.needs_onboarding, FALSE)
+     AND UPPER(COALESCE(s.set_currency, '')) <> UPPER(COALESCE(m.currency, ''))
+     AND COALESCE(m.currency, '')   <> ''
+     AND COALESCE(m.hourly_rate, 0) > 0
+     AND COALESCE(s.set_price, 0)   > 0
+     AND COALESCE(s.duration, 0)    > 0
+)
+UPDATE services s
+   SET set_price       = mv.base_price,
+       set_currency    = mv.base_ccy,
+       set_offer_price = NULL,
+       currency_prices = mv.new_cprices
+  FROM moved mv
+ WHERE s.id = mv.id;
+
+-- ── Single writer for the base-currency invariant ─────────────────────────────────────────────
+-- reprice_mentor_services() is called from five different places in the backend and ONE of them (the
+-- changes_requested/rejected profile edit) did not call it, which is how a mentor ended up with a
+-- base of INR 3700/hr while every one of his sessions still said AUD 37.50. Relying on each write
+-- path to remember is what failed, so derive the service rows from the mentor row here instead: any
+-- change to currency / hourly_rate / currency_rates reaches services in the SAME transaction, no
+-- matter who wrote it (backend, admin panel, or a hand-run UPDATE in the SQL editor).
+CREATE OR REPLACE FUNCTION trg_reprice_services_fn() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.currency       IS DISTINCT FROM OLD.currency
+  OR NEW.hourly_rate    IS DISTINCT FROM OLD.hourly_rate
+  OR NEW.currency_rates IS DISTINCT FROM OLD.currency_rates THEN
+    -- Same guards as the backfill above: nothing to derive from without a positive rate, and a
+    -- migrated mentor still carrying the seeded base has not chosen it (their real per-session
+    -- prices are the legacy ones, and they stay untouched until first-login onboarding).
+    IF COALESCE(NEW.hourly_rate, 0) > 0
+       AND COALESCE(NEW.currency, '') <> ''
+       AND NOT (NEW.legacy_id IS NOT NULL AND COALESCE(NEW.needs_onboarding, FALSE)) THEN
+      UPDATE services s
+         SET set_price       = ROUND(NEW.hourly_rate * s.duration / 60.0, 2),
+             set_currency    = UPPER(NEW.currency),
+             set_offer_price = NULL,
+             currency_prices = COALESCE((
+               SELECT jsonb_agg(jsonb_build_object(
+                        'currency',   UPPER(r->>'currency'),
+                        'base_price', ROUND((r->>'hourly_rate')::numeric * s.duration / 60.0, 2)))
+                 FROM jsonb_array_elements(COALESCE(NEW.currency_rates, '[]'::jsonb)) r
+                WHERE UPPER(COALESCE(r->>'currency','')) <> UPPER(NEW.currency)
+                  AND COALESCE(NULLIF(r->>'hourly_rate','')::numeric, 0) > 0
+             ), '[]'::jsonb)
+       WHERE s.mentor_id = NEW.id
+         AND COALESCE(s.set_price, 0) > 0    -- free intro stays free
+         AND COALESCE(s.duration, 0)  > 0;
+    END IF;
+  END IF;
+  RETURN NEW;
+END; $$;
+
+DROP TRIGGER IF EXISTS trg_reprice_services ON mentors;
+CREATE TRIGGER trg_reprice_services AFTER UPDATE ON mentors
+  FOR EACH ROW EXECUTE FUNCTION trg_reprice_services_fn();
 
 -- ============================================================================
 -- Legacy session history (imported read-only from the old portal's /bookings)

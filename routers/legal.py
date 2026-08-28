@@ -257,8 +257,35 @@ def acknowledge_all(request: Request, user: AuthUser = Depends(get_current_user)
     Per the Bundling Guide: one acceptance click per session, but each document still
     gets its own timestamped row in user_legal_acknowledgements - so a dispute over one
     specific document (the Mentor Commission Terms, say) still has a precise,
-    per-document record to point to, even though the user only clicked once."""
-    return db.legal_acknowledge_all(user.id)
+    per-document record to point to, even though the user only clicked once.
+
+    A MATERIAL revision also writes a consent event. The two tables answer different
+    questions: user_legal_acknowledgements records that someone was shown a new version and
+    responded, while legal_consent_events records that they AGREED, against an immutable
+    version id and with the address and client that did it. For an editorial fix the first
+    is an honest record of what happened; for a change to terms someone is already bound by,
+    the second is the one that has to exist, because it is the evidence of agreement.
+
+    Consent is captured BEFORE the acknowledgement, while the pending set still names the
+    material documents - acknowledging is what empties it."""
+    material: list[str] = []
+    try:
+        pending = db.legal_pending_updates(user.id) or []
+        material = [p["slug"] for p in pending if p.get("is_major") and p.get("slug")]
+    except Exception:
+        logger.exception("Could not resolve material updates for user %s", user.id)
+
+    result = db.legal_acknowledge_all(user.id)
+
+    if material:
+        try:
+            db.record_legal_consent(
+                material, user_id=user.id, consent_method="checkbox_reconsent",
+                ip=(request.client.host if request.client else None),
+                user_agent=request.headers.get("user-agent"))
+        except Exception:
+            logger.exception("Re-consent record failed for user %s", user.id)
+    return result
 
 
 @router.post("/acknowledge")
