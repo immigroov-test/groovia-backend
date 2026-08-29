@@ -171,7 +171,7 @@ def get_booking_notify_info(booking_id: str) -> Optional[dict[str, Any]]:
         res = (
             _supabase.table("bookings")
             .select("mentor_id, candidate_id, candidate_email, candidate_name, slot_time, notes, "
-                    "cancel_reason, no_show_by, "
+                    "cancel_reason, cancelled_by, no_show_by, "
                     "service_id, services(title), mentors(display_name, photo_url)")
             .eq("id", booking_id)
             .single()

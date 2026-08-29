@@ -1055,6 +1055,17 @@ def _booking_admin_notice(d: dict) -> tuple[str, str]:
         rows.append(("Of which platform fee", _money(float(inv.get("platform_fee") or 0), ccy)))
         if float(inv.get("tax") or 0) > 0:
             rows.append(("Tax", _money(float(inv["tax"]), ccy)))
+    # Who ended it. The first question ops asks about a cancellation, and the mail could not
+    # answer it: nothing was passed, because until now nothing was stored either.
+    if event == "cancelled":
+        who = {
+            "mentor": f"Mentor ({mentor})",
+            "user": f"Candidate ({candidate})",
+            "system": "System - unpaid hold expired",
+        }.get((d.get("cancelled_by") or "").lower())
+        # An unattributed cancellation says so rather than quietly omitting the row, which
+        # would read as though nobody had asked the question.
+        rows.append(("Cancelled by", who or "Not recorded"))
     if d.get("reason"):
         rows.append(("Reason given", d["reason"]))
     body = (

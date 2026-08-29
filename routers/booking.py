@@ -1342,6 +1342,7 @@ def _notify_parties(booking_id: str, event: str, old_slot: Optional[str] = None,
 
         # Admin/ops copy on the money-relevant lifecycle events (cancel, reschedule, no-show).
         if event in ("cancelled", "rescheduled", "no_show"):
+            times = db.get_booking_times_display(booking_id) or {}
             for admin_email in db.admin_notify_emails():
                 mailer.send_transactional(admin_email, "booking_admin_notice", {
                     "event": event,
@@ -1350,7 +1351,15 @@ def _notify_parties(booking_id: str, event: str, old_slot: Optional[str] = None,
                     "mentor_name": info.get("mentor_name") or "",
                     "candidate_name": info.get("candidate_name") or "",
                     "candidate_email": c_email or "",
-                    "session_time": session_time,
+                    # Both parties' local times, as the new-booking admin mail already sends.
+                    # This branch was passing the raw ISO string, so ops read
+                    # "2026-08-29T20:00:00+00:00" and had to convert it themselves.
+                    "mentor_time": _local_stamp(times, "mentor_local", "mentor_tz") or session_time,
+                    "candidate_time": _local_stamp(times, "customer_local", "customer_tz") or session_time,
+                    # Who ended it. Read from the booking rather than the caller's argument, so
+                    # the paths that never passed one (an expired hold, a declined proposal) are
+                    # covered too.
+                    "cancelled_by": info.get("cancelled_by") or cancelled_by or "",
                     # Admin-only: what the customer paid and the split, so ops can act without
                     # opening the dashboard. Never included in either party's own email.
                     "invoice": db.get_booking_invoice(booking_id),
