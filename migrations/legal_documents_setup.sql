@@ -352,6 +352,31 @@ BEGIN
   RETURN jsonb_build_object('ok', TRUE);
 END $$;
 
+-- Take a document out of circulation, or bring it back. Never a DELETE: the immutability
+-- trigger on legal_document_versions already makes that impossible for a document with
+-- published history (see the comment above that trigger), and is_active is the sanctioned
+-- way to stop serving one while its version history and every acknowledgement/consent
+-- event against it stay exactly as they were.
+CREATE OR REPLACE FUNCTION legal_admin_set_active(p_document_id UUID, p_actor UUID, p_is_active BOOLEAN)
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE d legal_documents;
+BEGIN
+  SELECT * INTO d FROM legal_documents WHERE id = p_document_id;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Legal document not found' USING errcode = 'P0001';
+  END IF;
+
+  UPDATE legal_documents SET is_active = p_is_active, updated_at = NOW()
+   WHERE id = p_document_id;
+
+  PERFORM log_audit_event('legal_document', p_document_id, NULL,
+    CASE WHEN p_is_active THEN 'reactivated' ELSE 'deactivated' END,
+    (CASE WHEN p_is_active THEN 'Reactivated ' ELSE 'Deactivated ' END) || d.title,
+    jsonb_build_object('code', d.code));
+
+  RETURN jsonb_build_object('ok', TRUE);
+END $$;
+
 -- Publish Official Update.
 --
 -- Transactional by construction: a function body is one transaction, so the version
@@ -628,6 +653,7 @@ REVOKE ALL ON FUNCTION legal_admin_version(UUID)          FROM PUBLIC, anon, aut
 REVOKE ALL ON FUNCTION legal_save_draft(UUID, UUID, TEXT) FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION legal_discard_draft(UUID, UUID)    FROM PUBLIC, anon, authenticated;
 REVOKE ALL ON FUNCTION publish_legal_document(UUID, UUID, TEXT, BOOLEAN) FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON FUNCTION legal_admin_set_active(UUID, UUID, BOOLEAN) FROM PUBLIC, anon, authenticated;
 
 GRANT EXECUTE ON FUNCTION legal_admin_documents()            TO service_role;
 GRANT EXECUTE ON FUNCTION legal_admin_document(UUID)         TO service_role;
@@ -635,6 +661,7 @@ GRANT EXECUTE ON FUNCTION legal_admin_version(UUID)          TO service_role;
 GRANT EXECUTE ON FUNCTION legal_save_draft(UUID, UUID, TEXT) TO service_role;
 GRANT EXECUTE ON FUNCTION legal_discard_draft(UUID, UUID)    TO service_role;
 GRANT EXECUTE ON FUNCTION publish_legal_document(UUID, UUID, TEXT, BOOLEAN) TO service_role;
+GRANT EXECUTE ON FUNCTION legal_admin_set_active(UUID, UUID, BOOLEAN) TO service_role;
 
 -- Every function that takes a user id is service_role ONLY, and the REVOKEs are not
 -- decorative: PostgreSQL grants EXECUTE to PUBLIC on a new function by default, so

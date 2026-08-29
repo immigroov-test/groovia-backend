@@ -59,6 +59,15 @@ def legal_discard_draft(document_id: str, actor_id: str) -> dict[str, Any]:
     return res.data or {}
 
 
+def legal_admin_set_active(document_id: str, actor_id: str, is_active: bool) -> dict[str, Any]:
+    """Take a document out of circulation, or bring it back. Never a delete - the
+    version history and every acknowledgement/consent event against it are untouched."""
+    res = _supabase.rpc("legal_admin_set_active", {
+        "p_document_id": document_id, "p_actor": actor_id, "p_is_active": is_active,
+    }).execute()
+    return res.data or {}
+
+
 def legal_publish(document_id: str, actor_id: str, change_note: Optional[str] = None,
                   major: bool = False) -> dict[str, Any]:
     """Publish the draft as a new official version.

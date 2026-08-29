@@ -55,6 +55,10 @@ class AcknowledgeBody(BaseModel):
     version_id: str
 
 
+class SetActiveBody(BaseModel):
+    is_active: bool
+
+
 class GrooviaTermsStatusBody(BaseModel):
     # A guest has no bearer identity yet; this is the localStorage-persisted id the
     # client mints once and reuses for every guest consent write before an account or
@@ -123,6 +127,20 @@ def discard_draft(document_id: str, user: AuthUser = Depends(require_admin)):
         return db.legal_discard_draft(document_id, user.id)
     except Exception as e:
         _raise_legal_error(e, "Could not discard the draft")
+
+
+@router.post("/admin/documents/{document_id}/active")
+def set_active(document_id: str, body: SetActiveBody, user: AuthUser = Depends(require_admin)):
+    """Take a document out of circulation, or bring it back.
+
+    Never a delete: the immutability trigger on legal_document_versions already makes
+    that impossible for a document with published history, and is_active is the
+    sanctioned way to stop serving one while its version history and every
+    acknowledgement/consent event against it stay exactly as they were."""
+    try:
+        return db.legal_admin_set_active(document_id, user.id, body.is_active)
+    except Exception as e:
+        _raise_legal_error(e, "Could not update the document")
 
 
 

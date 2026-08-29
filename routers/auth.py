@@ -11,7 +11,6 @@ from pydantic import BaseModel
 import config
 import db
 from core.auth import AuthUser, get_current_user
-from routers.pricing import resolve_pricing_country
 from services import mailer
 
 logger = logging.getLogger("immigroov.routers.auth")
@@ -63,33 +62,28 @@ def sync_account(request: Request, background_tasks: BackgroundTasks, body: Sync
     2. Backfill the profile's name (the signup trigger left it null; the name is
        entered later during password setup).
     3. Attach any guest bookings this email made before signing up.
-    4. Record consent, when accepted_terms is sent - by the signup completion call, or by a
-       sign-in, where the same checkbox is ticked again.
+    4. Record consent to the Terms of Use + Privacy Policy, when accepted_terms is sent -
+       by the signup completion call, or by a sign-in, where the same checkbox is ticked
+       again. Customer T&C, Payment Terms and the Refund & Cancellation Policy are a
+       booking-time concern (routers/booking.py, routers/payments.py), not a login one.
 
-    The recording guard is what makes re-consent work without any separate machinery. It
-    skips when the user already holds a live record for the CURRENT Privacy Policy version,
-    so a repeated call records nothing; but publishing a new version moves
-    current_version_id, the guard opens, and the next sign-in captures agreement to the new
-    text. What it cannot cover is someone who never signs in again because their session is
-    still valid, which is what the material-change prompt in the app is for."""
+    Signup is guarded against a retried/duplicated request re-recording the same signup:
+    once this user has a live consent record for the current Privacy Policy version, a
+    repeat signup-completion call records nothing. Sign-in is NOT guarded - the
+    configuration requires a fresh record on every login, so every tick of the box
+    writes, whether or not the text has changed since the last one."""
     mentor = db.link_mentor_by_email(user.id, user.email)
     db.backfill_profile_name(user.id, body.full_name)
     linked_bookings = db.link_guest_bookings(user.id, user.email)
     if body.accepted_terms:
-        # Guard against a retried/duplicated request re-recording the same signup:
-        # if this user already has a live consent record for the Privacy Policy
-        # (present in every bundle - signup, checkout, cookie banner), signup consent
-        # has already been captured and this is a repeat call, not a fresh signup.
-        if not db.legal_has_current_consent("privacy-policy", user_id=user.id):
+        is_signin = body.consent_context == "signin"
+        if is_signin or not db.legal_has_current_consent("privacy-policy", user_id=user.id):
             try:
-                country = resolve_pricing_country(request, None)
-                tc_slug = "customer-terms-india" if (country or "").upper() == "IN" else "customer-terms-row"
                 ip = request.client.host if request.client else None
                 ua = request.headers.get("user-agent")
-                method = ("checkbox_signin" if body.consent_context == "signin"
-                          else "checkbox_signup")
+                method = "checkbox_signin" if is_signin else "checkbox_signup"
                 db.record_legal_consent(
-                    [tc_slug, "privacy-policy", "payment-terms"],
+                    ["website-terms-of-use", "privacy-policy"],
                     user_id=user.id, consent_method=method, ip=ip, user_agent=ua)
                 # Marketing consent (spec: "must be a separate, unbundled checkbox").
                 # Logged in our own consent_events table for now; HubSpot contact sync

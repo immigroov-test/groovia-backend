@@ -546,7 +546,11 @@ def book_session(
             # this booking_id the moment it exists.
             try:
                 country = resolve_pricing_country(request, None)
-                tc_slug = "customer-terms-india" if (country or "").upper() == "IN" else "customer-terms-row"
+                # India is the default geography: an unresolved/unknown country binds the
+                # India edition, and only a country we positively know is NOT India moves
+                # this to Rest-of-World.
+                country_code = (country or "").upper()
+                tc_slug = "customer-terms-row" if country_code and country_code != "IN" else "customer-terms-india"
                 db.record_legal_consent(
                     [tc_slug, "privacy-policy", "payment-terms", "refund-cancellation-policy"],
                     user_id=candidate_id, booking_id=booking_id,
