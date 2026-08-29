@@ -879,6 +879,23 @@ def record_meeting_attendance(booking_id: str, party: str, event: str) -> None:
 
 # ── Unified session detail (candidate / mentor / admin) ─────────────────────────
 
+def list_booking_events(booking_id: str) -> list[dict[str, Any]]:
+    """The booking's lifecycle in order: what happened, who did it, when.
+
+    booking_events has recorded every event since the beginning and nothing has ever read
+    it. This is what turns it into the change log both parties and admin can see."""
+    try:
+        res = (_supabase.table("booking_events")
+               .select("event, actor, created_at")
+               .eq("booking_id", booking_id)
+               .order("created_at")
+               .execute())
+        return res.data or []
+    except Exception:
+        logger.exception("list_booking_events failed for %s", booking_id)
+        return []
+
+
 def get_booking_full_detail(booking_id: str) -> Optional[dict[str, Any]]:
     """One read powering the role-aware session detail page: booking core, both parties
     (candidate contact + mentor public info), the service, the latest still-open
@@ -890,6 +907,7 @@ def get_booking_full_detail(booking_id: str) -> Optional[dict[str, Any]]:
             _supabase.table("bookings")
             .select(
                 "id, status, slot_time, slot_end, reschedule_count, no_show_by, notes, "
+                "cancel_reason, cancelled_by, "
                 "candidate_id, candidate_name, candidate_email, candidate_phone, attendee_timezone, "
                 "mentor_id, service_id, "
                 "mentors(profile_id, display_name, photo_url, app_timezone, slug, country, cancel_notice_hours), "

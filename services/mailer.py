@@ -1055,17 +1055,29 @@ def _booking_admin_notice(d: dict) -> tuple[str, str]:
         rows.append(("Of which platform fee", _money(float(inv.get("platform_fee") or 0), ccy)))
         if float(inv.get("tax") or 0) > 0:
             rows.append(("Tax", _money(float(inv["tax"]), ccy)))
-    # Who ended it. The first question ops asks about a cancellation, and the mail could not
-    # answer it: nothing was passed, because until now nothing was stored either.
-    if event == "cancelled":
-        who = {
+    # Who did it. Cancellations prompted this, but the question is the same for every event
+    # ops receives: a no-show notice is unactionable without knowing who reported whom, and a
+    # reschedule without knowing which side moved it.
+    def _party(value: str) -> str:
+        return {
             "mentor": f"Mentor ({mentor})",
             "user": f"Candidate ({candidate})",
             "system": "System - unpaid hold expired",
-        }.get((d.get("cancelled_by") or "").lower())
-        # An unattributed cancellation says so rather than quietly omitting the row, which
+        }.get((value or "").lower(), "")
+
+    if event == "cancelled":
+        # An unattributed cancellation says so rather than quietly dropping the row, which
         # would read as though nobody had asked the question.
-        rows.append(("Cancelled by", who or "Not recorded"))
+        rows.append(("Cancelled by", _party(d.get("cancelled_by")) or "Not recorded"))
+    elif event == "no_show":
+        # no_show_by names who FAILED to appear; the other party is the one who reported it,
+        # and ops needs both to judge a dispute.
+        absent = (d.get("no_show_by") or "").lower()
+        if absent:
+            rows.append(("Did not attend", _party(absent) or absent))
+            rows.append(("Reported by", _party("user" if absent == "mentor" else "mentor")))
+    elif event == "rescheduled" and d.get("actioned_by"):
+        rows.append(("Moved by", _party(d.get("actioned_by")) or "Not recorded"))
     if d.get("reason"):
         rows.append(("Reason given", d["reason"]))
     body = (
