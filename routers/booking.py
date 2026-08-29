@@ -4,7 +4,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 from urllib.parse import quote
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from postgrest.exceptions import APIError
 from pydantic import BaseModel, EmailStr, field_validator
 
@@ -235,6 +235,10 @@ def booking_detail(booking_id: str, user: AuthUser = Depends(get_current_user)):
         "unpaid_hold": unpaid_hold,
         "reschedule_count": d.get("reschedule_count") or 0,
         "no_show_by": d.get("no_show_by"),
+        # Who ended it, and why. Both parties asked for this on the page and not only in the
+        # admin mail: "my session was cancelled" is useless without knowing by whom.
+        "cancelled_by": d.get("cancelled_by"),
+        "cancel_reason": d.get("cancel_reason"),
         "deadline_state": deadline_state,
         # BUG-119: the real windows, so the page states this mentor's actual notice period instead of
         # a hardcoded "2 hours" / "24 hours" that contradicts whatever they set in their booking rules.
@@ -364,6 +368,28 @@ def reschedule_slots(
     except Exception:
         logger.exception("reschedule_slots failed booking=%s", booking_id)
         raise HTTPException(status_code=500, detail="Failed to fetch slots")
+
+
+@router.get("/{booking_id}/events")
+def booking_events(booking_id: str, request: Request,
+                   user: Optional[AuthUser] = Depends(get_current_user_optional)):
+    """The booking's change log: what happened, who did it, when.
+
+    Same access rule as the session page itself - a participant, an admin, or a guest
+    holding the signed link from their confirmation email. booking_events has recorded all
+    of this from the start and nothing ever read it."""
+    d = db.get_booking_full_detail(booking_id)
+    if not d:
+        raise HTTPException(status_code=404, detail="Session not found")
+    token_party = access_token.verify(request.query_params.get("t"), booking_id)
+    is_candidate = token_party == "candidate" or bool(
+        user and d.get("candidate_id") and d["candidate_id"] == user.id)
+    is_mentor = token_party == "mentor" or bool(
+        user and d.get("mentor_profile_id") and d["mentor_profile_id"] == user.id)
+    is_admin = bool(user) and db.get_profile_role(user.id) == "admin"
+    if not (is_candidate or is_mentor or is_admin):
+        raise HTTPException(status_code=403, detail="You are not a participant of this session")
+    return {"events": db.list_booking_events(booking_id)}
 
 
 @router.get("/{booking_id}/proposal-slots")
@@ -1303,6 +1329,13 @@ def _notify_parties(booking_id: str, event: str, old_slot: Optional[str] = None,
                     # the paths that never passed one (an expired hold, a declined proposal) are
                     # covered too.
                     "cancelled_by": info.get("cancelled_by") or cancelled_by or "",
+                    # no_show_by names who FAILED to appear; the template derives the reporter
+                    # from it, since it is always the other party.
+                    "no_show_by": info.get("no_show_by") or "",
+                    # Who moved it, read from the event just logged rather than threaded
+                    # through every caller.
+                    "actioned_by": next((e.get("actor") for e in reversed(db.list_booking_events(booking_id))
+                                         if e.get("event") == event and e.get("actor")), ""),
                     # Admin-only: what the customer paid and the split, so ops can act without
                     # opening the dashboard. Never included in either party's own email.
                     "invoice": db.get_booking_invoice(booking_id),
