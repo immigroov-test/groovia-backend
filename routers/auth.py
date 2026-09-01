@@ -83,7 +83,11 @@ def sync_account(request: Request, background_tasks: BackgroundTasks, body: Sync
                 ua = request.headers.get("user-agent")
                 method = "checkbox_signin" if is_signin else "checkbox_signup"
                 db.record_legal_consent(
-                    ["website-terms-of-use", "privacy-policy"],
+                    # Groovia AI Terms moved here from the report popup: the AI assistant is
+                    # offered to everyone who signs in, so agreeing to it belongs at the door
+                    # rather than at one feature. The gate in the chat checks for a live consent
+                    # record, so it stops asking signed-in users by itself.
+                    ["website-terms-of-use", "privacy-policy", "groovia-ai-terms"],
                     user_id=user.id, consent_method=method, ip=ip, user_agent=ua)
                 # Marketing consent (spec: "must be a separate, unbundled checkbox").
                 # Logged in our own consent_events table for now; HubSpot contact sync
