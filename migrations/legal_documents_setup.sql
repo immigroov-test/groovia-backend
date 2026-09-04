@@ -728,17 +728,17 @@ INSERT INTO legal_documents (code, slug, title, summary, audience, region_scope,
    'What we collect, why, and who controls it.', 'everyone', 'all', 5),
   ('06', 'ai-disclosure-notice',        'AI Disclosure Notice',
    'Groovia is an AI system. What that means for you.', 'everyone', 'all', 6),
-  ('07', 'groovia-ai-terms',            'Groovia AI Terms',
+  ('07', 'groovia-ai-terms',            'Terms of Use - Groovia AI',
    'Terms for using the Groovia AI assistant.', 'everyone', 'all', 7),
-  ('08', 'customer-terms-india',        'Customer T&C - India',
+  ('08', 'customer-terms-india',        'Customer Terms and Conditions',
    'Your contract with Immigroov Consulting India LLP.', 'customers', 'in', 8),
-  ('09', 'customer-terms-row',          'Customer T&C - Rest of World',
+  ('09', 'customer-terms-row',          'Customer Terms and Conditions',
    'Your contract with Immigroov Consulting VOF.', 'customers', 'row', 9),
   ('10', 'payment-terms',               'Payment Terms',
    'Pricing, currency, payment processing and refunds.', 'customers', 'all', 10),
   ('11', 'mentor-agreement',            'Mentor Agreement',
    'Your contract as an Immigroov mentor.', 'mentors', 'all', 11),
-  ('12', 'mentor-commission-payout',    'Mentor Commission & Payout Terms',
+  ('12', 'mentor-commission-payout',    'Mentor Payment Terms',
    'Commission, payout schedule and when a session counts as complete.', 'mentors', 'all', 12),
   ('13', 'mentor-code-of-conduct',      'Mentor Code of Conduct',
    'The standards every mentor agrees to uphold.', 'mentors', 'all', 13),
@@ -763,6 +763,12 @@ ON CONFLICT (code) DO UPDATE SET
 -- touching its audience.
 --
 -- Re-asserted on every run, like the audience columns above, so this file remains the
--- statement of intended defaults. To take a document out of public view, set
--- is_public = FALSE after running this.
-UPDATE legal_documents SET is_public = TRUE;
+-- statement of intended defaults.
+--
+-- Public is the site-wide set a visitor may need before they have an account: the cookie
+-- banner links to the Privacy Policy on a first visit, so that one cannot sit behind
+-- sign-in. The contracts are not public. Each is still shown to the party it binds at the
+-- moment it binds them, and legal_applicable_documents() ignores is_public entirely, so
+-- targeting, acknowledgement and change-notification are unaffected by this switch.
+UPDATE legal_documents SET is_public = TRUE  WHERE code IN ('01','02','04','05','06','07');
+UPDATE legal_documents SET is_public = FALSE WHERE code IN ('03','08','09','10','11','12','13','14');
