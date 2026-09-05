@@ -170,8 +170,8 @@ def get_booking_notify_info(booking_id: str) -> Optional[dict[str, Any]]:
     try:
         res = (
             _supabase.table("bookings")
-            .select("mentor_id, candidate_id, candidate_email, candidate_name, slot_time, notes, "
-                    "cancel_reason, cancelled_by, no_show_by, "
+            .select("mentor_id, candidate_id, candidate_email, candidate_name, candidate_phone, "
+                    "slot_time, notes, cancel_reason, cancelled_by, no_show_by, "
                     "service_id, services(title), mentors(display_name, photo_url)")
             .eq("id", booking_id)
             .single()
@@ -184,12 +184,16 @@ def get_booking_notify_info(booking_id: str) -> Optional[dict[str, Any]]:
         mentor_name, mentor_email = get_mentor_email(b["mentor_id"])
         cand_name = b.get("candidate_name")
         cand_email = b.get("candidate_email")
-        if b.get("candidate_id") and not cand_email:
+        # Fall back to the profile when EITHER is missing. This used to run only when the email
+        # was absent, and the email is almost always present, so a booking stored with a blank
+        # name kept it: the admin mail addressed the customer as "-".
+        if b.get("candidate_id") and (not cand_email or not (cand_name or "").strip()):
             prof = (_supabase.table("profiles")
                     .select("email, display_name, full_name")
                     .eq("id", b["candidate_id"]).single().execute()).data or {}
             cand_email = cand_email or prof.get("email")
-            cand_name = cand_name or prof.get("display_name") or prof.get("full_name")
+            if not (cand_name or "").strip():
+                cand_name = prof.get("display_name") or prof.get("full_name")
         svc = b.get("services") or {}
         mnt = b.get("mentors") or {}
         return {
@@ -199,6 +203,7 @@ def get_booking_notify_info(booking_id: str) -> Optional[dict[str, Any]]:
             "candidate_id":    b.get("candidate_id"),   # NULL => guest booking
             "candidate_name":  cand_name,
             "candidate_email": cand_email,
+            "candidate_phone": b.get("candidate_phone"),
             "service_title":   svc.get("title") if isinstance(svc, dict) else None,
             "slot_time":       b.get("slot_time"),
             "notes":           (b.get("notes") or "").strip() or None,   # BUG-113

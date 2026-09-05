@@ -1038,6 +1038,10 @@ def _booking_admin_notice(d: dict) -> tuple[str, str]:
         ("Mentor", mentor),
         ("Candidate", f"{candidate} ({candidate_email})" if candidate_email else candidate),
     ]
+    # Admin-only mail, so the contact number belongs here: it is the fastest way to reach a
+    # customer about their own session, and hunting for it meant querying the database by hand.
+    if d.get("candidate_phone"):
+        rows.append(("Candidate phone", d["candidate_phone"]))
     # New bookings carry both parties' times; lifecycle events carry a single session_time.
     if d.get("mentor_time") or d.get("candidate_time"):
         rows.append(("When (mentor's time)", d.get("mentor_time") or "-"))
