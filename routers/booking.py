@@ -268,9 +268,17 @@ def booking_detail(booking_id: str, user: AuthUser = Depends(get_current_user)):
         "answers": db.get_booking_answers(d["id"]),    # BUG-113: intake-question answers
     }
 
-    # Candidate's contact details are for the mentor + admin only.
+    # A mentor gets the customer's NAME only. The Privacy Policy tells customers that mentors
+    # receive data "limited to name, time zone, and session responses", and a mentor is a
+    # separate party to us, which is what the Mentor DPA exists for. Handing them the email and
+    # phone went beyond what the customer was told, so it stops here. The time zone is already
+    # in the payload above as candidate_tz, and the session responses are `answers`.
     if is_mentor or is_admin:
         out["candidate_name"] = d.get("candidate_name")
+
+    # Contact details are the operator's own view of a transaction it is party to, not a
+    # disclosure to a third party, so they stay with admin.
+    if is_admin:
         out["candidate_email"] = d.get("candidate_email")
         out["candidate_phone"] = d.get("candidate_phone")
 
