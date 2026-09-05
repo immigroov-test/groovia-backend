@@ -1492,23 +1492,80 @@ def list_all_legacy_sessions(q: Optional[str] = None, status: Optional[str] = No
 
 
 def get_booking_admin_detail(booking_id: str) -> Optional[dict[str, Any]]:
-    """One booking + mentor name + its request/offer history for the admin detail view."""
+    """Everything recorded against one booking, for the admin detail view.
+
+    `select("*")` already carries what the customer supplied at booking (name, email, phone,
+    timezone, their note), so the admin view only ever needed to render it. The rest lives in
+    its own table and was NOT being fetched, which is why the admin panel's pricing, payments
+    and intake-answer sections never appeared: the UI had been written for them, the payload
+    just never contained them.
+
+    Each side query is isolated so one missing row or broken relationship degrades that
+    section only, rather than losing the whole booking.
+    """
+    from .direct_booking import get_booking_answers   # local: avoids an import cycle
+
     try:
         bres = _supabase.table("bookings").select("*").eq("id", booking_id).limit(1).execute()
         if not bres.data:
             return None
         b = bres.data[0]
+
         if b.get("mentor_id"):
             m = _supabase.table("mentors").select("display_name, email").eq("id", b["mentor_id"]).limit(1).execute()
             if m.data:
                 b["mentor_name"] = m.data[0].get("display_name")
                 b["mentor_email"] = m.data[0].get("email")
+
+        # What was booked. The admin table shows the session title and length beside the money.
+        if b.get("service_id"):
+            try:
+                s = (_supabase.table("services").select("title, duration")
+                     .eq("id", b["service_id"]).limit(1).execute())
+                if s.data:
+                    b["service_title"] = s.data[0].get("title")
+                    b["service_duration"] = s.data[0].get("duration")
+            except Exception:
+                logger.exception("admin detail: service lookup failed booking=%s", booking_id)
+
         for tbl, key in (("booking_requests", "requests"), ("reschedule_offers", "offers")):
             try:
                 r = _supabase.table(tbl).select("*").eq("booking_id", booking_id).order("created_at").execute()
                 b[key] = r.data or []
             except Exception:
                 b[key] = []
+
+        # The customer's answers to the mentor's intake questions.
+        try:
+            b["intake_answers"] = get_booking_answers(booking_id)
+        except Exception:
+            logger.exception("admin detail: intake answers failed booking=%s", booking_id)
+            b["intake_answers"] = []
+
+        # Every payment attempt, not just the successful one: a failed charge with its provider
+        # error is usually the whole reason an admin opens this row.
+        try:
+            p = (_supabase.table("customer_payments")
+                 .select("amount, currency, state, provider, provider_order_id, "
+                         "provider_payment_id, provider_error_description, created_at")
+                 .eq("booking_id", booking_id).order("created_at").execute())
+            b["payments"] = p.data or []
+        except Exception:
+            logger.exception("admin detail: payments failed booking=%s", booking_id)
+            b["payments"] = []
+
+        # The price breakdown as it was calculated at booking time, commission and fee included.
+        # Admin-only by design: the mentor never sees the gross customer amount.
+        try:
+            pr = (_supabase.table("booking_pricing")
+                  .select("customer_currency, mentor_currency, gross_customer, fee_pct, "
+                          "fee_amount, net_customer, net_mentor")
+                  .eq("booking_id", booking_id).limit(1).execute())
+            b["pricing"] = pr.data[0] if pr.data else None
+        except Exception:
+            logger.exception("admin detail: pricing failed booking=%s", booking_id)
+            b["pricing"] = None
+
         return b
     except Exception:
         logger.exception("get_booking_admin_detail failed")
