@@ -404,11 +404,13 @@ def _booking_confirmed_candidate(d: dict) -> tuple[str, str]:
 def _booking_confirmed_mentor(d: dict) -> tuple[str, str]:
     mentor = _e(d.get("mentor_name", ""))
     candidate = d.get("candidate_name", "a candidate")
-    candidate_email = d.get("candidate_email", "")
     service = d.get("service_title", "1-on-1 session")
     url = d.get("meeting_url", "")
     notes_html = _prep_block(d.get("notes", ""), d.get("answers"), f"What to prepare (from {candidate})")
-    who = f"{candidate}" + (f" ({candidate_email})" if candidate_email else "")
+    # Name only. Customers are told mentors receive "name, time zone, and session responses",
+    # so the mentor's copy of this mail must not carry the customer's email address either.
+    # Hiding it in the app and then mailing it out would defeat the whole point.
+    who = candidate
     body = (
         f'<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">New booking from {_e(candidate)}</h1>'
         f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {mentor},</p>'
