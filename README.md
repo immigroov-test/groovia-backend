@@ -136,6 +136,7 @@ LangGraph uses `AsyncPostgresSaver` on Supabase Postgres via the **Session poole
 | `testing_db_setup.sql` | Full schema + 14 seed mentors with services & availability. Run once. |
 | `testing_db_reset.sql` | Promotes the admin, clears test data, keeps seed mentors. Re-run between test runs. |
 | `legal_documents_setup.sql` | Legal Documents CMS. Already folded into both `*_db_setup.sql`; run this one **on an existing database** to add the feature without re-running the full schema. |
+| `webinars_setup.sql` | Webinar tables, registration/capacity RPCs, payment records, and private meeting-room storage. Run after the base setup in each environment. |
 
 **First-time setup:** run the `*_db_setup.sql` → sign up once as the admin email →
 run the matching clear/reset file (it promotes that account to `admin`). Setup files are

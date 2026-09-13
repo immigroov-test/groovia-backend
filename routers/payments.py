@@ -285,7 +285,12 @@ def _handle_webhook_event(event_type: str, payload: dict, background_tasks: Back
             return
         local = db.get_payment_by_provider_order(provider_order_id)
         if not local:
-            logger.warning("webhook payment.captured: no local payment for order=%s", provider_order_id)
+            webinar_reg = db.webinar_registration_by_order(provider_order_id)
+            if webinar_reg:
+                remote = db.fetch_razorpay_payment(razorpay_payment_id)
+                db.finalize_webinar_payment(webinar_reg, remote)
+                return
+            logger.warning("webhook payment.captured: no local booking or webinar payment for order=%s", provider_order_id)
             return
         # Re-fetch from Razorpay rather than trusting the webhook body verbatim.
         remote = db.fetch_razorpay_payment(razorpay_payment_id)
@@ -298,6 +303,9 @@ def _handle_webhook_event(event_type: str, payload: dict, background_tasks: Back
         provider_order_id = razorpay_payment.get("order_id")
         local = db.get_payment_by_provider_order(provider_order_id) if provider_order_id else None
         if not local:
+            webinar_reg = db.webinar_registration_by_order(provider_order_id) if provider_order_id else None
+            if webinar_reg:
+                db.fail_webinar_payment(webinar_reg["id"])
             return
         db.set_payment_state(local["id"], "failed")
         db.record_payment_error(
