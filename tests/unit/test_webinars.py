@@ -2,6 +2,8 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import db
+import pytest
+from pydantic import ValidationError
 from core.auth import AuthUser
 from routers.webinars import WebinarBody, admin_action, admin_create, join, register
 
@@ -25,6 +27,28 @@ def test_admin_create_free_webinar_generates_zero_price():
     assert result["id"] == "webinar-1"
     assert create.call_args.args[0]["price"] == 0
     assert create.call_args.args[0]["meeting_provider"] == "jitsi_public"
+
+
+def test_cannot_create_past_webinar():
+    with pytest.raises(ValidationError, match="future"):
+        WebinarBody(
+            title="Moving to Canada",
+            description="A practical introduction",
+            starts_at=datetime.now(timezone.utc) - timedelta(minutes=1),
+            duration_minutes=60,
+        )
+
+
+def test_webinar_accepts_public_poster_and_media_urls():
+    body = WebinarBody(
+        title="Moving to Canada",
+        description="A practical introduction",
+        starts_at=datetime.now(timezone.utc) + timedelta(days=2),
+        duration_minutes=60,
+        banner_url="https://cdn.example.com/poster.jpg",
+        media_url="https://www.youtube.com/watch?v=example",
+    )
+    assert body.db_fields()["media_url"].startswith("https://")
 
 
 def test_free_registration_confirms_without_payment_order():

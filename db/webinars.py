@@ -19,13 +19,13 @@ def _slug(title: str) -> str:
 
 
 def list_public_webinars() -> list[dict]:
-    rows = (_supabase.table("webinars").select("id,slug,title,description,banner_url,starts_at,duration_minutes,timezone,capacity,is_paid,price,currency,mentor_id")
+    rows = (_supabase.table("webinars").select("id,slug,title,description,banner_url,media_url,starts_at,duration_minutes,timezone,capacity,is_paid,price,currency,mentor_id")
             .eq("status", "published").gte("starts_at", datetime.now(timezone.utc).isoformat()).order("starts_at").execute()).data or []
     return _with_counts(rows)
 
 
 def get_public_webinar(slug: str) -> Optional[dict]:
-    res = (_supabase.table("webinars").select("id,slug,title,description,banner_url,starts_at,duration_minutes,timezone,capacity,is_paid,price,currency,mentor_id,status")
+    res = (_supabase.table("webinars").select("id,slug,title,description,banner_url,media_url,starts_at,duration_minutes,timezone,capacity,is_paid,price,currency,mentor_id,status")
            .eq("slug", slug).eq("status", "published").maybe_single().execute())
     rows = _with_counts([res.data] if res.data else [])
     return rows[0] if rows else None

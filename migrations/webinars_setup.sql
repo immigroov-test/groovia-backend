@@ -8,6 +8,7 @@ CREATE TABLE IF NOT EXISTS webinars (
   title text NOT NULL,
   description text NOT NULL DEFAULT '',
   banner_url text,
+  media_url text,
   mentor_id uuid REFERENCES mentors(id) ON DELETE SET NULL,
   created_by uuid REFERENCES profiles(id) ON DELETE SET NULL,
   source text NOT NULL DEFAULT 'admin' CHECK (source IN ('admin','mentor_request')),
@@ -29,6 +30,9 @@ CREATE TABLE IF NOT EXISTS webinars (
   updated_at timestamptz NOT NULL DEFAULT now(),
   CHECK ((is_paid AND price > 0) OR (NOT is_paid AND price = 0))
 );
+
+-- Existing installations created before webinar media support.
+ALTER TABLE webinars ADD COLUMN IF NOT EXISTS media_url text;
 
 CREATE TABLE IF NOT EXISTS webinar_registrations (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

@@ -17,6 +17,7 @@ class WebinarBody(BaseModel):
     title: str = Field(min_length=4, max_length=140)
     description: str = Field(default="", max_length=10000)
     banner_url: Optional[str] = None
+    media_url: Optional[str] = None
     mentor_id: Optional[str] = None
     starts_at: datetime
     duration_minutes: int = Field(ge=15, le=480)
@@ -35,6 +36,25 @@ class WebinarBody(BaseModel):
         value = value.strip().upper()
         if len(value) != 3 or not value.isalpha():
             raise ValueError("Currency must be a three-letter code")
+        return value
+
+    @field_validator("starts_at")
+    @classmethod
+    def future_start(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        if value <= datetime.now(timezone.utc):
+            raise ValueError("Webinar start time must be in the future")
+        return value
+
+    @field_validator("banner_url", "media_url", "meeting_url")
+    @classmethod
+    def web_url(cls, value: Optional[str]) -> Optional[str]:
+        if value is None or not value.strip():
+            return None
+        value = value.strip()
+        if not value.startswith(("https://", "http://")):
+            raise ValueError("Media and meeting links must start with http:// or https://")
         return value
 
     def db_fields(self) -> dict:
@@ -58,6 +78,15 @@ class MentorRequestBody(BaseModel):
     is_paid: bool = False
     price: float = Field(default=0, ge=0)
     currency: str = Field(default="INR", min_length=3, max_length=3)
+
+    @field_validator("starts_at")
+    @classmethod
+    def future_start(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        if value <= datetime.now(timezone.utc):
+            raise ValueError("Webinar start time must be in the future")
+        return value
 
     @field_validator("currency")
     @classmethod
