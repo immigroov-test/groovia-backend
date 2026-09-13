@@ -556,6 +556,22 @@ def set_service_status(service_id: str, status: str) -> dict:
 MAX_SERVICE_TAGS = 5   # industry-standard cap for search/matching keywords
 
 
+def _mentor_smart_pricing(mentor_id: str) -> bool:
+    """The mentor's fair-pricing setting, which a new service must inherit.
+
+    Defaults to True when it cannot be read: mentors.smart_pricing itself defaults to TRUE, so True
+    is the answer that matches the rest of their sessions. Guessing False here would recreate the
+    very bug this exists to prevent."""
+    try:
+        res = (_supabase.table("mentors")
+               .select("smart_pricing").eq("id", mentor_id).limit(1).execute())
+        if res.data:
+            return bool(res.data[0].get("smart_pricing", True))
+    except Exception:
+        logger.exception("create_service: could not read smart_pricing for mentor=%s", mentor_id)
+    return True
+
+
 def create_service(
     *,
     mentor_id: str,
@@ -566,12 +582,19 @@ def create_service(
     category: Optional[str] = None,
     set_price: float = 0,
     is_active: bool = True,
-    is_ppp: bool = False,
+    # None = follow the mentor's own smart_pricing flag, which is what it should always do. Both
+    # callers used to leave this at False while mentors.smart_pricing defaults to TRUE, so a mentor
+    # with fair pricing on created sessions that silently opted out of it - priced differently from
+    # every other session they offer. _sync_services_ppp keeps is_ppp equal to smart_pricing on
+    # every toggle; creation was the one path that escaped that invariant.
+    is_ppp: Optional[bool] = None,
     tags: Optional[list[str]] = None,
     set_currency: Optional[str] = None,
     set_offer_price: Optional[float] = None,
     currency_prices: Optional[list[dict]] = None,
 ) -> str:
+    if is_ppp is None:
+        is_ppp = _mentor_smart_pricing(mentor_id)
     res = _supabase.rpc("service_create", {
         "p_mentor_id":   mentor_id,
         "p_title":       title,
@@ -748,8 +771,10 @@ def list_specific_availability(mentor_id: str) -> list[dict]:
     return res.data or []
 
 
-def remove_specific_availability(entry_id: str) -> None:
-    _supabase.rpc("avail_remove_specific", {"p_id": entry_id}).execute()
+def remove_specific_availability(entry_id: str, mentor_id: str) -> None:
+    """Delete one date override. Scoped to its owner: the RPC matches on mentor_id too, so
+    an id belonging to another mentor deletes nothing rather than deleting theirs."""
+    _supabase.rpc("avail_remove_specific", {"p_id": entry_id, "p_mentor_id": mentor_id}).execute()
 
 
 def list_mentor_sessions(mentor_id: str) -> list[dict]:

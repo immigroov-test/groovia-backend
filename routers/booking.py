@@ -11,7 +11,8 @@ from pydantic import BaseModel, EmailStr, field_validator
 import config
 import db
 from core.auth import AuthUser, get_current_user, get_current_user_optional
-from services import mailer, policy
+from routers.pricing import resolve_pricing_country
+from services import access_token, mailer, policy
 from services.ics import build_ics
 
 logger = logging.getLogger("immigroov.routers.booking")
@@ -99,17 +100,38 @@ def _jaas_token(room: str, display_name: str, is_moderator: bool) -> Optional[st
         return None
 
 
+def _party_or_403(booking_id: str, meeting: dict, request: Request,
+                  user: Optional[AuthUser]) -> str:
+    """Which side of this booking the caller is, accepting EITHER a signed token or a session.
+
+    Guests have no account, so before this they could not open a booking they had paid for: every link
+    redirected to /login. The token in their confirmation email carries the booking and the party, so
+    it authorises exactly one booking as exactly one side of it.
+
+    The token is checked FIRST and deliberately: it names the party explicitly, so the mentor's emailed
+    link stamps the mentor even when a customer happens to be signed in on the same browser. That
+    ambiguity was a real problem with session-only auth.
+    """
+    token_party = access_token.verify(request.query_params.get("t"), booking_id)
+    if token_party:
+        return token_party
+    if user:
+        party = _meeting_party(meeting, user.id)
+        if party:
+            return party
+    raise HTTPException(status_code=403, detail="You are not a participant of this session")
+
+
 @router.get("/{booking_id}/room")
-def meeting_room(booking_id: str, user: AuthUser = Depends(get_current_user)):
+def meeting_room(booking_id: str, request: Request,
+                 user: Optional[AuthUser] = Depends(get_current_user_optional)):
     """Reveal the Jitsi room for a session - only to its candidate/mentor, and only
     within the join window. Returns {open:false, opens_at} before the window so the
     page can show a countdown without ever exposing the room early."""
     m = db.get_booking_meeting(booking_id)
     if not m:
         raise HTTPException(status_code=404, detail="Session not found")
-    party = _meeting_party(m, user.id)
-    if not party:
-        raise HTTPException(status_code=403, detail="You are not a participant of this session")
+    party = _party_or_403(booking_id, m, request, user)
     if m.get("status") in ("cancelled", "no_show"):
         raise HTTPException(status_code=409, detail="This session is no longer active")
 
@@ -157,7 +179,8 @@ class AttendanceBody(BaseModel):
 
 
 @router.post("/{booking_id}/attendance")
-def meeting_attendance(booking_id: str, body: AttendanceBody, user: AuthUser = Depends(get_current_user)):
+def meeting_attendance(booking_id: str, body: AttendanceBody, request: Request,
+                       user: Optional[AuthUser] = Depends(get_current_user_optional)):
     """Record that the caller joined/left the call, for no-show detection. Best-effort
     (client-reported), attributed to the caller's side of the booking."""
     if body.event not in ("joined", "left"):
@@ -165,9 +188,7 @@ def meeting_attendance(booking_id: str, body: AttendanceBody, user: AuthUser = D
     m = db.get_booking_meeting(booking_id)
     if not m:
         raise HTTPException(status_code=404, detail="Session not found")
-    party = _meeting_party(m, user.id)
-    if not party:
-        raise HTTPException(status_code=403, detail="You are not a participant of this session")
+    party = _party_or_403(booking_id, m, request, user)
     db.record_meeting_attendance(booking_id, party, body.event)
     return {"ok": True}
 
@@ -175,7 +196,8 @@ def meeting_attendance(booking_id: str, body: AttendanceBody, user: AuthUser = D
 # ── Unified session detail (candidate / mentor / admin) ─────────────────────────
 
 @router.get("/{booking_id}/detail")
-def booking_detail(booking_id: str, user: AuthUser = Depends(get_current_user)):
+def booking_detail(booking_id: str, request: Request,
+                   user: Optional[AuthUser] = Depends(get_current_user_optional)):
     """Role-aware detail for the session page. Returns the confirmation-style fields plus
     capability flags and the join window (identical to the /room gate, so the page and the
     room agree on when 'Join' is live). Candidate/mentor/admin each see only what they should."""
@@ -183,9 +205,14 @@ def booking_detail(booking_id: str, user: AuthUser = Depends(get_current_user)):
     if not d:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    is_candidate = bool(d.get("candidate_id") and d["candidate_id"] == user.id)
-    is_mentor = bool(d.get("mentor_profile_id") and d["mentor_profile_id"] == user.id)
-    is_admin = (not is_candidate and not is_mentor) and db.get_profile_role(user.id) == "admin"
+    # A signed token from the confirmation email authorises one party on this one booking, so a guest
+    # can open the session they paid for without an account.
+    token_party = access_token.verify(request.query_params.get("t"), booking_id)
+    is_candidate = token_party == "candidate" or bool(
+        user and d.get("candidate_id") and d["candidate_id"] == user.id)
+    is_mentor = token_party == "mentor" or bool(
+        user and d.get("mentor_profile_id") and d["mentor_profile_id"] == user.id)
+    is_admin = (not is_candidate and not is_mentor) and bool(user) and db.get_profile_role(user.id) == "admin"
     if not (is_candidate or is_mentor or is_admin):
         raise HTTPException(status_code=403, detail="You are not a participant of this session")
     role = "candidate" if is_candidate else "mentor" if is_mentor else "admin"
@@ -469,6 +496,12 @@ class BookSessionBody(BaseModel):
     specific_availability_id: Optional[str] = None
     idempotency_key: Optional[str] = None
     referral_code: Optional[str] = None
+    # Set by the /r/<slug> landing route when the visitor arrived through a promoter's link.
+    referral_token: Optional[str] = None
+    # Consent Flow Spec Section 4: this free/mock-confirm path is the other half of
+    # checkout (routers/payments.py's /reserve is the paid half) - the same checkbox in
+    # the widget gates both, so both must record the same consent bundle.
+    accepted_terms: bool = False
 
     @field_validator("email")
     @classmethod
@@ -496,6 +529,7 @@ class BookSessionBody(BaseModel):
 
 @router.post("")
 def book_session(
+    request: Request,
     body: BookSessionBody,
     background_tasks: BackgroundTasks,
     user: Optional[AuthUser] = Depends(get_current_user_optional),
@@ -504,6 +538,8 @@ def book_session(
     a signed-in caller attaches candidate_id; a guest books with candidate_id NULL and their
     identity lives in candidate_email/name/phone, claimed when they later sign up with that
     email. The quote/reserve/confirm flow in routers/payments.py is the paid equivalent."""
+    if not body.accepted_terms:
+        raise HTTPException(status_code=400, detail="You must accept the Terms, Privacy Policy, and Payment Terms")
     # Idempotency: a retried/duplicated request (e.g. after a dropped network response)
     # returns the original booking instead of creating a second one.
     if body.idempotency_key:
@@ -538,10 +574,33 @@ def book_session(
                 # Mock/free path: no charge + no pricing rows, so this records attribution only
                 # (no commission is generated). The paid path applies the discount in reserve.
                 db.attribute_booking_referral(booking_id, body.referral_code)
+            # Step 2 of the referral flow: the code above, or a link click on this browser,
+            # becomes the customer's attribution record. Called on every booking, because an
+            # unexpired record from an earlier visit still counts when this checkout carries
+            # neither a code nor a token.
+            db.resolve_booking_attribution(booking_id, body.referral_token)
             db.set_booking_phone(booking_id, body.phone)
             db.set_booking_notes(booking_id, body.notes)   # BUG-113: persist for email + dashboard
             if candidate_id:
                 db.set_profile_phone_if_empty(candidate_id, body.phone)
+            # Consent Flow Spec Section 4 - same write as the paid /reserve path, keyed to
+            # this booking_id the moment it exists.
+            try:
+                country = resolve_pricing_country(request, None)
+                # India is the default geography: an unresolved/unknown country binds the
+                # India edition, and only a country we positively know is NOT India moves
+                # this to Rest-of-World.
+                country_code = (country or "").upper()
+                tc_slug = "customer-terms-row" if country_code and country_code != "IN" else "customer-terms-india"
+                db.record_legal_consent(
+                    [tc_slug, "privacy-policy", "payment-terms", "refund-cancellation-policy"],
+                    user_id=candidate_id, booking_id=booking_id,
+                    consent_method="checkbox_guest_checkout" if not candidate_id else "checkbox_customer_checkout",
+                    ip=(request.client.host if request.client else None),
+                    user_agent=request.headers.get("user-agent"),
+                )
+            except Exception:
+                logger.exception("Checkout consent log failed for booking %s", booking_id)
             background_tasks.add_task(
                 _send_booking_confirmation, booking_id, body.mentor_id, body.email, body.name
             )
@@ -719,7 +778,8 @@ def confirm_reschedule(body: ConfirmRescheduleBody, background_tasks: Background
     try:
         booking = db.mentor_confirm_reschedule(body.offer_id)
         # This is the step that MOVES the session, and it told nobody. The mentee picked a
-        # time and then heard nothing about whether it stood.
+        # time and then heard nothing about whether it stood; the mentor got no confirmation
+        # of their own calendar change either.
         if booking and booking.get("id"):
             background_tasks.add_task(_notify_parties, booking["id"], "rescheduled", old_slot)
         return booking
@@ -774,7 +834,9 @@ def respond_request(body: RespondRequestBody, background_tasks: BackgroundTasks,
     try:
         db.respond_booking_request(body.request_id, body.accept)
         # A cancel request ends the booking either way, and settles money with it: approving
-        # refunds the customer in full, refusing keeps 50%. That happened silently.
+        # refunds the customer in full, refusing keeps 50%. That happened silently. The
+        # reschedule kind only changes what the customer may do next, so it carries its own
+        # wording rather than borrowing the cancellation email.
         kind = (principals.get("kind") or "").lower()
         if kind == "cancel":
             background_tasks.add_task(_notify_parties, principals["booking_id"], "cancelled",
@@ -1026,7 +1088,12 @@ def _send_booking_confirmation(
         mentor_email = info.get("mentor_email")
         mentor_photo = info.get("mentor_photo")
         service_title = info.get("service_title") or "1-on-1 session"
-        meeting_url = f"{config.FRONTEND_URL}/meeting/{booking_id}"
+        # One link per party, each carrying a signed token for THAT side of the booking. It points at
+        # the session page rather than the bare join page, so the recipient sees the full details and
+        # the Join button in one place. Guests can open it without an account, which they previously
+        # could not: every link redirected to /login and they had none.
+        candidate_url = access_token.session_url(booking_id, "candidate")
+        mentor_url = access_token.session_url(booking_id, "mentor")
 
         # booking_times_display returns a per-party local timestamp + IANA tz name.
         # Format both parties' times so every email can show "your time" AND "their time".
@@ -1063,8 +1130,8 @@ def _send_booking_confirmation(
                 ics = build_ics(
                     uid=booking_id, start=start, end=end,
                     summary=f"Immigroov: {service_title}",
-                    description=f"Your 1-on-1 with {mentor_name or 'your mentor'}. Join here: {meeting_url}",
-                    location=meeting_url,
+                    description=f"Your 1-on-1 with {mentor_name or 'your mentor'}. Join here: {candidate_url}",
+                    location=candidate_url,
                 )
                 ics_att = [{"filename": "session.ics", "content": ics}]
         except Exception:
@@ -1080,7 +1147,7 @@ def _send_booking_confirmation(
                 "service_title": service_title,
                 "candidate_time": candidate_time,
                 "mentor_time": mentor_time,
-                "meeting_url": meeting_url,
+                "meeting_url": candidate_url,
                 "is_guest": is_guest,
                 "signup_url": signup_url,
                 "notes": notes or "",
@@ -1110,7 +1177,7 @@ def _send_booking_confirmation(
                     "mentor_time": mentor_time,
                     "notes": notes or "",
                     "answers": answers,
-                    "meeting_url": meeting_url,
+                    "meeting_url": mentor_url,
                     "booking_ref": _booking_ref(booking_id),
                 },
                 attachments=ics_att,
@@ -1265,7 +1332,8 @@ def _notify_parties(booking_id: str, event: str, old_slot: Optional[str] = None,
         elif event in ("reschedule_approved", "reschedule_rejected"):
             # The mentor answered a reschedule REQUEST. Nothing has moved yet either way: on
             # approval the customer still has to pick a time, and on refusal the session
-            # stands - and silence there leaves them assuming it moved when it did not.
+            # stands. Both sides are told, because the customer is waiting on the answer and
+            # the mentor needs a record of what they decided.
             times = db.get_booking_times_display(booking_id) or {}
             template = ("reschedule_request_approved" if event == "reschedule_approved"
                         else "reschedule_request_declined")

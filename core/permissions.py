@@ -28,7 +28,10 @@ def require_mentor(user: AuthUser = Depends(get_current_user)) -> dict[str, Any]
     mentor = _db.get_mentor_by_profile_id(user.id)
     if not mentor:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Mentor access required")
-    if mentor.get("status") == "suspended":
+    # FEAT-020: a profile the mentor hid themselves is as closed for business as a suspended one -
+    # no service, availability or referral edits while it is down. Reactivating is deliberately NOT
+    # routed through here (see /mentor/me/reactivate), or these states could never be undone.
+    if mentor.get("status") in ("suspended", "deactivated", "deletion_pending"):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Mentor profile not active")
     return mentor
 

@@ -365,7 +365,7 @@ def _booking_confirmed_candidate(d: dict) -> tuple[str, str]:
         '<div style="margin:20px 0 0;padding:14px 16px;background:#fff7ed;border:1px solid #fed7aa;border-radius:12px">'
         '<p style="margin:0;font-size:14px;color:#7c2d12;line-height:1.6">'
         'You booked as a <strong>guest</strong>. Create a free account with <strong>this email</strong> '
-        'to join your session and manage it (reschedule or cancel).</p>'
+        'to reschedule or cancel this session and see it alongside any others.</p>'
         + (_btn(signup_url, "Create your free account") if signup_url else "")
         + '</div>'
     )
@@ -387,9 +387,13 @@ def _booking_confirmed_candidate(d: dict) -> tuple[str, str]:
         + '<p style="margin:16px 0 0;font-size:15px;color:#444;line-height:1.6">'
         f"You'll receive a reminder {policy.reminder_notice()} before the session."
         "</p>"
+        # The Join button goes to EVERYONE now. It used to be replaced by the guest block, written when
+        # a guest genuinely could not join without an account; the link now carries a signed token, so
+        # withholding the button left paying guests with no way in. The account nudge stays for guests,
+        # but as an addition rather than a substitute.
+        + (_btn(url, "Join meeting") if url else "")
         + (guest_block if is_guest else (
-            (_btn(url, "Join meeting") if url else "")
-            + '<p style="margin:20px 0 0;font-size:14px;color:#444;line-height:1.6">'
+            '<p style="margin:20px 0 0;font-size:14px;color:#444;line-height:1.6">'
             f'Need to change it? <a href="{config.FRONTEND_URL}/account/sessions" style="color:#6b7fff">Reschedule or cancel</a>'
             " anytime from your account.</p>"
         ))
@@ -1153,6 +1157,21 @@ def _contact_form(d: dict) -> tuple[str, str]:
     return f"Contact form: {topic}", _base(body)
 
 
+def _data_subject_request(d: dict) -> tuple[str, str]:
+    """Section 7 intake ticket notification, delivered to admins. Intake only - this
+    email is the alert that a request came in, not proof it was fulfilled."""
+    name = _e(d.get("name", ""))
+    email = _e(d.get("email", ""))
+    request_type = _e(d.get("request_type", ""))
+    details = _e(d.get("details", "")).replace("\n", "<br>")
+    body = (
+        '<h1 style="margin:0 0 12px;font-size:20px;font-weight:700;color:#0a0a0a">Data subject request</h1>'
+        + _details_card([("From", name), ("Email", email), ("Type", request_type)])
+        + (f'<p style="margin:16px 0 0;font-size:15px;color:#444;line-height:1.6">{details}</p>' if details else '')
+    )
+    return f"Data subject request: {request_type}", _base(body)
+
+
 def _fx_stale_alert(d: dict) -> tuple[str, str]:
     """Ops alarm: FX rates have stopped refreshing. Sent to admins only.
 
@@ -1245,6 +1264,45 @@ def _payout_mismatch_alert(d: dict) -> tuple[str, str]:
     return f"[Immigroov] {head}", _base(f'<h2 style="margin:0 0 16px;font-size:18px">{head}</h2>' + body)
 
 
+def _legal_document_updated(d: dict) -> tuple[str, str]:
+    """A legal document that binds this recipient has a new published version.
+
+    Sent only for MATERIAL revisions (a major version bump). Telling people about every
+    corrected typo is how a notice stops being read, and the one that matters then goes
+    the same way. The email states what changed and links straight to the document rather
+    than to the top of a page holding fourteen of them."""
+    name = _e(d.get("recipient_name") or "there")
+    title = _e(d.get("doc_title", "a legal document"))
+    version = _e(d.get("version", ""))
+    note = (d.get("change_note") or "").strip()
+    platform = d.get("platform_url", config.FRONTEND_URL)
+    review_url = d.get("review_url") or f"{platform}/legal/updates"
+
+    note_html = ""
+    if note:
+        note_html = (
+            '<div style="margin:16px 0;padding:12px 14px;border-left:3px solid #d4d4d8;background:#fafafa">'
+            f'<p style="margin:0;font-size:14px;color:#444;line-height:1.6"><strong>What changed:</strong> {_e(note)}</p>'
+            "</div>"
+        )
+
+    body = (
+        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">We have updated our ' + title + "</h1>"
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {name},</p>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">'
+        f"We have published a new version of the <strong>{title}</strong>"
+        + (f" ({version})" if version else "")
+        + ", which applies to your Immigroov account."
+        "</p>"
+        + note_html
+        + '<p style="margin:0;font-size:15px;color:#444;line-height:1.6">'
+        "Please review and accept the updated version. You will be asked to do this next time you sign in."
+        "</p>"
+        + _btn(review_url, "Review and accept")
+    )
+    return f"Update to our {d.get('doc_title', 'legal terms')}", _base(body)
+
+
 def _reschedule_request_approved(d: dict) -> tuple[str, str]:
     """The mentor agreed to a reschedule request. The session has NOT moved yet - the
     customer still has to pick a time - so the email says what to do next rather than
@@ -1314,6 +1372,7 @@ _TEMPLATES = {
     "payout_paid": _payout_paid,
     "payment_admin_notice": _payment_admin_notice,
     "contact_form": _contact_form,
+    "data_subject_request": _data_subject_request,
     "mentor_application_received": _mentor_application_received,
     "admin_mentor_application": _admin_mentor_application,
     "admin_mentor_change_request": _admin_mentor_change_request,
@@ -1347,7 +1406,67 @@ _TEMPLATES = {
     "auth_magic_link": _auth_magic_link,
     "auth_recovery": _auth_recovery,
     "auth_generic": _auth_generic,
+    "legal_document_updated": _legal_document_updated,
 }
+
+
+
+# FEAT-038: which sending identity each template goes out from.
+#
+# Grouped by what a spam complaint against the group would cost. Mailbox providers score
+# reputation per sending domain, so the streams are drawn to keep the emails that MUST be
+# delivered away from the ones a recipient might report.
+#
+#   security  sign-in and recovery. Filtering one of these locks someone out of their
+#             account, so it shares a domain with nothing else.
+#   bookings  the session and money trail: confirmations, reminders, reschedules, refunds.
+#             Expected mail with high engagement, and the other stream that must not fail.
+#   account   status changes people asked for: welcome, application outcomes, legal updates.
+#   updates   review requests. The one stream a recipient plausibly marks as spam, so it is
+#             deliberately isolated from everything above.
+#   alerts    internal only - ops alerts, admin copies, the contact form. Never reaches a
+#             customer, so its reputation is nobody's problem but ours.
+#
+# A template missing from this map falls back to `account`, which is the conservative
+# choice: a real address, not the alert stream, and not the two protected ones.
+_STREAMS: dict[str, str] = {
+    **{k: "security" for k in (
+        "auth_signup_confirm", "auth_magic_link", "auth_recovery", "auth_generic")},
+    **{k: "bookings" for k in (
+        "booking_confirmed_candidate", "booking_confirmed_mentor",
+        "booking_cancelled", "booking_rescheduled",
+        "reschedule_proposed", "reschedule_requested", "reschedule_counter",
+        "cancel_requested", "cancel_request_sent", "no_show_reported",
+        "session_reminder_24h", "session_reminder_1h", "session_reminder_30min",
+        "reschedule_request_approved", "reschedule_request_declined",
+        "mentor_attendance_check",
+        "payment_failed", "refund_issued", "payout_paid")},
+    **{k: "account" for k in (
+        "welcome_candidate", "welcome_mentor",
+        "mentor_application_received", "mentor_approved", "mentor_rejected",
+        "mentor_changes_requested", "mentor_suspended", "mentor_reinstated",
+        "legal_document_updated")},
+    **{k: "updates" for k in (
+        "review_request",)},
+    **{k: "alerts" for k in (
+        "fx_stale_alert", "webhook_rejected_alert", "payout_mismatch_alert",
+        "booking_admin_notice", "payment_admin_notice", "contact_form",
+        "admin_mentor_application", "admin_mentor_change_request",
+        "admin_mentor_changes_submitted", "admin_mentor_suspended",
+        "data_subject_request")},
+}
+
+
+def _from_for(template: str) -> str:
+    """The sending identity for a template's stream. Every stream falls back to EMAIL_FROM,
+    so this is a no-op until the subdomains are actually verified in Resend."""
+    return {
+        "security": config.EMAIL_FROM_AUTH,
+        "bookings": config.EMAIL_FROM_BOOKINGS,
+        "account":  config.EMAIL_FROM_ACCOUNT,
+        "updates":  config.EMAIL_FROM_UPDATES,
+        "alerts":   config.EMAIL_FROM_ALERTS,
+    }.get(_STREAMS.get(template, "account"), config.EMAIL_FROM)
 
 
 def send_transactional(
@@ -1384,11 +1503,15 @@ def send_transactional(
         recipient = config.EMAIL_TEST_REDIRECT
 
     payload: dict = {
-        "from": config.EMAIL_FROM,
+        "from": _from_for(template),
         "to": [recipient],
         "subject": subject,
         "html": html,
     }
+    # A no-reply From with no Reply-To is a dead end for anyone answering a booking email.
+    # Internal alert mail is exempt: replies to it would land back in our own ops inbox.
+    if config.EMAIL_REPLY_TO and _STREAMS.get(template) != "alerts":
+        payload["reply_to"] = config.EMAIL_REPLY_TO
     if scheduled_at:
         payload["scheduled_at"] = scheduled_at.isoformat()
     if attachments:
@@ -1411,7 +1534,7 @@ def send_transactional(
             # Surface Resend's actual reason (unverified domain, sandbox recipient, etc.)
             logger.error(
                 "Resend rejected %s to %s (from=%r): HTTP %s - %s",
-                template, recipient, config.EMAIL_FROM, resp.status_code, resp.text,
+                template, recipient, _from_for(template), resp.status_code, resp.text,
             )
         resp.raise_for_status()
         logger.info("Sent %s to %s", template, recipient)

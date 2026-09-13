@@ -29,6 +29,12 @@ EXCEPTION WHEN duplicate_object THEN NULL; END $$;
 -- 'changes_requested': admin asked the applicant to revise (editable + can resubmit),
 -- distinct from 'rejected' (declined). Idempotent add for DBs that predate it.
 ALTER TYPE mentor_status ADD VALUE IF NOT EXISTS 'changes_requested';
+-- FEAT-020: self-service states. 'deactivated' = paused by the mentor, reactivate any time.
+-- 'deletion_pending' = the mentor asked to leave; reactivate within 90 days, then the personal
+-- fields are scrubbed. Both are distinct from 'suspended', which is an admin action the mentor
+-- cannot undo themselves.
+ALTER TYPE mentor_status ADD VALUE IF NOT EXISTS 'deactivated';
+ALTER TYPE mentor_status ADD VALUE IF NOT EXISTS 'deletion_pending';
 
 DO $$ BEGIN
   CREATE TYPE booking_status AS ENUM
@@ -302,6 +308,45 @@ CREATE INDEX IF NOT EXISTS idx_bookings_external_id
 
 -- Idempotency: dedupes a retried booking request (dropped network response, double-click).
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS idempotency_key text;
+
+-- BUG-098: a booking id a person can actually read out. bookings.id is a random UUID, which is
+-- fine as a key and useless as a reference: it cannot be quoted in an email, searched for from
+-- memory, or sorted into any meaningful order. `reference` is a short sequential handle
+-- (IMG-00001) shown in the admin table and usable for support.
+--
+-- Left nullable on purpose. The default below covers every new booking, and the backfill covers
+-- every existing one, but a NOT NULL would turn any row that somehow slipped through into a hard
+-- insert failure on a table that takes money. The admin UI falls back to the UUID prefix instead.
+CREATE SEQUENCE IF NOT EXISTS booking_reference_seq;
+ALTER TABLE bookings ADD COLUMN IF NOT EXISTS reference TEXT;
+
+-- Backfill in creation order, so the oldest booking is IMG-00001. Re-running is a no-op: rows that
+-- already have a reference are skipped.
+WITH ordered AS (
+  SELECT id, ROW_NUMBER() OVER (ORDER BY created_at, id) AS rn
+    FROM bookings
+   WHERE reference IS NULL
+)
+UPDATE bookings b
+   SET reference = 'IMG-' || LPAD(o.rn::TEXT, 5, '0')
+  FROM ordered o
+ WHERE b.id = o.id;
+
+-- Point the sequence past whatever the backfill used, so new bookings continue the run rather than
+-- colliding with it. is_called = false means the next nextval() returns exactly this number.
+SELECT setval(
+  'booking_reference_seq',
+  COALESCE((SELECT MAX(SUBSTRING(reference FROM 5)::BIGINT)
+              FROM bookings WHERE reference ~ '^IMG-[0-9]+$'), 0) + 1,
+  false
+);
+
+-- Set the default only AFTER the backfill, or new rows would draw numbers the backfill is still
+-- handing out.
+ALTER TABLE bookings ALTER COLUMN reference
+  SET DEFAULT 'IMG-' || LPAD(nextval('booking_reference_seq')::TEXT, 5, '0');
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_bookings_reference ON bookings(reference);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_bookings_idempotency
   ON bookings(idempotency_key) WHERE idempotency_key IS NOT NULL;
 
@@ -318,6 +363,7 @@ ALTER TABLE services ALTER COLUMN is_ppp        SET DEFAULT TRUE;
 -- Additional-currency base rates [{currency, hourly_rate}]; the primary is (currency, hourly_rate).
 -- Each service's currency_prices are derived from these by duration.
 ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS currency_rates JSONB NOT NULL DEFAULT '[]';
+
 -- These were added to the CREATE TABLE above, but CREATE TABLE IF NOT EXISTS is a no-op on an
 -- existing DB, so they MUST also be ALTERed in (or the mentor-list SELECT breaks on old databases).
 ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS home_country_code CHAR(2);
@@ -329,6 +375,26 @@ ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS years_professional_experience INTE
 ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS served_countries JSONB NOT NULL DEFAULT '[]'::jsonb;
 ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS legacy_id TEXT UNIQUE;
 ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS legacy_data JSONB;
+
+-- FEAT-020: a mentor can hide their own profile without an admin. Two self-service states, both
+-- caught by the sync_mentor_is_active trigger further down (is_active := status = 'approved'), so
+-- either one drops them out of browse and out of every bookable query with no extra filtering:
+--   'deactivated'      - a pause. Reactivate whenever; nothing is ever deleted.
+--   'deletion_pending' - a leave. Reactivate within 90 days, after which the purge job clears the
+--                        personal fields (jobs/run_due.py -> db.purge_due_mentor_deletions).
+-- Note the profile is only ever hidden, never row-deleted: bookings.mentor_id is ON DELETE RESTRICT
+-- and mentor_payouts cascades, so deleting the row would either fail outright for any mentor who
+-- has traded, or take the financial history with it. The purge scrubs the personal columns and
+-- leaves bookings/payments/payouts intact.
+-- deactivated_at is when the mentor asked; purge_due_at is when the scrub becomes due (NULL for a
+-- plain deactivation, which never expires); anonymized_at is stamped once the scrub has run, so the
+-- job is idempotent and an already-scrubbed row is never picked up twice.
+ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS deactivated_at TIMESTAMPTZ;
+ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS purge_due_at   TIMESTAMPTZ;
+ALTER TABLE mentors  ADD COLUMN IF NOT EXISTS anonymized_at  TIMESTAMPTZ;
+-- The purge scan: due, not yet done. Tiny partial index; the job runs on every dispatcher tick.
+CREATE INDEX IF NOT EXISTS idx_mentors_purge_due
+  ON mentors(purge_due_at) WHERE purge_due_at IS NOT NULL AND anonymized_at IS NULL;
 ALTER TABLE bookings ADD COLUMN IF NOT EXISTS candidate_phone TEXT;
 ALTER TABLE services ADD COLUMN IF NOT EXISTS tags TEXT[] NOT NULL DEFAULT '{}';
 
@@ -727,7 +793,12 @@ DECLARE
   e            TIMESTAMPTZ;
   win_end      TIMESTAMPTZ;
 BEGIN
-  SELECT COALESCE(app_timezone, 'UTC'),
+  -- BUG-091: prefer a real app_timezone, else the profile timezone. create_mentor only ever
+  -- writes mentors.timezone, so app_timezone sits at its 'UTC' default for every self-signup
+  -- mentor - and this function INTERPRETS their stored local hours, so a bare 'UTC' here does
+  -- not just mislabel the slots, it offers them at the wrong real-world time. Same expression
+  -- as BUG-114 used for booking emails.
+  SELECT COALESCE(NULLIF(app_timezone, 'UTC'), timezone, 'UTC'),
          COALESCE(app_buffertime, INTERVAL '0'),
          COALESCE(app_minimum_notice, INTERVAL '0'),
          COALESCE(app_booking_window, INTERVAL '365 days')
@@ -1043,7 +1114,8 @@ BEGIN
     RAISE EXCEPTION 'Those hours overlap % - % on %', v_clash.start_time, v_clash.end_time, p_day;
   END IF;
   INSERT INTO weekly_availability(mentor_id, weekday, start_time, end_time, timezone, is_active)
-  SELECT p_mentor_id, p_day, p_start, p_end, COALESCE(app_timezone, 'UTC'), TRUE
+  SELECT p_mentor_id, p_day, p_start, p_end,
+         COALESCE(NULLIF(mentors.app_timezone, 'UTC'), mentors.timezone, 'UTC'), TRUE   -- BUG-091
   FROM mentors WHERE id = p_mentor_id;
 END;
 $$;
@@ -1070,7 +1142,8 @@ RETURNS VOID LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
 BEGIN
   DELETE FROM specific_availability WHERE mentor_id = p_mentor_id AND slot_date = p_date;
   INSERT INTO specific_availability(mentor_id, slot_date, timezone, is_blackout)
-  SELECT p_mentor_id, p_date, COALESCE(app_timezone, 'UTC'), TRUE
+  SELECT p_mentor_id, p_date,
+         COALESCE(NULLIF(mentors.app_timezone, 'UTC'), mentors.timezone, 'UTC'), TRUE   -- BUG-091
   FROM mentors WHERE id = p_mentor_id;
 END;
 $$;
@@ -1082,14 +1155,16 @@ BEGIN
   DELETE FROM specific_availability
     WHERE mentor_id = p_mentor_id AND slot_date = p_date;
   INSERT INTO specific_availability(mentor_id, slot_date, start_time, end_time, timezone, is_blackout)
-  SELECT p_mentor_id, p_date, p_start, p_end, COALESCE(app_timezone, 'UTC'), FALSE
+  SELECT p_mentor_id, p_date, p_start, p_end,
+         COALESCE(NULLIF(mentors.app_timezone, 'UTC'), mentors.timezone, 'UTC'), FALSE  -- BUG-091
   FROM mentors WHERE id = p_mentor_id;
 END;
 $$;
 
-CREATE OR REPLACE FUNCTION avail_remove_specific(p_id UUID)
+CREATE OR REPLACE FUNCTION avail_remove_specific(p_id UUID, p_mentor_id UUID)
 RETURNS VOID LANGUAGE sql SECURITY DEFINER SET search_path = public AS $$
-  DELETE FROM specific_availability WHERE id = p_id;
+  DELETE FROM specific_availability
+   WHERE id = p_id AND mentor_id = p_mentor_id;
 $$;
 
 CREATE OR REPLACE FUNCTION avail_list_specific(p_mentor_id UUID)
@@ -1125,7 +1200,8 @@ LANGUAGE sql SECURITY DEFINER SET search_path = public AS $$
     COALESCE(EXTRACT(day FROM app_booking_window)::INTEGER, 30),
     ROUND((COALESCE(EXTRACT(epoch FROM app_minimum_notice), 0) / 3600.0)::NUMERIC, 1),
     COALESCE(cancel_notice_hours, 24),
-    COALESCE(app_timezone, 'UTC')
+    -- BUG-091: the timezone the availability dashboard labels its hours with.
+    COALESCE(NULLIF(app_timezone, 'UTC'), timezone, 'UTC')
   FROM mentors WHERE id = p_mentor_id;
 $$;
 
@@ -2696,7 +2772,7 @@ RETURNS TABLE (
     b.id, b.status::TEXT, b.slot_time, b.slot_end, b.meeting_url,
     s.title, s.duration,
     m.display_name, m.slug,
-    COALESCE(m.app_timezone, 'UTC'),
+    COALESCE(NULLIF(m.app_timezone, 'UTC'), m.timezone, 'UTC'),   -- BUG-091
     m.country,
     COALESCE(b.attendee_timezone, p.timezone, 'UTC'),
     b.reschedule_count, b.no_show_by, booking_deadline_state(b.slot_time, COALESCE(m.cancel_notice_hours, 24)),
@@ -2768,7 +2844,7 @@ RETURNS TABLE (
     s.title, s.duration,
     COALESCE(p.display_name, p.full_name, b.candidate_name, b.candidate_email),
     COALESCE(b.candidate_email, p.email),
-    COALESCE(m.app_timezone, 'UTC'),
+    COALESCE(NULLIF(m.app_timezone, 'UTC'), m.timezone, 'UTC'),   -- BUG-091
     COALESCE(b.attendee_timezone, p.timezone, 'UTC'),
     b.mentor_confirmed_at, b.reschedule_count, b.no_show_by,
     booking_deadline_state(b.slot_time, COALESCE(m.cancel_notice_hours, 24)),
@@ -3016,6 +3092,172 @@ ALTER TABLE mentors ADD COLUMN IF NOT EXISTS onboarded_at          TIMESTAMPTZ;
 -- re-flagged by a re-run.
 UPDATE mentors SET needs_onboarding = TRUE
  WHERE legacy_id IS NOT NULL AND onboarded_at IS NULL AND needs_onboarding = FALSE;
+-- ── Re-anchor services onto the mentor's base currency ────────────────────────────────────────
+-- INVARIANT: services.set_currency == mentors.currency. set_price is "base price in the mentor's
+-- PRIMARY currency"; anything in another currency belongs in currency_prices, never in set_currency.
+-- Two defects broke it: (a) the legacy import seeded hourly_rate as max() across per-hour figures in
+-- MIXED currencies (an INR number always beats an AUD one) and never updated mentors.currency, and
+-- (b) the changes_requested/rejected profile-edit path wrote the new currency to the live mentor row
+-- without repricing services. Either way the mentor row says one currency and the services say
+-- another, so PPP anchors to a currency the mentor does not price in and the customer is charged
+-- against the wrong base.
+-- This is a no-op once the invariant holds (the WHERE matches nothing), so it is safe on every run.
+-- Mirrors reprice_mentor_services() exactly: free intros (set_price <= 0) stay free, set_price is
+-- duration x hourly rate, any stale set_offer_price is cleared, and currency_prices is rebuilt from
+-- mentors.currency_rates.
+WITH rebased AS (
+  SELECT s.id,
+         ROUND(m.hourly_rate * s.duration / 60.0, 2) AS new_price,
+         UPPER(m.currency)                           AS new_currency,
+         COALESCE((
+           SELECT jsonb_agg(jsonb_build_object(
+                    'currency',   UPPER(r->>'currency'),
+                    'base_price', ROUND((r->>'hourly_rate')::numeric * s.duration / 60.0, 2)))
+             FROM jsonb_array_elements(COALESCE(m.currency_rates, '[]'::jsonb)) r
+            WHERE UPPER(COALESCE(r->>'currency','')) <> UPPER(m.currency)
+              AND COALESCE(NULLIF(r->>'hourly_rate','')::numeric, 0) > 0
+         ), '[]'::jsonb)                             AS new_currency_prices
+    FROM services s
+    JOIN mentors  m ON m.id = s.mentor_id
+   WHERE UPPER(COALESCE(s.set_currency, '')) <> UPPER(COALESCE(m.currency, ''))
+     AND COALESCE(m.currency, '')   <> ''
+     AND COALESCE(m.hourly_rate, 0) > 0    -- no base rate to anchor to: leave the row untouched
+     AND COALESCE(s.set_price, 0)   > 0    -- free intro stays free
+     AND COALESCE(s.duration, 0)    > 0
+     -- Only anchor to a base the MENTOR actually chose. A migrated mentor who has not yet been
+     -- through first-login onboarding still carries the seeded base, and that seed is the highest
+     -- per-hour figure across their legacy sessions -- which for a mentor who priced different
+     -- sessions in different currencies can be a number from one currency stored under another
+     -- (e.g. a base of "USD 4400" that is really an INR-magnitude figure). Anchoring live prices to
+     -- a seed like that multiplies the error instead of fixing it, so those rows are left alone and
+     -- settle when the mentor confirms their rate at first login.
+     AND NOT (m.legacy_id IS NOT NULL AND COALESCE(m.needs_onboarding, FALSE))
+)
+UPDATE services s
+   SET set_price       = r.new_price,
+       set_currency    = r.new_currency,
+       set_offer_price = NULL,
+       currency_prices = r.new_currency_prices
+  FROM rebased r
+ WHERE s.id = r.id;
+
+-- ── Legacy multi-currency mentors: put the base currency and the extra currencies where they belong
+-- These mentors priced each session individually in the old portal, sometimes in two currencies. The
+-- import kept every service's own currency and seeded the base from the highest session, so a mentor
+-- can hold a base in one currency and sessions in another. PPP then measures purchasing power against
+-- a currency the price is not written in.
+--
+-- Two distinct faults, fixed in order:
+--   1. The mentor has NO priced session in their base currency -> the BASE CURRENCY is the error.
+--      Move it to the currency of their highest-value session, compared via the EUR pivot so an INR
+--      face value cannot beat an AUD one. The rate itself is unchanged.
+--   2. The mentor DOES have sessions in their base currency -> those are right, and the odd-currency
+--      ones are an additional-currency price. Put the legacy amount into currency_prices (so buyers in
+--      that currency pay EXACTLY what they pay today) and set the base price in the base currency.
+--
+-- Scope is deliberately only migrated mentors who have not yet been through first-login onboarding:
+-- everyone else either chose their base or is covered by the re-anchor block.
+-- Both statements are no-ops once clean, so the script stays safe to re-run.
+
+-- 1. base currency follows the mentor's own priciest session
+WITH ranked AS (
+  SELECT m.id AS mentor_id,
+         UPPER(s.set_currency) AS ccy,
+         ROW_NUMBER() OVER (
+           PARTITION BY m.id
+           ORDER BY (s.set_price * 60.0 / s.duration) / COALESCE(fx.rate, 1) DESC
+         ) AS rn
+    FROM mentors m
+    JOIN services s  ON s.mentor_id = m.id
+    LEFT JOIN fx_rates fx ON fx.base = 'EUR' AND fx.quote = UPPER(s.set_currency)
+   WHERE m.legacy_id IS NOT NULL
+     AND COALESCE(m.needs_onboarding, FALSE)
+     AND COALESCE(s.set_price, 0) > 0
+     AND COALESCE(s.duration, 0)  > 0
+     AND NOT EXISTS (
+           SELECT 1 FROM services s2
+            WHERE s2.mentor_id = m.id
+              AND COALESCE(s2.set_price, 0) > 0
+              AND UPPER(s2.set_currency) = UPPER(COALESCE(m.currency, ''))
+         )
+)
+UPDATE mentors m
+   SET currency = r.ccy
+  FROM ranked r
+ WHERE m.id = r.mentor_id AND r.rn = 1
+   AND UPPER(COALESCE(m.currency, '')) <> r.ccy;
+
+-- 2. the odd-currency sessions become additional-currency prices against the base
+WITH moved AS (
+  SELECT s.id,
+         ROUND(m.hourly_rate * s.duration / 60.0, 2) AS base_price,
+         UPPER(m.currency)                           AS base_ccy,
+         COALESCE((SELECT jsonb_agg(e)
+                     FROM jsonb_array_elements(COALESCE(s.currency_prices, '[]'::jsonb)) e
+                    WHERE UPPER(e->>'currency') <> UPPER(s.set_currency)), '[]'::jsonb)
+           || jsonb_build_array(jsonb_build_object(
+                'currency',   UPPER(s.set_currency),
+                'base_price', s.set_price))          AS new_cprices
+    FROM services s
+    JOIN mentors  m ON m.id = s.mentor_id
+   WHERE m.legacy_id IS NOT NULL
+     AND COALESCE(m.needs_onboarding, FALSE)
+     AND UPPER(COALESCE(s.set_currency, '')) <> UPPER(COALESCE(m.currency, ''))
+     AND COALESCE(m.currency, '')   <> ''
+     AND COALESCE(m.hourly_rate, 0) > 0
+     AND COALESCE(s.set_price, 0)   > 0
+     AND COALESCE(s.duration, 0)    > 0
+)
+UPDATE services s
+   SET set_price       = mv.base_price,
+       set_currency    = mv.base_ccy,
+       set_offer_price = NULL,
+       currency_prices = mv.new_cprices
+  FROM moved mv
+ WHERE s.id = mv.id;
+
+-- ── Single writer for the base-currency invariant ─────────────────────────────────────────────
+-- reprice_mentor_services() is called from five different places in the backend and ONE of them (the
+-- changes_requested/rejected profile edit) did not call it, which is how a mentor ended up with a
+-- base of INR 3700/hr while every one of his sessions still said AUD 37.50. Relying on each write
+-- path to remember is what failed, so derive the service rows from the mentor row here instead: any
+-- change to currency / hourly_rate / currency_rates reaches services in the SAME transaction, no
+-- matter who wrote it (backend, admin panel, or a hand-run UPDATE in the SQL editor).
+CREATE OR REPLACE FUNCTION trg_reprice_services_fn() RETURNS TRIGGER
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.currency       IS DISTINCT FROM OLD.currency
+  OR NEW.hourly_rate    IS DISTINCT FROM OLD.hourly_rate
+  OR NEW.currency_rates IS DISTINCT FROM OLD.currency_rates THEN
+    -- Same guards as the backfill above: nothing to derive from without a positive rate, and a
+    -- migrated mentor still carrying the seeded base has not chosen it (their real per-session
+    -- prices are the legacy ones, and they stay untouched until first-login onboarding).
+    IF COALESCE(NEW.hourly_rate, 0) > 0
+       AND COALESCE(NEW.currency, '') <> ''
+       AND NOT (NEW.legacy_id IS NOT NULL AND COALESCE(NEW.needs_onboarding, FALSE)) THEN
+      UPDATE services s
+         SET set_price       = ROUND(NEW.hourly_rate * s.duration / 60.0, 2),
+             set_currency    = UPPER(NEW.currency),
+             set_offer_price = NULL,
+             currency_prices = COALESCE((
+               SELECT jsonb_agg(jsonb_build_object(
+                        'currency',   UPPER(r->>'currency'),
+                        'base_price', ROUND((r->>'hourly_rate')::numeric * s.duration / 60.0, 2)))
+                 FROM jsonb_array_elements(COALESCE(NEW.currency_rates, '[]'::jsonb)) r
+                WHERE UPPER(COALESCE(r->>'currency','')) <> UPPER(NEW.currency)
+                  AND COALESCE(NULLIF(r->>'hourly_rate','')::numeric, 0) > 0
+             ), '[]'::jsonb)
+       WHERE s.mentor_id = NEW.id
+         AND COALESCE(s.set_price, 0) > 0    -- free intro stays free
+         AND COALESCE(s.duration, 0)  > 0;
+    END IF;
+  END IF;
+  RETURN NEW;
+END; $$;
+
+DROP TRIGGER IF EXISTS trg_reprice_services ON mentors;
+CREATE TRIGGER trg_reprice_services AFTER UPDATE ON mentors
+  FOR EACH ROW EXECUTE FUNCTION trg_reprice_services_fn();
 
 -- Yokesh is our end-to-end test mentor. Force him back into the first-login flow on every setup run,
 -- clearing any rate a previous test set, so the onboarding popup is always reproducible for him. Also
@@ -3323,14 +3565,15 @@ DECLARE
   v_provider        CONSTANT TEXT := 'frankfurter';
   v_mentor_id UUID; v_set NUMERIC; v_set_offer NUMERIC; v_ment_ccy TEXT; v_is_ppp BOOLEAN;
   v_prices JSONB; v_pfee_pct NUMERIC; v_tax_pct NUMERIC; v_comm_pct NUMERIC; v_mentor_country TEXT;
+  v_base_ccy TEXT;   -- the MENTOR's base currency: what PPP anchors to, distinct from the service's
   v_cust_ccy TEXT; v_ppp NUMERIC := 1; v_source TEXT; v_explicit NUMERIC; v_base NUMERIC; v_mentor_amt NUMERIC;
   v_fx_mc NUMERIC; v_fx_c_inr NUMERIC; v_fx_m_inr NUMERIC;
   v_gross NUMERIC; v_platform_fee NUMERIC; v_commission NUMERIC; v_subtotal NUMERIC;
   v_tax_amt NUMERIC; v_net_cust NUMERIC; v_net_mentor NUMERIC; v_mentor_base NUMERIC;
 BEGIN
   SELECT s.mentor_id, s.set_price, s.set_offer_price, COALESCE(s.set_currency, 'USD'), s.is_ppp,
-         COALESCE(s.currency_prices, '[]'::jsonb), m.country
-    INTO v_mentor_id, v_set, v_set_offer, v_ment_ccy, v_is_ppp, v_prices, v_mentor_country
+         COALESCE(s.currency_prices, '[]'::jsonb), m.country, UPPER(COALESCE(m.currency, s.set_currency, 'USD'))
+    INTO v_mentor_id, v_set, v_set_offer, v_ment_ccy, v_is_ppp, v_prices, v_mentor_country, v_base_ccy
   FROM services s JOIN mentors m ON m.id = s.mentor_id
   WHERE s.id = p_service_id AND s.is_active AND s.status = 'approved';
   IF v_set IS NULL THEN RAISE EXCEPTION 'Service not available' USING errcode = 'P0001'; END IF;
@@ -3365,7 +3608,7 @@ BEGIN
   ELSE
     -- Fallback: localise the primary rate to the customer currency (+ PPP).
     v_source     := 'converted';
-    v_ppp        := CASE WHEN v_is_ppp THEN ppp_relative(p_customer_country, currency_anchor_country(v_ment_ccy)) ELSE 1 END;
+    v_ppp        := CASE WHEN v_is_ppp THEN ppp_relative(p_customer_country, currency_anchor_country(v_base_ccy)) ELSE 1 END;
     v_fx_mc      := get_fx_or_null(v_ment_ccy, v_cust_ccy);   -- SOFT (see fallback below)
     v_base       := COALESCE(v_set_offer, v_set);
     IF v_fx_mc IS NULL THEN
@@ -3474,13 +3717,13 @@ RETURNS TABLE(key TEXT, you NUMERIC, you0 NUMERIC, customer_currency TEXT, fx_ok
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public AS $$
 DECLARE
   sid UUID; v_mentor_id UUID; v_set NUMERIC; v_set_offer NUMERIC; v_ment_ccy TEXT; v_is_ppp BOOLEAN;
-  v_prices JSONB; v_mentor_country TEXT; v_cust TEXT; v_explicit NUMERIC; v_ppp NUMERIC; v_fx NUMERIC; v_base NUMERIC;
+  v_prices JSONB; v_mentor_country TEXT; v_base_ccy TEXT; v_cust TEXT; v_explicit NUMERIC; v_ppp NUMERIC; v_fx NUMERIC; v_base NUMERIC;
 BEGIN
   v_cust := currency_for_country(p_customer_country);
   FOREACH sid IN ARRAY COALESCE(p_service_ids, ARRAY[]::UUID[]) LOOP
     SELECT s.mentor_id, s.set_price, s.set_offer_price, COALESCE(s.set_currency, 'USD'), s.is_ppp,
-           COALESCE(s.currency_prices, '[]'::jsonb), m.country
-      INTO v_mentor_id, v_set, v_set_offer, v_ment_ccy, v_is_ppp, v_prices, v_mentor_country
+           COALESCE(s.currency_prices, '[]'::jsonb), m.country, UPPER(COALESCE(m.currency, s.set_currency, 'USD'))
+      INTO v_mentor_id, v_set, v_set_offer, v_ment_ccy, v_is_ppp, v_prices, v_mentor_country, v_base_ccy
     FROM services s JOIN mentors m ON m.id = s.mentor_id
     WHERE s.id = sid AND s.is_active AND s.status = 'approved';
     IF v_set IS NULL THEN CONTINUE; END IF;   -- unknown/inactive/unapproved: skip (card falls back)
@@ -3502,7 +3745,7 @@ BEGIN
       customer_currency := v_cust; fx_ok := true;
     ELSE
       v_base := COALESCE(v_set_offer, v_set);
-      v_ppp  := CASE WHEN v_is_ppp THEN ppp_relative(p_customer_country, currency_anchor_country(v_ment_ccy)) ELSE 1 END;
+      v_ppp  := CASE WHEN v_is_ppp THEN ppp_relative(p_customer_country, currency_anchor_country(v_base_ccy)) ELSE 1 END;
       v_fx   := get_fx_or_null(v_ment_ccy, v_cust);   -- SOFT (checkout uses the strict get_fx)
       IF v_fx IS NULL THEN
         key := sid::text; you0 := ROUND(v_base, 2); you := ROUND(v_base * v_ppp, 2);
@@ -4090,6 +4333,75 @@ BEGIN
 END;
 $$;
 REVOKE ALL ON FUNCTION expire_stale_holds() FROM PUBLIC, anon, authenticated;
+
+-- ── Chat history: append + retention (FEAT-033) ──────────────────────────────
+-- The full conversation already lives in LangGraph's checkpoint tables, but those hold serialized
+-- state keyed for resuming a thread. They cannot answer "which countries do people ask about", which
+-- is the entire reason for keeping chats. chat_messages is the queryable copy.
+--
+-- One function rather than two inserts and an update from the client: the message rows and the
+-- thread's counter must move together, or a failure between them leaves a count that disagrees with
+-- the rows it counts. message_count was previously read by the history list and never written, so it
+-- showed 0 on every thread.
+CREATE OR REPLACE FUNCTION append_chat_messages(p_thread_id UUID, p_messages JSONB)
+RETURNS INT LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_added INT;
+BEGIN
+  INSERT INTO chat_messages(thread_id, role, content)
+  SELECT p_thread_id, m->>'role', m->>'content'
+    FROM jsonb_array_elements(p_messages) m
+   WHERE m->>'content' IS NOT NULL AND m->>'content' <> ''
+     AND m->>'role' IN ('user','assistant');
+  GET DIAGNOSTICS v_added = ROW_COUNT;
+
+  UPDATE chat_threads
+     SET message_count = message_count + v_added,
+         last_message_at = NOW(),
+         updated_at = NOW()
+   WHERE id = p_thread_id;
+
+  RETURN v_added;
+END;
+$$;
+REVOKE ALL ON FUNCTION append_chat_messages(UUID, JSONB) FROM PUBLIC, anon, authenticated;
+
+-- Retention. Chat contains what people tell us about their circumstances, so "keep it forever" is not
+-- a defensible answer under GDPR and is not worth the storage either.
+--
+-- Guest threads expire sooner on purpose. They have no owner, so if that person later asks us to
+-- delete their data we have no way to find it; a shorter window is the only control we have. An owned
+-- thread can be found and deleted on request, so it can be kept longer.
+--
+-- Checkpoints are pruned with the same sweep. They grow per turn forever, are excluded from backups,
+-- and a conversation nobody has touched in months does not need to be resumable.
+CREATE OR REPLACE FUNCTION prune_chat_history(p_guest_days INT DEFAULT 90, p_user_days INT DEFAULT 365)
+RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path = public AS $$
+DECLARE v_threads INT; v_msgs INT; v_ckpt INT := 0;
+BEGIN
+  WITH doomed AS (
+    SELECT id FROM chat_threads
+     WHERE (user_id IS NULL     AND last_message_at < NOW() - MAKE_INTERVAL(days => p_guest_days))
+        OR (user_id IS NOT NULL AND last_message_at < NOW() - MAKE_INTERVAL(days => p_user_days))
+  ), del_msg AS (
+    DELETE FROM chat_messages WHERE thread_id IN (SELECT id FROM doomed) RETURNING 1
+  ), del_thread AS (
+    DELETE FROM chat_threads WHERE id IN (SELECT id FROM doomed) RETURNING 1
+  )
+  SELECT (SELECT count(*) FROM del_msg), (SELECT count(*) FROM del_thread) INTO v_msgs, v_threads;
+
+  -- LangGraph keys checkpoints by thread_id as TEXT; a thread we just deleted can never be resumed.
+  BEGIN
+    DELETE FROM checkpoints
+     WHERE thread_id NOT IN (SELECT id::text FROM chat_threads);
+    GET DIAGNOSTICS v_ckpt = ROW_COUNT;
+  EXCEPTION WHEN undefined_table OR undefined_column THEN
+    v_ckpt := 0;   -- checkpointer not initialised yet on a fresh database
+  END;
+
+  RETURN jsonb_build_object('threads', v_threads, 'messages', v_msgs, 'checkpoints', v_ckpt);
+END;
+$$;
+REVOKE ALL ON FUNCTION prune_chat_history(INT, INT) FROM PUBLIC, anon, authenticated;
 
 -- ── Consent records (BUG-143) ────────────────────────────────────────────────
 -- GDPR Art 7(1) requires consent to be DEMONSTRABLE, so a ticked box that leaves no trace does not
@@ -4851,7 +5163,7 @@ RETURNS TABLE (
     b.id, b.status::TEXT, b.slot_time, b.slot_end, b.meeting_url,
     s.title, s.duration,
     m.display_name, m.slug,
-    COALESCE(m.app_timezone, 'UTC'),
+    COALESCE(NULLIF(m.app_timezone, 'UTC'), m.timezone, 'UTC'),   -- BUG-091
     m.country,
     COALESCE(b.attendee_timezone, p.timezone, 'UTC'),
     b.reschedule_count, b.no_show_by, booking_deadline_state(b.slot_time, COALESCE(m.cancel_notice_hours, 24)),

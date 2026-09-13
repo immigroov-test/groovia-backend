@@ -3,7 +3,7 @@ import re
 from typing import Any, Optional
 from urllib.parse import urlparse
 
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Request
 from pydantic import BaseModel, field_validator, model_validator
 
 import config
@@ -281,7 +281,12 @@ class MentorSignupBody(BaseModel):
     years_professional_experience: Optional[int] = None
     professional_domains: list[str] = []
     specializations: list[str] = []
-    agreed_to_mentor_terms: bool = False
+    # Two independent checkboxes per the Consent Flow Spec: the commercial bundle
+    # (Mentor Agreement + Commission & Payout Terms + Code of Conduct) and the Data
+    # Processing Addendum, which regulators expect as a distinct consent - a
+    # controller/processor instrument, not something folded into the general agreement.
+    agreed_to_mentor_bundle: bool = False
+    agreed_to_mentor_dpa: bool = False
     hourly_rate: Optional[float] = None
     currency: str = "USD"
     currency_rates: list[dict] = []      # additional-currency base rates [{currency, hourly_rate}]
@@ -322,15 +327,18 @@ def _derive_expertise(country: Optional[str], extra_codes: list[str] | None = No
 
 
 @router.post("/signup")
-def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, user: AuthUser = Depends(get_current_user)):
+def mentor_signup(request: Request, body: MentorSignupBody, background_tasks: BackgroundTasks,
+                   user: AuthUser = Depends(get_current_user)):
     """Self-service mentor signup: creates a new mentor row, pending admin review."""
     if db.get_mentor_by_profile_id(user.id):
         raise HTTPException(status_code=409, detail="This account is already linked to a mentor profile")
     display_name = body.display_name.strip()
     if not display_name:
         raise HTTPException(status_code=400, detail="Display name is required")
-    if not body.agreed_to_mentor_terms:
-        raise HTTPException(status_code=400, detail="You must accept the mentor agreement")
+    if not body.agreed_to_mentor_bundle:
+        raise HTTPException(status_code=400, detail="You must accept the Mentor Agreement, Commission & Payout Terms, and Code of Conduct")
+    if not body.agreed_to_mentor_dpa:
+        raise HTTPException(status_code=400, detail="You must accept the Mentor Data Processing Addendum")
     if not body.languages:
         raise HTTPException(status_code=400, detail="Select at least one language")
     if not (body.country or "").strip():
@@ -394,6 +402,24 @@ def mentor_signup(body: MentorSignupBody, background_tasks: BackgroundTasks, use
         smart_pricing=body.smart_pricing,
     )
     mentor_id = result["id"]
+    # Consent Flow Spec Section 6: two checkboxes, two consent records - the bundle
+    # (Agreement + Commission & Payout + Code of Conduct) and the DPA are logged
+    # separately, never combined into one row, since regulators expect the DPA's
+    # controller/processor consent to be distinct from the general agreement. Both
+    # writes happen only after body validation above already required both flags to be
+    # true, and are best-effort like the audit log they parallel: a failed write here
+    # must not undo a mentor signup that otherwise fully succeeded.
+    ip = request.client.host if request.client else None
+    ua = request.headers.get("user-agent")
+    try:
+        db.record_legal_consent(
+            ["mentor-agreement", "mentor-commission-payout", "mentor-code-of-conduct"],
+            user_id=user.id, consent_method="checkbox_mentor_onboarding_1", ip=ip, user_agent=ua)
+        db.record_legal_consent(
+            ["mentor-data-processing"],
+            user_id=user.id, consent_method="checkbox_mentor_onboarding_2", ip=ip, user_agent=ua)
+    except Exception:
+        logger.exception("Mentor onboarding consent log failed for profile %s", user.id)
     # BUG-012: these inserts used to fail silently (logged server-side only), so a
     # transient error left a mentor with a "successful" signup but an empty
     # Availability/Sessions tab and no idea why. Collect what failed and surface it
@@ -712,6 +738,11 @@ def update_profile(body: ProfileUpdateBody, background_tasks: BackgroundTasks, u
         fields["city"] = body.city.strip() or None
     if body.timezone is not None:
         fields["timezone"] = body.timezone
+        # BUG-091: keep the pair in step. app_timezone is the column the availability dashboard,
+        # the slot generator and the booking emails read, so a mentor who set their timezone here
+        # saw nothing change - the banner telling them to "set your timezone on the Profile tab"
+        # was pointing at a field that fed a different column.
+        fields["app_timezone"] = body.timezone
     if body.languages is not None:
         fields["languages"] = body.languages
     if body.social_links is not None:
@@ -822,16 +853,67 @@ def set_availability(body: AvailabilityBody, user: AuthUser = Depends(get_curren
     return {"saved": len(inserted), "session_duration_minutes": body.session_duration_minutes}
 
 
+class DeactivateBody(BaseModel):
+    """FEAT-020. `delete=False` pauses the profile indefinitely; `delete=True` also starts the
+    grace clock, after which the personal fields are scrubbed."""
+    delete: bool = False
+
+
+@router.get("/me/deactivation")
+def deactivation_status(user: AuthUser = Depends(get_current_user)):
+    """What the mentor needs to decide, and to see afterwards: which self-service state they are in,
+    when the grace window runs out, and how many booked sessions they are still expected to attend.
+
+    Those sessions are honoured rather than cancelled when a profile is hidden, so the number is
+    shown BEFORE they confirm - otherwise the mentor has no way to know they still owe them."""
+    mentor = db.get_mentor_by_profile_id(user.id)
+    if not mentor:
+        raise HTTPException(status_code=404, detail="No mentor profile for this account")
+    return {
+        "status": mentor.get("status"),
+        "deactivated_at": mentor.get("deactivated_at"),
+        "purge_due_at": mentor.get("purge_due_at"),
+        "anonymized_at": mentor.get("anonymized_at"),
+        "grace_days": db.DELETION_GRACE_DAYS,
+        "upcoming_sessions": db.count_upcoming_mentor_sessions(mentor["id"]),
+    }
+
+
 @router.post("/me/deactivate")
-def deactivate_mentor(user: AuthUser = Depends(get_current_user)):
-    """Self-service pause - sets mentor status to 'suspended', hiding them from browse."""
+def deactivate_mentor(body: DeactivateBody, user: AuthUser = Depends(get_current_user)):
+    """Hide the mentor's own profile.
+
+    Deliberately NOT the admin 'suspended' status, which this used to set: suspended is an admin
+    action the mentor cannot undo, and the hub renders it as a dead end telling them to contact
+    support - so a mentor who paused their own profile was locked out of restoring it.
+
+    Confirmed future sessions are left alone. The profile stops being discoverable and cannot take
+    new bookings (is_active follows status), but commitments already made to mentees stand."""
     mentor = db.get_mentor_by_profile_id(user.id)
     if not mentor:
         raise HTTPException(status_code=404, detail="No mentor profile for this account")
     if mentor["status"] != "approved":
-        raise HTTPException(status_code=400, detail="Only approved mentors can deactivate their profile")
+        raise HTTPException(status_code=400, detail="Only an approved profile can be deactivated")
     try:
-        db.set_mentor_status(mentor["id"], "suspended")
-    except ValueError:
-        raise HTTPException(status_code=404, detail="Mentor not found")
-    return {"deactivated": True}
+        row = db.set_mentor_self_status(mentor["id"], delete=body.delete)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    return {
+        "status": row.get("status"),
+        "purge_due_at": row.get("purge_due_at"),
+        "grace_days": db.DELETION_GRACE_DAYS,
+    }
+
+
+@router.post("/me/reactivate")
+def reactivate_mentor(user: AuthUser = Depends(get_current_user)):
+    """Restore a profile the mentor hid themselves. Intentionally reachable without require_mentor,
+    which blocks the very states this endpoint exists to undo."""
+    mentor = db.get_mentor_by_profile_id(user.id)
+    if not mentor:
+        raise HTTPException(status_code=404, detail="No mentor profile for this account")
+    try:
+        row = db.reactivate_mentor(mentor["id"])
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {"status": row.get("status")}

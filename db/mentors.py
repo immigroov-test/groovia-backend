@@ -1,7 +1,7 @@
 import logging
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 
 from supabase import Client, create_client
@@ -445,7 +445,8 @@ def link_mentor_by_email(profile_id: str, email: str) -> Optional[dict[str, Any]
             return None
 
         _supabase.table("mentors").update({"profile_id": profile_id}).eq("id", mentor["id"]).execute()
-        _supabase.table("profiles").update({"role": "mentor"}).eq("id", profile_id).execute()
+        if mentor.get("status") == "approved":
+            _supabase.table("profiles").update({"role": "mentor"}).eq("id", profile_id).execute()
         mentor["profile_id"] = profile_id
         logger.info("Linked pre-approved mentor %s to profile %s by email match", mentor["id"], profile_id)
         return mentor
@@ -514,6 +515,11 @@ def create_mentor_signup(
         "display_name": display_name,
         "headline": headline,
         "timezone": timezone_name,
+        # BUG-091: write BOTH. The availability dashboard, the slot generator and the booking
+        # emails all read app_timezone, which defaults to 'UTC' - so writing only `timezone` left
+        # every self-signup mentor with their real zone in one column and a bare 'UTC' in the one
+        # that actually gets used.
+        "app_timezone": timezone_name,
         "status": "pending_review",
         "submission_count": 1,
         "expertise_country_codes": expertise_country_codes or [],
@@ -543,21 +549,15 @@ def create_mentor_signup(
         raise RuntimeError("Mentor insert returned no data")
     mentor_row = res.data[0]
 
-    try:
-        _supabase.table("profiles").update({"role": "mentor"}).eq("id", profile_id).execute()
-    except Exception:
-        _supabase.table("mentors").delete().eq("id", mentor_row["id"]).execute()
-        logger.exception("Profile role update failed; mentor row rolled back for profile %s", profile_id)
-        raise RuntimeError("Failed to update profile role")
+    # The role is granted at approval (set_mentor_status), not at application. Until then this
+    # is a customer with an application under review, and the customer side of their account
+    # keeps working.
 
-    try:
-        _supabase.table("consent_log").insert({
-            "user_id": profile_id,
-            "consent_type": "mentor_agreement",
-            "version": "v1",
-        }).execute()
-    except Exception:
-        logger.warning("Consent log insert failed for profile %s (non-fatal)", profile_id)
+    # The real, version-aware consent record (Mentor Agreement + Commission & Payout +
+    # Code of Conduct bundle, and the DPA separately) is written by the caller via
+    # db.record_legal_consent immediately after this function returns - this used to
+    # write a hardcoded {"version": "v1"} row here, never tied to an actual published
+    # document, which is why that write has moved out to the real mechanism instead.
 
     return mentor_row
 
@@ -580,7 +580,9 @@ _CRITICAL_MENTOR_FIELDS = {
 _EDITABLE_PROFILE_FIELDS = {
     "display_name", "headline", "bio", "photo_url",
     "phone", "city", "country", "home_country_code", "served_countries",
-    "social_links", "public_notes", "languages", "timezone",
+    # BUG-091: app_timezone is not client-supplied - the profile handler mirrors `timezone` into it
+    # so the two columns cannot drift. It is listed here only so that write survives this filter.
+    "social_links", "public_notes", "languages", "timezone", "app_timezone",
     "expertise_country_codes", "expertise_categories", "years_lived_experience",
     "years_professional_experience", "professional_domains", "specializations",
     "hourly_rate", "currency", "currency_rates", "smart_pricing",
@@ -638,6 +640,13 @@ def save_mentor_profile_edit(mentor_id: str, fields: dict[str, Any]) -> dict[str
     if not res.data:
         raise ValueError(f"Mentor {mentor_id!r} not found")
     if status != "approved":   # changes_requested/rejected branch writes straight to the live row
+        if any(k in safe for k in _RATE_FIELDS):
+            # BUG-079 again: this branch writes hourly_rate/currency to the LIVE row, so it owes the
+            # same reprice every other live-write path does (save_mentor_profile_live,
+            # apply_pending_changes, signup). Without it the mentor row moves to the new currency
+            # while every service keeps the old one, breaking the set_currency == mentors.currency
+            # invariant and leaving PPP anchored to a currency the mentor no longer prices in.
+            reprice_mentor_services(mentor_id)
         _sync_services_ppp(mentor_id, safe)
     return res.data[0]
 
@@ -918,7 +927,13 @@ def set_mentor_status(mentor_id: str, status: str, reason: Optional[str] = None)
     )
     if not res.data:
         raise ValueError(f"Mentor {mentor_id!r} not found")
-    return res.data[0]
+    row = res.data[0]
+    # Approval is what makes someone a mentor. Reinstating a suspended mentor passes through
+    # here too, which is correct: they were approved once already. Admins keep their role.
+    if status == "approved" and row.get("profile_id"):
+        (_supabase.table("profiles").update({"role": "mentor"})
+         .eq("id", row["profile_id"]).neq("role", "admin").execute())
+    return row
 
 
 def get_profile_id_by_email(email: str) -> Optional[str]:
@@ -996,6 +1011,18 @@ def claim_welcome_email(profile_id: str) -> bool:
     except Exception:
         logger.exception("claim_welcome_email failed profile=%s", profile_id)
         return False
+
+
+def get_profile(profile_id: str) -> Optional[dict[str, Any]]:
+    """The caller's own profile, the fields a form would prefill from."""
+    res = (
+        _supabase.table("profiles")
+        .select("id, email, role, full_name, display_name, photo_url, phone, country_code, city, timezone")
+        .eq("id", profile_id)
+        .limit(1)
+        .execute()
+    )
+    return res.data[0] if res.data else None
 
 
 def get_profile_role(profile_id: str) -> Optional[str]:
@@ -1418,7 +1445,9 @@ def list_all_bookings(
     try:
         query = (
             _supabase.table("bookings")
-            .select("id, status, slot_time, candidate_name, candidate_email, "
+            # BUG-098: `reference` is the human-readable booking id (IMG-00001) the admin table
+            # leads with; bookings.id stays the key but is unreadable and unsearchable by hand.
+            .select("id, reference, status, slot_time, candidate_name, candidate_email, "
                     "reschedule_count, no_show_by, created_at, mentor_id")
             .order("created_at", desc=True)
             .limit(limit)
@@ -1430,7 +1459,10 @@ def list_all_bookings(
         if q:
             safe = re.sub(r"[(),%*]", "", q).strip()
             if safe:
-                ors = [f"candidate_email.ilike.*{safe}*", f"candidate_name.ilike.*{safe}*"]
+                # BUG-098: the booking reference is the thing a support email actually quotes, so
+                # it has to be searchable alongside the names.
+                ors = [f"candidate_email.ilike.*{safe}*", f"candidate_name.ilike.*{safe}*",
+                       f"reference.ilike.*{safe}*"]
                 # Also match by mentor name: resolve matching mentor ids, then OR them into the filter.
                 try:
                     mm = _supabase.table("mentors").select("id").ilike("display_name", f"*{safe}*").execute().data or []
@@ -1559,17 +1591,54 @@ def get_booking_admin_detail(booking_id: str) -> Optional[dict[str, Any]]:
         try:
             pr = (_supabase.table("booking_pricing")
                   .select("customer_currency, mentor_currency, gross_customer, fee_pct, "
-                          "fee_amount, net_customer, net_mentor")
+                          "fee_amount, net_customer, net_mentor, subtotal, platform_fee_pct, "
+                          "platform_fee, tax_pct, tax_amount, commission_pct, commission_amount")
                   .eq("booking_id", booking_id).limit(1).execute())
             b["pricing"] = pr.data[0] if pr.data else None
         except Exception:
             logger.exception("admin detail: pricing failed booking=%s", booking_id)
             b["pricing"] = None
 
+        # Who referred this booking and what it changed. Before the session completes only the
+        # attribution is known; the split and the promoter's cut appear on the ledger row after.
+        b["referral"] = None
+        try:
+            if b.get("referral_affiliate_id"):
+                a = (_supabase.table("affiliates").select("id, type, display_name, email, mentor_id, status")
+                     .eq("id", b["referral_affiliate_id"]).limit(1).execute()).data
+                a = a[0] if a else {}
+                name = a.get("display_name")
+                if not name and a.get("mentor_id"):
+                    mm = _supabase.table("mentors").select("display_name").eq("id", a["mentor_id"]).limit(1).execute()
+                    name = mm.data[0].get("display_name") if mm.data else None
+                led = (_supabase.table("commission_ledger")
+                       .select("id, status, split_snapshot, commission_amount, commission_amount_inr, customer_currency")
+                       .eq("booking_id", booking_id).limit(1).execute()).data
+                b["referral"] = {
+                    "affiliate_id": a.get("id"),
+                    "affiliate_name": name or a.get("email") or "Affiliate",
+                    "affiliate_type": a.get("type"),
+                    "own_session": bool(a.get("mentor_id")) and a.get("mentor_id") == b.get("mentor_id"),
+                    "code": b.get("referral_code"),
+                    "discount_pct": b.get("referral_discount_applied_pct"),
+                    "ledger": led[0] if led else None,
+                }
+        except Exception:
+            logger.exception("admin detail: referral failed booking=%s", booking_id)
+
         return b
     except Exception:
         logger.exception("get_booking_admin_detail failed")
         return None
+
+
+def set_booking_commission(booking_id: str, pct: float, actor: str = "admin") -> dict[str, Any]:
+    """Admin override of the mentor commission on ONE booking. Only the mentor's side of the
+    split moves: what the customer paid is already charged and is not revised here."""
+    res = _supabase.rpc("admin_set_booking_commission", {
+        "p_booking_id": booking_id, "p_pct": pct, "p_actor": actor,
+    }).execute()
+    return res.data or {}
 
 
 def list_mentors_with_strikes() -> list[dict[str, Any]]:
@@ -1620,3 +1689,137 @@ def upsert_ai_event(
     except Exception:
         logger.exception("Failed to log ai_event (thread=%s)", thread_id)
 
+
+
+# ── FEAT-020: mentor-initiated deactivation / deletion ────────────────────────
+# Two self-service states, both distinct from the admin-imposed 'suspended':
+#   'deactivated'      - a pause. Hidden from browse, reactivate whenever, nothing is deleted.
+#   'deletion_pending' - a leave. Hidden, reactivate within the grace window, then scrubbed.
+# Neither ever deletes the mentors ROW. bookings.mentor_id is ON DELETE RESTRICT and mentor_payouts
+# cascades, so a row delete would fail outright for any mentor who has traded, or take the financial
+# history with it. The purge below clears the personal columns and leaves the ledger alone.
+
+DELETION_GRACE_DAYS = 90
+
+# Cleared when a deletion is purged. Structural/aggregate columns (ratings, counts, currency) and
+# everything on bookings/payments/payouts are deliberately NOT here - those are business records,
+# not personal data, and the ledger has to survive.
+_PURGE_NULL_FIELDS = (
+    "headline", "bio", "photo_url", "phone", "email", "city", "home_country_code",
+    "public_notes", "booking_url", "legacy_data",
+)
+
+
+def set_mentor_self_status(mentor_id: str, *, delete: bool) -> dict[str, Any]:
+    """Mentor hides their own profile. `delete=True` starts the grace clock; a plain deactivation
+    has no expiry (purge_due_at stays NULL) so it is never picked up by the purge job."""
+    now = datetime.now(timezone.utc)
+    payload: dict[str, Any] = {
+        "status": "deletion_pending" if delete else "deactivated",
+        # The trigger sets this too; written here as well so a DB without the trigger still hides them.
+        "is_active": False,
+        "deactivated_at": now.isoformat(),
+        "purge_due_at": (now + timedelta(days=DELETION_GRACE_DAYS)).isoformat() if delete else None,
+        "updated_at": now.isoformat(),
+    }
+    res = _supabase.table("mentors").update(payload).eq("id", mentor_id).execute()
+    if not res.data:
+        raise ValueError(f"Mentor {mentor_id!r} not found")
+    return res.data[0]
+
+
+def reactivate_mentor(mentor_id: str) -> dict[str, Any]:
+    """Undo a self-deactivation or a pending deletion, back to a live profile. Refuses once the
+    scrub has run: there is no profile left to restore at that point, only an empty shell."""
+    cur = (_supabase.table("mentors")
+           .select("status, anonymized_at").eq("id", mentor_id).limit(1).execute())
+    if not cur.data:
+        raise ValueError(f"Mentor {mentor_id!r} not found")
+    row = cur.data[0]
+    if row.get("anonymized_at"):
+        raise ValueError("This profile has already been deleted and cannot be restored")
+    if row.get("status") not in ("deactivated", "deletion_pending"):
+        raise ValueError("This profile is not deactivated")
+    now = datetime.now(timezone.utc)
+    res = _supabase.table("mentors").update({
+        "status": "approved",
+        "is_active": True,
+        "deactivated_at": None,
+        "purge_due_at": None,
+        "updated_at": now.isoformat(),
+    }).eq("id", mentor_id).execute()
+    if not res.data:
+        raise ValueError(f"Mentor {mentor_id!r} not found")
+    return res.data[0]
+
+
+def count_upcoming_mentor_sessions(mentor_id: str) -> int:
+    """Confirmed sessions still ahead of the mentor. Shown before they deactivate: those bookings
+    are honoured rather than cancelled, so they need to know they are still expected to turn up."""
+    try:
+        res = (_supabase.table("bookings")
+               .select("id", count="exact")
+               .eq("mentor_id", mentor_id)
+               .in_("status", ["confirmed", "rescheduled"])
+               .gte("slot_time", datetime.now(timezone.utc).isoformat())
+               .execute())
+        return res.count or 0
+    except Exception:
+        logger.exception("count_upcoming_mentor_sessions failed mentor=%s", mentor_id)
+        return 0
+
+
+def purge_due_mentor_deletions(limit: int = 50) -> int:
+    """Scrub mentors whose grace window has run out. Returns how many were scrubbed.
+
+    Idempotent by anonymized_at: a row is only picked up while that is NULL, and it is stamped as
+    part of the same update, so a repeated or overlapping tick cannot scrub twice. Each mentor is
+    handled in its own try/except - one bad row must not stop the rest."""
+    try:
+        due = (_supabase.table("mentors")
+               .select("id, slug")
+               .eq("status", "deletion_pending")
+               .lte("purge_due_at", datetime.now(timezone.utc).isoformat())
+               .is_("anonymized_at", "null")
+               .limit(limit)
+               .execute()).data or []
+    except Exception:
+        logger.exception("purge_due_mentor_deletions: could not list due mentors")
+        return 0
+
+    purged = 0
+    for row in due:
+        mentor_id = row["id"]
+        try:
+            now = datetime.now(timezone.utc)
+            payload: dict[str, Any] = {k: None for k in _PURGE_NULL_FIELDS}
+            payload.update({
+                "display_name": "Former mentor",
+                # The slug is part of a public URL and usually carries their real name, so it is
+                # replaced rather than blanked - it is NOT NULL and has to stay unique.
+                "slug": f"former-mentor-{uuid.uuid4().hex[:12]}",
+                "social_links": [],
+                # Unlink the auth account: without this, link_mentor_by_email would happily
+                # reattach this shell to them at the next sign-in.
+                "profile_id": None,
+                "is_active": False,
+                "anonymized_at": now.isoformat(),
+                "updated_at": now.isoformat(),
+            })
+            _supabase.table("mentors").update(payload).eq("id", mentor_id).execute()
+            # Payout details are personal data with no reason to outlive the profile. The booking
+            # and payment rows that reference past payouts are untouched.
+            try:
+                _supabase.table("mentor_bank_accounts").delete().eq("mentor_id", mentor_id).execute()
+            except Exception:
+                logger.exception("purge: bank wipe failed mentor=%s", mentor_id)
+            # Nothing should remain bookable under a purged profile.
+            try:
+                _supabase.table("services").update({"is_active": False}).eq("mentor_id", mentor_id).execute()
+            except Exception:
+                logger.exception("purge: service deactivation failed mentor=%s", mentor_id)
+            purged += 1
+            logger.info("purged mentor profile %s", mentor_id)
+        except Exception:
+            logger.exception("purge_due_mentor_deletions: failed mentor=%s", mentor_id)
+    return purged

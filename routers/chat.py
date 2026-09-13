@@ -124,19 +124,10 @@ async def chat_handler(
 
     resume_text = None
     if file:
-        if (ai_consent or "").strip().lower() not in ("1", "true", "yes", "on"):
-            raise HTTPException(
-                status_code=400,
-                detail="Please agree to your resume being analysed before uploading it.",
-            )
-        db.record_consent(
-            kind="resume_ai_analysis",
-            user_id=user.id if user else None,
-            thread_id=thread_id,
-            policy_version=CONSENT_POLICY_VERSION,
-            ip=(request.client.host if request.client else None),
-            user_agent=request.headers.get("user-agent"),
-        )
+        # Reject a file on its own merits BEFORE asking about consent. A 50MB .exe is refused whether
+        # or not the box was ticked, and telling someone "please agree" about a file we were never
+        # going to accept is both wrong and confusing. It also stops us recording a consent for
+        # processing that never happens.
         file_bytes = await file.read()
         if len(file_bytes) > config.MAX_FILE_BYTES:
             raise HTTPException(
@@ -150,6 +141,22 @@ async def chat_handler(
                 status_code=415,
                 detail="Unsupported or mismatched file type. Upload PDF or DOCX only.",
             )
+
+        # BUG-143: consent gates the PROCESSING, so it sits immediately before the parse. Reading the
+        # bytes to measure and identify them is not analysis; extracting the text is.
+        if (ai_consent or "").strip().lower() not in ("1", "true", "yes", "on"):
+            raise HTTPException(
+                status_code=400,
+                detail="Please agree to your resume being analysed before uploading it.",
+            )
+        db.record_consent(
+            kind="resume_ai_analysis",
+            user_id=user.id if user else None,
+            thread_id=thread_id,
+            policy_version=CONSENT_POLICY_VERSION,
+            ip=(request.client.host if request.client else None),
+            user_agent=request.headers.get("user-agent"),
+        )
         resume_text = (
             parse_pdf_to_text(file_bytes) if file_type == "pdf" else parse_docx_to_text(file_bytes)
         )
@@ -221,6 +228,20 @@ async def chat_handler(
         track=final_state.get("track"),
         title_seed=title_seed,
     )
+
+    # FEAT-033: store the exchange in queryable form. The full state is already in LangGraph's
+    # checkpoints, but that is serialized state for resuming a thread and cannot answer "what do
+    # people ask about", which is the reason for keeping chats at all. Guests included: the row keys
+    # on thread_id, so when they later sign in, claim_thread makes the whole history theirs with one
+    # UPDATE. System markers like [SYSTEM_RESUME_UPLOADED] are not conversation and are skipped; the
+    # resume text itself never reaches here, it goes into agent state.
+    if not message.strip().startswith("[SYSTEM_"):
+        reply_text = _text(final_state["messages"][-1].content) if final_state.get("messages") else ""
+        await asyncio.to_thread(
+            db.append_chat_messages,
+            thread_id,
+            [{"role": "user", "content": message}, {"role": "assistant", "content": reply_text}],
+        )
 
     # Mirror compressed resume onto the user's profile, write-once (manual edits stay).
     if user and final_state.get("resume_processed") and final_state.get("resume_text"):

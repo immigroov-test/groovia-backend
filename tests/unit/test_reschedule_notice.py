@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 import db
+from fastapi import Request
 from core.auth import AuthUser
 from routers.booking import _deadline_state, booking_detail, reschedule_slots
 
@@ -154,6 +155,15 @@ def test_reschedule_slots_defaults_missing_mentor_config_to_24():
     assert result["deadline_state"] == "late"
 
 
+def _request():
+    """booking_detail now takes a Request (it resolves the caller's country for pricing).
+    Nothing this test asserts depends on it, so a bare ASGI scope is enough."""
+    return Request({
+        "type": "http", "method": "GET", "path": "/booking/x",
+        "headers": [], "query_string": b"", "client": ("127.0.0.1", 0),
+    })
+
+
 # ── 4. Cross-check: booking_detail() and reschedule_slots() must never disagree ──────────────────
 
 def _full_detail(cancel_notice_hours, hours_out):
@@ -180,7 +190,7 @@ def test_session_detail_and_reschedule_page_never_disagree_for_a_6_hour_mentor()
 
     with patch.object(db, "get_booking_full_detail", return_value=full_detail), \
          patch.object(db, "get_booking_answers", return_value=[]):
-        detail = booking_detail(BOOKING_ID, user=_user())
+        detail = booking_detail(BOOKING_ID, _request(), user=_user())
 
     with patch.object(db, "get_booking_reschedule_target", return_value=target), \
          patch.object(db, "get_active_mentor_proposal", return_value=None), \

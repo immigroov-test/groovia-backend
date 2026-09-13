@@ -24,6 +24,17 @@ class CheckEmailBody(BaseModel):
 
 class SyncBody(BaseModel):
     full_name: Optional[str] = None
+    # Only sent by the ONE-TIME signup-completion call (AuthModal's password-setup
+    # step) - never by the routine sync calls that fire on every login/tab-focus, so
+    # this endpoint being "run on every login" does not repeatedly re-record consent.
+    accepted_terms: Optional[bool] = None
+    marketing_consent: Optional[bool] = None
+    # Where the tick happened. Signing IN is a consent event in its own right: the box is on
+    # the first step of the modal and has to be ticked every time, so a returning user agrees
+    # to whatever is live at that moment. Recording it is what makes that agreement provable
+    # (GDPR Art. 7(1) puts the burden of demonstrating consent on the controller); a UI gate
+    # with no row behind it proves nothing.
+    consent_context: Optional[str] = None      # 'signup' | 'signin'
 
 
 @router.post("/check-email")
@@ -35,6 +46,16 @@ def check_email(body: CheckEmailBody):
     return db.get_email_account_status(body.email)
 
 
+@router.get("/me")
+def me(user: AuthUser = Depends(get_current_user)):
+    """The caller's own profile, for prefilling forms. Pages read it from here rather than from
+    the database directly."""
+    prof = db.get_profile(user.id)
+    if not prof:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return prof
+
+
 @router.post("/set-guest")
 def set_guest(user: AuthUser = Depends(get_current_user)):
     """Mark the (just email-verified, passwordless) account as a guest. Guests book
@@ -44,16 +65,48 @@ def set_guest(user: AuthUser = Depends(get_current_user)):
 
 
 @router.post("/sync")
-def sync_account(background_tasks: BackgroundTasks, body: SyncBody = SyncBody(),
+def sync_account(request: Request, background_tasks: BackgroundTasks, body: SyncBody = SyncBody(),
                  user: AuthUser = Depends(get_current_user)):
-    """Run right after login/signup. Three idempotent jobs:
+    """Run right after login/signup. Idempotent jobs:
     1. Link a pre-approved mentor (mentors row matched by email, no account yet).
     2. Backfill the profile's name (the signup trigger left it null; the name is
        entered later during password setup).
-    3. Attach any guest bookings this email made before signing up."""
+    3. Attach any guest bookings this email made before signing up.
+    4. Record consent to the Terms of Use + Privacy Policy, when accepted_terms is sent -
+       by the signup completion call, or by a sign-in, where the same checkbox is ticked
+       again. Customer T&C, Payment Terms and the Refund & Cancellation Policy are a
+       booking-time concern (routers/booking.py, routers/payments.py), not a login one.
+
+    Signup is guarded against a retried/duplicated request re-recording the same signup:
+    once this user has a live consent record for the current Privacy Policy version, a
+    repeat signup-completion call records nothing. Sign-in is NOT guarded - the
+    configuration requires a fresh record on every login, so every tick of the box
+    writes, whether or not the text has changed since the last one."""
     mentor = db.link_mentor_by_email(user.id, user.email)
     db.backfill_profile_name(user.id, body.full_name)
     linked_bookings = db.link_guest_bookings(user.id, user.email)
+    if body.accepted_terms:
+        is_signin = body.consent_context == "signin"
+        if is_signin or not db.legal_has_current_consent("privacy-policy", user_id=user.id):
+            try:
+                ip = request.client.host if request.client else None
+                ua = request.headers.get("user-agent")
+                method = "checkbox_signin" if is_signin else "checkbox_signup"
+                db.record_legal_consent(
+                    # Groovia AI Terms moved here from the report popup: the AI assistant is
+                    # offered to everyone who signs in, so agreeing to it belongs at the door
+                    # rather than at one feature. The gate in the chat checks for a live consent
+                    # record, so it stops asking signed-in users by itself.
+                    ["website-terms-of-use", "privacy-policy", "groovia-ai-terms"],
+                    user_id=user.id, consent_method=method, ip=ip, user_agent=ua)
+                # Marketing consent (spec: "must be a separate, unbundled checkbox").
+                # Logged in our own consent_events table for now; HubSpot contact sync
+                # is a separate task once a portal ID/API key exists - not wired here.
+                if body.marketing_consent is not None:
+                    db.record_consent(kind="marketing:signup", user_id=user.id,
+                                      granted=body.marketing_consent, ip=ip, user_agent=ua)
+            except Exception:
+                logger.exception("Signup consent log failed for user %s", user.id)
     # BUG-147: new customers never got a welcome (mentors get theirs on approval). Claimed once per
     # account, since this endpoint runs on every login, and skipped for mentors who get their own.
     if not mentor and user.email and db.claim_welcome_email(user.id):
@@ -64,7 +117,10 @@ def sync_account(background_tasks: BackgroundTasks, body: SyncBody = SyncBody(),
         )
     return {
         "linked": bool(mentor),
-        "role": "mentor" if mentor else "candidate",
+        # Having applied is not being a mentor. The role the client acts on is the one approval
+        # granted; the application's own state travels beside it.
+        "role": "mentor" if mentor and mentor.get("status") == "approved" else "candidate",
+        "application_status": mentor.get("status") if mentor else None,
         "mentor_status": mentor.get("status") if mentor else None,
         # Migrated mentors must pass the first-login flow; the client routes them to /mentor
         # (where the mandatory welcome popup fires) when this is true.
