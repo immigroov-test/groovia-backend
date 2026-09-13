@@ -1583,6 +1583,33 @@ def get_booking_admin_detail(booking_id: str) -> Optional[dict[str, Any]]:
             logger.exception("admin detail: pricing failed booking=%s", booking_id)
             b["pricing"] = None
 
+        # Who referred this booking and what it changed. Before the session completes only the
+        # attribution is known; the split and the promoter's cut appear on the ledger row after.
+        b["referral"] = None
+        try:
+            if b.get("referral_affiliate_id"):
+                a = (_supabase.table("affiliates").select("id, type, display_name, email, mentor_id, status")
+                     .eq("id", b["referral_affiliate_id"]).limit(1).execute()).data
+                a = a[0] if a else {}
+                name = a.get("display_name")
+                if not name and a.get("mentor_id"):
+                    mm = _supabase.table("mentors").select("display_name").eq("id", a["mentor_id"]).limit(1).execute()
+                    name = mm.data[0].get("display_name") if mm.data else None
+                led = (_supabase.table("commission_ledger")
+                       .select("id, status, split_snapshot, commission_amount, commission_amount_inr, customer_currency")
+                       .eq("booking_id", booking_id).limit(1).execute()).data
+                b["referral"] = {
+                    "affiliate_id": a.get("id"),
+                    "affiliate_name": name or a.get("email") or "Affiliate",
+                    "affiliate_type": a.get("type"),
+                    "own_session": bool(a.get("mentor_id")) and a.get("mentor_id") == b.get("mentor_id"),
+                    "code": b.get("referral_code"),
+                    "discount_pct": b.get("referral_discount_applied_pct"),
+                    "ledger": led[0] if led else None,
+                }
+        except Exception:
+            logger.exception("admin detail: referral failed booking=%s", booking_id)
+
         return b
     except Exception:
         logger.exception("get_booking_admin_detail failed")

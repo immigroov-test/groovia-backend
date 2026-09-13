@@ -129,6 +129,46 @@ def build_payout_batch(batch_date: str) -> dict[str, Any]:
     return res.data or {}
 
 
+def admin_onboard_affiliate(
+    *, display_name: str, email: str, audience_corridor: Optional[str] = None,
+    is_house_channel: bool = False, discount_pct: Optional[float] = None,
+    redemption_cap: Optional[int] = None, code_expires_at: Optional[str] = None,
+    admin_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Create a non-mentor affiliate (Track B influencer) with a link, and a code when a discount
+    is given. Returns {affiliate_id, link_slug, code}. The RPC raises its own message on a
+    duplicate email or bad input."""
+    res = _supabase.rpc("admin_onboard_affiliate", {
+        "p_display_name": display_name, "p_email": email,
+        "p_audience_corridor": audience_corridor, "p_is_house_channel": is_house_channel,
+        "p_discount_pct": discount_pct, "p_redemption_cap": redemption_cap,
+        "p_code_expires_at": code_expires_at, "p_admin": admin_id,
+    }).execute()
+    return res.data or {}
+
+
+def admin_generate_affiliate_code(
+    affiliate_id: str, *, discount_pct: float = 0,
+    redemption_cap: Optional[int] = None, expires_at: Optional[str] = None,
+) -> str:
+    """Issue a code for any affiliate, mentor or not. Same caps and expiry as the mentor path."""
+    res = _supabase.rpc("generate_affiliate_code", {
+        "p_affiliate_id": affiliate_id, "p_discount_pct": discount_pct,
+        "p_redemption_cap": redemption_cap, "p_expires_at": expires_at,
+    }).execute()
+    return res.data
+
+
+def admin_set_affiliate_status(
+    affiliate_id: str, status: str, admin_id: Optional[str] = None, note: Optional[str] = None
+) -> dict[str, Any]:
+    """Freeze or reactivate an affiliate's referral channel. Earned commissions are untouched."""
+    res = _supabase.rpc("admin_set_affiliate_status", {
+        "p_affiliate_id": affiliate_id, "p_status": status, "p_admin": admin_id, "p_note": note,
+    }).execute()
+    return res.data or {}
+
+
 def admin_referrals_overview() -> list[dict[str, Any]]:
     """One row per affiliate with code + referral + money aggregates (admin Referrals tab)."""
     res = _supabase.rpc("admin_referrals_overview", {}).execute()

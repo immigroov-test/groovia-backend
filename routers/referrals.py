@@ -110,6 +110,76 @@ def admin_bookings(affiliate_id: Optional[str] = Query(None), user: AuthUser = D
     return db.admin_referral_bookings(affiliate_id)
 
 
+class OnboardAffiliateBody(BaseModel):
+    display_name: str = Field(..., min_length=1, max_length=120)
+    email: str = Field(..., min_length=3, max_length=200)
+    audience_corridor: Optional[str] = Field(None, max_length=120)   # e.g. "IN -> NL", free text
+    is_house_channel: bool = False
+    discount_pct: Optional[float] = Field(None, ge=0, le=100)         # set -> a code is issued with it
+    redemption_cap: Optional[int] = Field(None, ge=1, le=1_000_000)
+    code_expires_at: Optional[str] = None
+
+
+@router.post("/admin/affiliates")
+def admin_onboard_affiliate(body: OnboardAffiliateBody, user: AuthUser = Depends(require_admin)):
+    """Create a non-mentor influencer with their link, and a code if a discount is given."""
+    try:
+        return db.admin_onboard_affiliate(
+            display_name=body.display_name.strip(), email=body.email.strip().lower(),
+            audience_corridor=body.audience_corridor, is_house_channel=body.is_house_channel,
+            discount_pct=body.discount_pct, redemption_cap=body.redemption_cap,
+            code_expires_at=body.code_expires_at,
+        )
+    except Exception as e:
+        msg = str(e)
+        if "already exists" in msg:
+            raise HTTPException(status_code=409, detail="An affiliate with this email already exists")
+        if "valid email" in msg:
+            raise HTTPException(status_code=400, detail="A valid email is required")
+        if "name is required" in msg:
+            raise HTTPException(status_code=400, detail="A name is required")
+        if "Discount must be between" in msg:
+            raise HTTPException(status_code=400, detail="That discount is above the allowed maximum")
+        logger.exception("admin_onboard_affiliate failed")
+        raise HTTPException(status_code=500, detail="Could not create the affiliate")
+
+
+@router.post("/admin/affiliates/{affiliate_id}/codes")
+def admin_affiliate_code(affiliate_id: str, body: GenerateCodeBody, user: AuthUser = Depends(require_admin)):
+    """Issue another code for an affiliate the admin manages."""
+    try:
+        code = db.admin_generate_affiliate_code(
+            affiliate_id, discount_pct=body.discount_pct,
+            redemption_cap=body.redemption_cap, expires_at=body.expires_at,
+        )
+        return {"code": code}
+    except Exception as e:
+        msg = str(e)
+        if "Discount must be between" in msg:
+            raise HTTPException(status_code=400, detail="That discount is above the allowed maximum")
+        if "Affiliate not found" in msg:
+            raise HTTPException(status_code=404, detail="Affiliate not found")
+        logger.exception("admin_generate_affiliate_code failed")
+        raise HTTPException(status_code=500, detail="Could not create the code")
+
+
+class AffiliateStatusBody(BaseModel):
+    status: str = Field(..., pattern="^(active|frozen)$")
+    note: Optional[str] = None
+
+
+@router.post("/admin/affiliates/{affiliate_id}/status")
+def admin_affiliate_status(affiliate_id: str, body: AffiliateStatusBody, user: AuthUser = Depends(require_admin)):
+    """Freeze or reactivate an affiliate's channel. What they already earned is not touched."""
+    try:
+        return db.admin_set_affiliate_status(affiliate_id, body.status, None, body.note)
+    except Exception as e:
+        if "Affiliate not found" in str(e):
+            raise HTTPException(status_code=404, detail="Affiliate not found")
+        logger.exception("admin_set_affiliate_status failed")
+        raise HTTPException(status_code=500, detail="Could not update the affiliate")
+
+
 @router.get("/admin/flags")
 def admin_flags(include_resolved: bool = Query(False), user: AuthUser = Depends(require_admin)):
     """The review queue: open fraud flags, each with the affiliate's history and the booking."""
