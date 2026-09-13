@@ -445,7 +445,8 @@ def link_mentor_by_email(profile_id: str, email: str) -> Optional[dict[str, Any]
             return None
 
         _supabase.table("mentors").update({"profile_id": profile_id}).eq("id", mentor["id"]).execute()
-        _supabase.table("profiles").update({"role": "mentor"}).eq("id", profile_id).execute()
+        if mentor.get("status") == "approved":
+            _supabase.table("profiles").update({"role": "mentor"}).eq("id", profile_id).execute()
         mentor["profile_id"] = profile_id
         logger.info("Linked pre-approved mentor %s to profile %s by email match", mentor["id"], profile_id)
         return mentor
@@ -548,12 +549,9 @@ def create_mentor_signup(
         raise RuntimeError("Mentor insert returned no data")
     mentor_row = res.data[0]
 
-    try:
-        _supabase.table("profiles").update({"role": "mentor"}).eq("id", profile_id).execute()
-    except Exception:
-        _supabase.table("mentors").delete().eq("id", mentor_row["id"]).execute()
-        logger.exception("Profile role update failed; mentor row rolled back for profile %s", profile_id)
-        raise RuntimeError("Failed to update profile role")
+    # The role is granted at approval (set_mentor_status), not at application. Until then this
+    # is a customer with an application under review, and the customer side of their account
+    # keeps working.
 
     # The real, version-aware consent record (Mentor Agreement + Commission & Payout +
     # Code of Conduct bundle, and the DPA separately) is written by the caller via
@@ -929,7 +927,13 @@ def set_mentor_status(mentor_id: str, status: str, reason: Optional[str] = None)
     )
     if not res.data:
         raise ValueError(f"Mentor {mentor_id!r} not found")
-    return res.data[0]
+    row = res.data[0]
+    # Approval is what makes someone a mentor. Reinstating a suspended mentor passes through
+    # here too, which is correct: they were approved once already. Admins keep their role.
+    if status == "approved" and row.get("profile_id"):
+        (_supabase.table("profiles").update({"role": "mentor"})
+         .eq("id", row["profile_id"]).neq("role", "admin").execute())
+    return row
 
 
 def get_profile_id_by_email(email: str) -> Optional[str]:
@@ -1007,6 +1011,18 @@ def claim_welcome_email(profile_id: str) -> bool:
     except Exception:
         logger.exception("claim_welcome_email failed profile=%s", profile_id)
         return False
+
+
+def get_profile(profile_id: str) -> Optional[dict[str, Any]]:
+    """The caller's own profile, the fields a form would prefill from."""
+    res = (
+        _supabase.table("profiles")
+        .select("id, email, role, full_name, display_name, photo_url, phone, country_code, city, timezone")
+        .eq("id", profile_id)
+        .limit(1)
+        .execute()
+    )
+    return res.data[0] if res.data else None
 
 
 def get_profile_role(profile_id: str) -> Optional[str]:

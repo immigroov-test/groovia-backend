@@ -46,6 +46,16 @@ def check_email(body: CheckEmailBody):
     return db.get_email_account_status(body.email)
 
 
+@router.get("/me")
+def me(user: AuthUser = Depends(get_current_user)):
+    """The caller's own profile, for prefilling forms. Pages read it from here rather than from
+    the database directly."""
+    prof = db.get_profile(user.id)
+    if not prof:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return prof
+
+
 @router.post("/set-guest")
 def set_guest(user: AuthUser = Depends(get_current_user)):
     """Mark the (just email-verified, passwordless) account as a guest. Guests book
@@ -107,7 +117,10 @@ def sync_account(request: Request, background_tasks: BackgroundTasks, body: Sync
         )
     return {
         "linked": bool(mentor),
-        "role": "mentor" if mentor else "candidate",
+        # Having applied is not being a mentor. The role the client acts on is the one approval
+        # granted; the application's own state travels beside it.
+        "role": "mentor" if mentor and mentor.get("status") == "approved" else "candidate",
+        "application_status": mentor.get("status") if mentor else None,
         "mentor_status": mentor.get("status") if mentor else None,
         # Migrated mentors must pass the first-login flow; the client routes them to /mentor
         # (where the mandatory welcome popup fires) when this is true.
