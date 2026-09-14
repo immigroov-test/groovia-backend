@@ -573,7 +573,7 @@ def book_session(
             if body.referral_code:
                 # Mock/free path: no charge + no pricing rows, so this records attribution only
                 # (no commission is generated). The paid path applies the discount in reserve.
-                db.attribute_booking_referral(booking_id, body.referral_code)
+                db.attribute_booking_referral(booking_id, body.referral_code, body.service_id, body.email)
             # Step 2 of the referral flow: the code above, or a link click on this browser,
             # becomes the customer's attribution record. Called on every booking, because an
             # unexpired record from an earlier visit still counts when this checkout carries

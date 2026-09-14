@@ -65,4 +65,11 @@ def get_mentor(slug: str):
     if not mentor:
         raise HTTPException(status_code=404, detail="Mentor not found")
     public = {k: v for k, v in mentor.items() if k not in _PRIVATE_FIELDS}
+    # A mentor in the referral programme: their profile URL is their referral link, so the page
+    # can credit a visit that arrived from outside the site. Absent when they have not joined.
+    try:
+        public["referral_slug"] = db.mentor_referral_link_slug(mentor["id"])
+    except Exception:
+        logger.exception("referral slug lookup failed for mentor %s", mentor.get("id"))
+        public["referral_slug"] = None
     return public

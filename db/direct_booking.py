@@ -324,12 +324,33 @@ def get_booking_invoice(booking_id: str) -> Optional[dict[str, Any]]:
             pay_ref = (pr[0].get("provider_payment_id") if pr else "") or ""
         except Exception:
             logger.exception("get_booking_invoice: payment reference lookup failed booking=%s", booking_id)
+        # A referral code is applied AFTER the quote, in reserve_booking, so the snapshot carries the
+        # list prices. The invoice has to say what was actually charged: scale every line by the
+        # same factor reserve_booking used, and take the total from the pricing row when there is
+        # one, since that is the amount the gateway captured.
+        discount_pct = 0.0
+        charged = None
+        try:
+            b = (_supabase.table("bookings").select("referral_discount_applied_pct")
+                 .eq("id", booking_id).limit(1).execute().data) or []
+            discount_pct = float((b[0] or {}).get("referral_discount_applied_pct") or 0) if b else 0.0
+            bp = (_supabase.table("booking_pricing").select("gross_customer")
+                  .eq("booking_id", booking_id).limit(1).execute().data) or []
+            charged = float(bp[0]["gross_customer"]) if bp and bp[0].get("gross_customer") is not None else None
+        except Exception:
+            logger.exception("get_booking_invoice: discount lookup failed booking=%s", booking_id)
+        factor = 1 - discount_pct / 100.0
+        list_session = float(s.get("mentor_amount") or 0)
+        session = round(list_session * factor, 2)
         return {
             "currency":     row.get("customer_currency") or s.get("customer_currency") or "",
-            "session":      float(s.get("mentor_amount") or 0),
-            "platform_fee": float(s.get("platform_fee") or 0),
-            "tax":          float(s.get("tax_amount") or 0),
-            "total":        total,
+            "list_session": list_session,
+            "discount_pct": discount_pct,
+            "discount":     round(list_session - session, 2),
+            "session":      session,
+            "platform_fee": round(float(s.get("platform_fee") or 0) * factor, 2),
+            "tax":          round(float(s.get("tax_amount") or 0) * factor, 2),
+            "total":        charged if charged is not None else round(total * factor, 2),
             "payment_ref":  pay_ref,
         }
     except Exception:

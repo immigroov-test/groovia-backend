@@ -18,6 +18,8 @@ router = APIRouter(prefix="/referrals", tags=["referrals"])
 
 class ValidateBody(BaseModel):
     code: str = Field(..., min_length=1, max_length=64)
+    service_id: Optional[str] = None   # the session type at checkout; a scoped code needs it
+    email: Optional[str] = None        # so a repeat use is refused before payment, not after
 
 
 @router.post("/validate")
@@ -25,7 +27,8 @@ def validate_code(body: ValidateBody):
     """Public: check a referral code at checkout. Returns {valid, discount_pct, ...}.
     The discount the customer sees comes from HERE (backend-checked), never the client."""
     try:
-        return db.validate_referral_code(body.code.strip())
+        email = (body.email or "").strip().lower() or None
+        return db.validate_referral_code(body.code.strip(), body.service_id, email)
     except Exception:
         logger.exception("validate_referral_code failed")
         return {"valid": False, "discount_pct": 0, "reason": "error"}
@@ -54,9 +57,15 @@ def record_click(body: ClickBody):
 # ── Mentor (their own codes) ─────────────────────────────────────────────────
 
 class GenerateCodeBody(BaseModel):
-    discount_pct: float = Field(0, ge=0, le=100)   # hard ceiling; the DB enforces referral_max_discount_pct
+    discount_pct: float = Field(0, ge=0, le=20)    # v2: 20% hard cap; the DB enforces it too
     redemption_cap: Optional[int] = Field(None, ge=1, le=1_000_000)  # None -> DB applies a finite default
     expires_at: Optional[str] = None               # ISO8601; None -> DB applies the default expiry
+    service_id: Optional[str] = None               # scope the code to one session type; None = any
+
+
+class JoinBody(BaseModel):
+    agreed: bool = False
+    terms_version: str = Field(db.TERMS_VERSION, max_length=32)
 
 
 class CodeActiveBody(BaseModel):
@@ -69,6 +78,29 @@ def my_referrals(mentor: dict = Depends(require_mentor)):
     return db.mentor_referral_overview(mentor["id"])
 
 
+@router.post("/join")
+def join_program(body: JoinBody, mentor: dict = Depends(require_mentor)):
+    """The mentor joins the referral programme. Their link and codes earn referral splits from
+    this moment; before it, bookings through their own link paid the organic rate."""
+    if not body.agreed:
+        raise HTTPException(status_code=400, detail="Please accept the programme terms to join")
+    try:
+        return db.join_referral_program(mentor["id"], body.terms_version)
+    except Exception:
+        logger.exception("join_referral_program failed")
+        raise HTTPException(status_code=500, detail="Could not join the programme")
+
+
+@router.post("/leave")
+def leave_program(mentor: dict = Depends(require_mentor)):
+    """Leaving ends every open attribution tied to this mentor and deactivates their codes."""
+    try:
+        return db.leave_referral_program(mentor["id"])
+    except Exception:
+        logger.exception("leave_referral_program failed")
+        raise HTTPException(status_code=500, detail="Could not leave the programme")
+
+
 @router.post("/codes")
 def create_code(body: GenerateCodeBody, mentor: dict = Depends(require_mentor)):
     try:
@@ -77,6 +109,7 @@ def create_code(body: GenerateCodeBody, mentor: dict = Depends(require_mentor)):
             discount_pct=body.discount_pct,
             redemption_cap=body.redemption_cap,
             expires_at=body.expires_at,
+            service_id=body.service_id,
         )
         return {"code": code}
     except HTTPException:
@@ -84,7 +117,9 @@ def create_code(body: GenerateCodeBody, mentor: dict = Depends(require_mentor)):
     except Exception as e:
         msg = str(e)
         if "Discount must be between" in msg:
-            raise HTTPException(status_code=400, detail="That discount is above the allowed maximum")
+            raise HTTPException(status_code=400, detail="The discount cannot be above 20%")
+        if "does not belong" in msg:
+            raise HTTPException(status_code=400, detail="That session type is not one of yours")
         logger.exception("generate_referral_code failed")
         raise HTTPException(status_code=500, detail="Could not create the code")
 
@@ -115,7 +150,7 @@ class OnboardAffiliateBody(BaseModel):
     email: str = Field(..., min_length=3, max_length=200)
     audience_corridor: Optional[str] = Field(None, max_length=120)   # e.g. "IN -> NL", free text
     is_house_channel: bool = False
-    discount_pct: Optional[float] = Field(None, ge=0, le=100)         # set -> a code is issued with it
+    discount_pct: Optional[float] = Field(None, ge=0, le=20)          # set -> a code is issued with it (20% cap)
     redemption_cap: Optional[int] = Field(None, ge=1, le=1_000_000)
     code_expires_at: Optional[str] = None
 
@@ -151,12 +186,15 @@ def admin_affiliate_code(affiliate_id: str, body: GenerateCodeBody, user: AuthUs
         code = db.admin_generate_affiliate_code(
             affiliate_id, discount_pct=body.discount_pct,
             redemption_cap=body.redemption_cap, expires_at=body.expires_at,
+            service_id=body.service_id,
         )
         return {"code": code}
     except Exception as e:
         msg = str(e)
         if "Discount must be between" in msg:
-            raise HTTPException(status_code=400, detail="That discount is above the allowed maximum")
+            raise HTTPException(status_code=400, detail="The discount cannot be above 20%")
+        if "does not belong" in msg:
+            raise HTTPException(status_code=400, detail="That session type does not belong to this affiliate")
         if "Affiliate not found" in msg:
             raise HTTPException(status_code=404, detail="Affiliate not found")
         logger.exception("admin_generate_affiliate_code failed")

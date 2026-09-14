@@ -7,13 +7,21 @@ import config
 
 logger = logging.getLogger("immigroov.db.referrals")
 
+# The version of the programme rules a mentor agrees to when joining. Bump when the rates or
+# rules change, so an older agreement is distinguishable from the current one.
+TERMS_VERSION = "v2-2026-09"
+
 _supabase: Client = create_client(config.SUPABASE_URL, config.SUPABASE_SERVICE_ROLE_KEY)
 
 
-def validate_referral_code(code: str) -> dict[str, Any]:
+def validate_referral_code(code: str, service_id: Optional[str] = None, email: Optional[str] = None) -> dict[str, Any]:
     """Backend-authoritative code check for checkout. Returns
-    {valid, reason, discount_pct, code_id?, affiliate_id?, code?}."""
-    res = _supabase.rpc("validate_referral_code", {"p_code": code}).execute()
+    {valid, reason, discount_pct, code_id?, affiliate_id?, code?, service_id?}.
+    service_id lets a code scoped to one session type be refused for another; email lets a
+    customer who already used this code be told so before paying."""
+    res = _supabase.rpc("validate_referral_code", {
+        "p_code": code, "p_service_id": service_id, "p_email": email,
+    }).execute()
     return res.data or {"valid": False, "discount_pct": 0, "reason": "error"}
 
 
@@ -23,6 +31,7 @@ def generate_referral_code(
     discount_pct: float = 0,
     redemption_cap: Optional[int] = None,
     expires_at: Optional[str] = None,
+    service_id: Optional[str] = None,
 ) -> str:
     """Create a system-generated code for the mentor's affiliate (auto-created on first use).
     Returns the new code string. The RPC caps the discount and always applies a finite usage cap +
@@ -32,8 +41,38 @@ def generate_referral_code(
         "p_discount_pct": discount_pct,
         "p_redemption_cap": redemption_cap,
         "p_expires_at": expires_at,
+        "p_service_id": service_id,
     }).execute()
     return res.data
+
+
+def join_referral_program(mentor_id: str, terms_version: str = TERMS_VERSION) -> dict[str, Any]:
+    """The mentor joins the referral programme after seeing its terms. Recorded with the
+    version of the rules shown, which is the consent trail for the rates."""
+    res = _supabase.rpc("referral_join_program", {
+        "p_mentor_id": mentor_id, "p_terms_version": terms_version,
+    }).execute()
+    return res.data or {}
+
+
+def leave_referral_program(mentor_id: str) -> dict[str, Any]:
+    """Leaving ends every open attribution and deactivates the mentor's codes at once."""
+    res = _supabase.rpc("referral_leave_program", {"p_mentor_id": mentor_id}).execute()
+    return res.data or {}
+
+
+def mentor_referral_link_slug(mentor_id: str) -> Optional[str]:
+    """The link slug for a mentor who is in the programme, else None. Read by the public profile
+    so a visit arriving from outside the site can be credited to them."""
+    aff = (_supabase.table("affiliates").select("id, status, enrolled_at, left_at")
+           .eq("mentor_id", mentor_id).limit(1).execute()).data
+    if not aff:
+        return None
+    a = aff[0]
+    if a.get("status") != "active" or not a.get("enrolled_at") or a.get("left_at"):
+        return None
+    link = _supabase.table("affiliate_links").select("slug").eq("affiliate_id", a["id"]).limit(1).execute().data
+    return link[0]["slug"] if link else None
 
 
 def mentor_referral_overview(mentor_id: str) -> dict[str, Any]:
@@ -55,14 +94,15 @@ def set_code_active(code_id: str, is_active: bool, mentor_id: str) -> bool:
     return True
 
 
-def attribute_booking_referral(booking_id: str, code: str) -> None:
+def attribute_booking_referral(booking_id: str, code: str, service_id: Optional[str] = None,
+                               email: Optional[str] = None) -> None:
     """Best-effort: validate a code and record it on an already-created booking (the mock/free
     path, where reserve_booking didn't run). No charge + no pricing rows, so no commission is
     generated; this just captures the attribution."""
     if not code:
         return
     try:
-        v = validate_referral_code(code)
+        v = validate_referral_code(code, service_id, email)
         if not v.get("valid"):
             return
         _supabase.table("bookings").update({
@@ -150,11 +190,13 @@ def admin_onboard_affiliate(
 def admin_generate_affiliate_code(
     affiliate_id: str, *, discount_pct: float = 0,
     redemption_cap: Optional[int] = None, expires_at: Optional[str] = None,
+    service_id: Optional[str] = None,
 ) -> str:
     """Issue a code for any affiliate, mentor or not. Same caps and expiry as the mentor path."""
     res = _supabase.rpc("generate_affiliate_code", {
         "p_affiliate_id": affiliate_id, "p_discount_pct": discount_pct,
         "p_redemption_cap": redemption_cap, "p_expires_at": expires_at,
+        "p_service_id": service_id,
     }).execute()
     return res.data
 

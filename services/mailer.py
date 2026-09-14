@@ -311,7 +311,11 @@ def _invoice_block(inv: Optional[dict], booking_ref: str = "") -> str:
     if not inv:
         return ""
     ccy = inv.get("currency") or ""
-    rows = [("Session", _money(float(inv.get("session") or 0), ccy))]
+    if float(inv.get("discount") or 0) > 0:
+        rows = [("Session", _money(float(inv.get("list_session") or 0), ccy)),
+                (f"Referral discount ({inv.get('discount_pct'):g}%)", "-" + _money(float(inv["discount"]), ccy))]
+    else:
+        rows = [("Session", _money(float(inv.get("session") or 0), ccy))]
     if float(inv.get("platform_fee") or 0) > 0:
         rows.append(("Platform fee", _money(float(inv["platform_fee"]), ccy)))
     if float(inv.get("tax") or 0) > 0:
@@ -1058,6 +1062,8 @@ def _booking_admin_notice(d: dict) -> tuple[str, str]:
     if inv:
         ccy = inv.get("currency") or ""
         rows.append(("Customer paid", _money(float(inv.get("total") or 0), ccy)))
+        if float(inv.get("discount") or 0) > 0:
+            rows.append((f"Referral discount ({inv.get('discount_pct'):g}%)", "-" + _money(float(inv["discount"]), ccy)))
         rows.append(("Of which platform fee", _money(float(inv.get("platform_fee") or 0), ccy)))
         if float(inv.get("tax") or 0) > 0:
             rows.append(("Tax", _money(float(inv["tax"]), ccy)))
