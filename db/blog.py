@@ -1,5 +1,6 @@
 import re
 import secrets
+from pathlib import Path
 from datetime import datetime, timezone
 from typing import Any, Optional
 
@@ -79,7 +80,7 @@ def list_public_posts(country: Optional[str] = None, category: Optional[str] = N
 
 def get_public_post(slug: str) -> Optional[dict]:
     return (_supabase.table("blog_posts")
-            .select("id,slug,title,excerpt,content_html,cover_image_url,category,country_codes,seo_title,seo_description,sources,last_verified_at,published_at,updated_at,profiles!blog_posts_author_id_fkey(full_name)")
+            .select("id,slug,title,excerpt,content_html,cover_image_url,category,country_codes,seo_title,seo_description,sources,image_prompts,ctas,last_verified_at,published_at,updated_at,profiles!blog_posts_author_id_fkey(full_name)")
             .eq("slug", slug).eq("status", "published").maybe_single().execute()).data
 
 
@@ -97,3 +98,14 @@ def analytics_summary() -> list[dict]:
     for post in posts:
         post.update(counts.get(post["id"], {"views": 0, "cta_clicks": 0}))
     return posts
+
+
+def upload_blog_image(author_id: str, filename: str, content: bytes, content_type: str) -> str:
+    suffix = Path(filename).suffix.lower()
+    object_name = f"{author_id}/{datetime.now(timezone.utc):%Y/%m}/{secrets.token_hex(12)}{suffix}"
+    _supabase.storage.from_("blog-media").upload(
+        object_name,
+        content,
+        {"content-type": content_type, "upsert": "false"},
+    )
+    return _supabase.storage.from_("blog-media").get_public_url(object_name)

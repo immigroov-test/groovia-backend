@@ -24,6 +24,7 @@ repo (Next.js on Vercel); this service is its API.
 | Mentor lifecycle - signup → onboarding → **admin approval** | ✅ Working |
 | In-house booking + lifecycle v2 (cancel / reschedule / no-show) | ✅ Working |
 | Transactional email (Resend) | ✅ Working (needs verified domain for real sends) |
+| Contributor blogging (BlockNote + AI writer + review workflow) | ✅ Working |
 | Deployment - Render (API) + Supabase (DB/Auth) + Vercel (UI) | ✅ Live on `staging` |
 
 ## Future developments (planned per PRD v2.1 - not yet built)

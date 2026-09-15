@@ -23,6 +23,7 @@ FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
 # Models
 MAIN_MODEL_NAME   = "llama-3.3-70b-versatile"
 REVIEW_MODEL_NAME = "llama-3.1-8b-instant"
+BLOG_WRITER_MODEL_NAME = os.getenv("BLOG_WRITER_MODEL_NAME", MAIN_MODEL_NAME)
 TEMPERATURE       = 0.0
 
 # Agent tuning

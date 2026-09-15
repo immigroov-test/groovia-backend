@@ -11,6 +11,7 @@ CREATE TABLE IF NOT EXISTS blog_posts (
   slug text NOT NULL UNIQUE,
   title text NOT NULL CHECK (char_length(title) BETWEEN 4 AND 160),
   excerpt text NOT NULL DEFAULT '' CHECK (char_length(excerpt) <= 400),
+  content_json jsonb NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(content_json) = 'array'),
   content_html text NOT NULL DEFAULT '',
   cover_image_url text,
   author_id uuid NOT NULL REFERENCES profiles(id) ON DELETE RESTRICT,
@@ -20,6 +21,8 @@ CREATE TABLE IF NOT EXISTS blog_posts (
   seo_title text CHECK (char_length(seo_title) <= 70),
   seo_description text CHECK (char_length(seo_description) <= 170),
   sources text[] NOT NULL DEFAULT '{}',
+  image_prompts jsonb NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(image_prompts) = 'array'),
+  ctas jsonb NOT NULL DEFAULT '[]'::jsonb CHECK (jsonb_typeof(ctas) = 'array'),
   last_verified_at date,
   review_note text,
   reviewed_by uuid REFERENCES profiles(id) ON DELETE SET NULL,
@@ -46,3 +49,12 @@ ALTER TABLE blog_events ENABLE ROW LEVEL SECURITY;
 
 -- All access is mediated by FastAPI using the service role; no browser-direct policies.
 REVOKE ALL ON content_contributors, blog_posts, blog_events FROM anon, authenticated;
+
+-- Public article media is uploaded only by the authenticated FastAPI endpoint using
+-- the service role. Public reads let search engines and social previews load images.
+INSERT INTO storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+VALUES ('blog-media', 'blog-media', true, 5242880, ARRAY['image/jpeg','image/png','image/webp','image/gif'])
+ON CONFLICT (id) DO UPDATE SET
+  public = EXCLUDED.public,
+  file_size_limit = EXCLUDED.file_size_limit,
+  allowed_mime_types = EXCLUDED.allowed_mime_types;
