@@ -1,3 +1,4 @@
+import re
 from datetime import date, datetime, timezone
 from typing import Literal, Optional
 
@@ -223,13 +224,21 @@ class ContributorBody(BaseModel):
     email: str = Field(min_length=3, max_length=320)
     active: bool = True
 
+    @field_validator("email")
+    @classmethod
+    def valid_email(cls, value: str) -> str:
+        value = value.strip().lower()
+        if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", value):
+            raise ValueError("Enter a valid email address")
+        return value
+
 
 @router.post("/admin/content-contributors")
 def admin_set_contributor(body: ContributorBody, user: AuthUser = Depends(require_admin)):
     try:
         return db.set_content_contributor(body.email, body.active, user.id)
     except ValueError:
-        raise HTTPException(status_code=404, detail="No Immigroov account uses that email")
+        raise HTTPException(status_code=404, detail="No blogging account uses that email")
 
 
 class ReviewBody(BaseModel):

@@ -1,6 +1,9 @@
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import patch
 
+import db.blog as blog_db
+from routers.blog import ContributorBody
 from services import blog_writer
 from services.html_sanitizer import sanitize_html
 from db.blog import rank_related_posts
@@ -96,3 +99,51 @@ def test_related_posts_prioritize_country_then_category_and_exclude_self():
     assert [item["id"] for item in rank_related_posts(post, candidates)] == [
         "best", "country", "category",
     ]
+
+
+def test_contributor_email_is_normalized_and_validated():
+    assert ContributorBody(email="  Intern@Example.COM ").email == "intern@example.com"
+
+
+def test_new_contributor_creates_confirmed_supabase_login(monkeypatch):
+    writes = []
+
+    class Query:
+        def __init__(self, table):
+            self.table = table
+            self.payload = None
+
+        def select(self, *_args): return self
+        def ilike(self, *_args): return self
+        def maybe_single(self): return self
+        def upsert(self, payload, **_kwargs):
+            self.payload = payload
+            writes.append((self.table, payload))
+            return self
+        def execute(self):
+            if self.payload is None:
+                return SimpleNamespace(data=None)
+            return SimpleNamespace(data=[self.payload.copy()])
+
+    class Admin:
+        def __init__(self): self.attributes = None
+        def create_user(self, attributes):
+            self.attributes = attributes
+            return SimpleNamespace(user=SimpleNamespace(id="new-user-id"))
+
+    admin = Admin()
+    fake_supabase = SimpleNamespace(
+        table=lambda name: Query(name),
+        auth=SimpleNamespace(admin=admin),
+    )
+    monkeypatch.setattr(blog_db, "_supabase", fake_supabase)
+
+    result = blog_db.set_content_contributor("Intern@Example.com", True, "admin-id")
+
+    assert result["created"] is True
+    assert result["temporary_password"].startswith("Grv!")
+    assert admin.attributes["email"] == "intern@example.com"
+    assert admin.attributes["email_confirm"] is True
+    assert admin.attributes["app_metadata"]["content_portal_only"] is True
+    assert ("profiles", {"id": "new-user-id", "email": "intern@example.com"}) in writes
+    assert any(table == "content_contributors" for table, _payload in writes)

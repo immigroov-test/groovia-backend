@@ -28,15 +28,59 @@ def list_content_contributors() -> list[dict]:
             .order("created_at", desc=True).execute()).data or []
 
 
+def _temporary_password() -> str:
+    """Return a strong one-time credential without persisting it in our tables."""
+    return f"Grv!{secrets.token_urlsafe(12)}aA1"
+
+
+def _set_managed_blog_account(profile_id: str, active: bool) -> None:
+    """Toggle portal-only mode only for accounts provisioned by this workflow."""
+    response = _supabase.auth.admin.get_user_by_id(profile_id)
+    auth_user = response.user
+    metadata = dict(auth_user.app_metadata or {})
+    if not metadata.get("blog_account_managed"):
+        return
+    metadata["content_portal_only"] = active
+    _supabase.auth.admin.update_user_by_id(profile_id, {"app_metadata": metadata})
+
+
 def set_content_contributor(email: str, active: bool, admin_id: str) -> dict:
-    profile = (_supabase.table("profiles").select("id,email,full_name").ilike("email", email.strip())
+    clean_email = email.strip().lower()
+    profile = (_supabase.table("profiles").select("id,email,full_name").ilike("email", clean_email)
                .maybe_single().execute()).data
+    created = False
+    temporary_password = None
     if not profile:
-        raise ValueError("PROFILE_NOT_FOUND")
+        if not active:
+            raise ValueError("PROFILE_NOT_FOUND")
+        temporary_password = _temporary_password()
+        response = _supabase.auth.admin.create_user({
+            "email": clean_email,
+            "password": temporary_password,
+            "email_confirm": True,
+            "user_metadata": {"role": "candidate"},
+            "app_metadata": {
+                "blog_account_managed": True,
+                "content_portal_only": True,
+            },
+        })
+        auth_user = response.user
+        # The auth trigger normally creates this synchronously. The upsert also makes
+        # provisioning resilient on older Supabase projects where the trigger is absent.
+        profile = (_supabase.table("profiles").upsert({
+            "id": str(auth_user.id),
+            "email": clean_email,
+        }, on_conflict="id").execute()).data[0]
+        created = True
+    else:
+        _set_managed_blog_account(profile["id"], active)
     row = (_supabase.table("content_contributors").upsert({
         "profile_id": profile["id"], "active": active, "created_by": admin_id,
     }, on_conflict="profile_id").execute()).data[0]
     row["profiles"] = profile
+    row["created"] = created
+    if temporary_password:
+        row["temporary_password"] = temporary_password
     return row
 
 
