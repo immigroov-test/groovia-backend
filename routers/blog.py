@@ -136,6 +136,11 @@ async def generate_post(request: Request, body: GenerateBody, user: AuthUser = D
             category=body.category,
             tone=body.tone,
             sources=body.sources,
+            related_posts=db.related_posts({
+                "id": "",
+                "country_codes": [body.country_code] if body.country_code else [],
+                "category": body.category,
+            }, limit=8),
         )
     except Exception as exc:
         status = getattr(exc, "status_code", None)
@@ -258,7 +263,7 @@ def public_post(slug: str):
     post = db.get_public_post(slug)
     if not post:
         raise HTTPException(status_code=404, detail="Article not found")
-    return post
+    return {**post, "related_posts": db.related_posts(post)}
 
 
 class EventBody(BaseModel):

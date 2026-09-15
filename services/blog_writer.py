@@ -42,12 +42,18 @@ iframes, classes, tracking parameters, or fake citations."""
 
 async def generate_article(
     *, raw_content: str, country_code: str | None, category: str,
-    tone: str, sources: list[str],
+    tone: str, sources: list[str], related_posts: list[dict] | None = None,
 ) -> dict:
     country = (country_code or "").upper()
     internal_urls = ["/webinars", "/mentors"]
     if country:
         internal_urls.extend([f"/countries/{country.lower()}", f"/mentors?country={country}"])
+    article_links = [
+        {"title": post["title"], "url": f"/blog/{post['slug']}"}
+        for post in (related_posts or [])
+        if post.get("title") and post.get("slug")
+    ]
+    internal_urls.extend(item["url"] for item in article_links)
 
     llm = ChatGroq(
         model=config.BLOG_WRITER_MODEL_NAME,
@@ -61,6 +67,7 @@ async def generate_article(
 Category: {category}
 Tone: {tone}
 Allowed Groovia URLs: {internal_urls}
+Relevant published Groovia articles: {article_links}
 Contributor-provided source URLs: {sources}
 
 ROUGH CONTENT:

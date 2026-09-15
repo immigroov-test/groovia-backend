@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 from services import blog_writer
 from services.html_sanitizer import sanitize_html
+from db.blog import rank_related_posts
 
 
 def test_blog_html_keeps_editor_formatting_and_safe_links():
@@ -80,3 +81,18 @@ def test_ai_writer_normalizes_cta_routes_and_sanitizes_html():
     assert result["ctas"][0]["href"] == "/mentors?country=DE"
     assert result["ctas"][1]["href"] == "/countries/de"
     assert result["image_prompts"][0]["alt_text"] == "Traveller arriving in Berlin"
+
+
+def test_related_posts_prioritize_country_then_category_and_exclude_self():
+    post = {"id": "current", "category": "housing", "country_codes": ["DE"]}
+    candidates = [
+        {"id": "category", "category": "housing", "country_codes": ["FR"], "published_at": "2026-09-03"},
+        {"id": "country", "category": "stories", "country_codes": ["DE"], "published_at": "2026-09-01"},
+        {"id": "best", "category": "housing", "country_codes": ["DE"], "published_at": "2026-09-02"},
+        {"id": "unrelated", "category": "healthcare", "country_codes": ["NL"], "published_at": "2026-09-04"},
+        {"id": "current", "category": "housing", "country_codes": ["DE"], "published_at": "2026-09-05"},
+    ]
+
+    assert [item["id"] for item in rank_related_posts(post, candidates)] == [
+        "best", "country", "category",
+    ]

@@ -67,7 +67,11 @@ def list_admin_posts() -> list[dict]:
             .order("updated_at", desc=True).execute()).data or []
 
 
-def list_public_posts(country: Optional[str] = None, category: Optional[str] = None) -> list[dict]:
+def list_public_posts(
+    country: Optional[str] = None,
+    category: Optional[str] = None,
+    limit: Optional[int] = None,
+) -> list[dict]:
     query = (_supabase.table("blog_posts")
              .select("id,slug,title,excerpt,cover_image_url,category,country_codes,seo_title,seo_description,last_verified_at,published_at,updated_at,profiles!blog_posts_author_id_fkey(full_name)")
              .eq("status", "published").order("published_at", desc=True))
@@ -75,6 +79,8 @@ def list_public_posts(country: Optional[str] = None, category: Optional[str] = N
         query = query.contains("country_codes", [country.upper()])
     if category:
         query = query.eq("category", category)
+    if limit:
+        query = query.limit(limit)
     return query.execute().data or []
 
 
@@ -82,6 +88,35 @@ def get_public_post(slug: str) -> Optional[dict]:
     return (_supabase.table("blog_posts")
             .select("id,slug,title,excerpt,content_html,cover_image_url,category,country_codes,seo_title,seo_description,sources,image_prompts,ctas,last_verified_at,published_at,updated_at,profiles!blog_posts_author_id_fkey(full_name)")
             .eq("slug", slug).eq("status", "published").maybe_single().execute()).data
+
+
+def rank_related_posts(post: dict, candidates: list[dict], limit: int = 4) -> list[dict]:
+    """Rank published summaries deterministically by country overlap, then category and recency."""
+    post_countries = set(post.get("country_codes") or [])
+    unique: dict[str, dict] = {}
+    for candidate in candidates:
+        if candidate.get("id") == post.get("id"):
+            continue
+        unique[candidate["id"]] = candidate
+
+    def relevance(candidate: dict) -> tuple[int, str]:
+        overlap = len(post_countries.intersection(candidate.get("country_codes") or []))
+        same_category = candidate.get("category") == post.get("category")
+        score = overlap * 3 + (2 if same_category else 0)
+        return score, candidate.get("published_at") or ""
+
+    ranked = [candidate for candidate in unique.values() if relevance(candidate)[0] > 0]
+    ranked.sort(key=relevance, reverse=True)
+    return ranked[:limit]
+
+
+def related_posts(post: dict, limit: int = 4) -> list[dict]:
+    candidates: list[dict] = []
+    for country in (post.get("country_codes") or [])[:3]:
+        candidates.extend(list_public_posts(country=country, limit=12))
+    if post.get("category"):
+        candidates.extend(list_public_posts(category=post["category"], limit=12))
+    return rank_related_posts(post, candidates, limit)
 
 
 def record_event(post_id: str, event_type: str, cta_kind: Optional[str]) -> None:
