@@ -32,6 +32,7 @@ from routers import mentor as mentor_router
 from routers import mentors as mentors_router
 from routers import payments as payments_router
 from routers import webinars as webinars_router
+from routers import blog as blog_router
 from routers import pricing as pricing_router
 from routers import quote as quote_router
 from routers import referrals as referrals_router
@@ -175,6 +176,7 @@ api.include_router(mentor_router.router)
 api.include_router(mentors_router.router)
 api.include_router(payments_router.router)
 api.include_router(webinars_router.router)
+api.include_router(blog_router.router)
 api.include_router(pricing_router.router)
 api.include_router(quote_router.router)
 api.include_router(referrals_router.router)
