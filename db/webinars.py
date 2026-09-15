@@ -44,8 +44,6 @@ def _with_counts(rows: list[dict]) -> list[dict]:
 
 def create_webinar(fields: dict[str, Any], *, creator_id: str, source: str = "admin", status: str = "draft") -> dict:
     data = {**fields, "created_by": creator_id, "source": source, "status": status, "slug": _slug(fields["title"])}
-    if data.get("meeting_provider") == "jitsi_public" and not data.get("meeting_room"):
-        data["meeting_room"] = f"groovia-webinar-{secrets.token_urlsafe(24)}"
     return _supabase.table("webinars").insert(data).execute().data[0]
 
 
@@ -84,6 +82,32 @@ def registration_for(webinar_id: str, user_id: str) -> Optional[dict]:
 
 def registration_for_id(registration_id: str) -> Optional[dict]:
     return (_supabase.table("webinar_registrations").select("*").eq("id", registration_id).maybe_single().execute()).data
+
+
+def due_webinar_reminders() -> list[dict]:
+    """Confirmed attendees for published webinars starting in the next 10-15 minutes."""
+    now = datetime.now(timezone.utc)
+    rows = (_supabase.table("webinar_registrations")
+            .select("id,user_id,webinars!inner(id,slug,title,starts_at,status)")
+            .in_("status", ["confirmed", "attended"])
+            .is_("reminder_sent_at", "null")
+            .eq("webinars.status", "published")
+            .gte("webinars.starts_at", (now + timedelta(minutes=10)).isoformat())
+            .lte("webinars.starts_at", (now + timedelta(minutes=15)).isoformat())
+            .execute()).data or []
+    return rows
+
+
+def claim_webinar_reminder(registration_id: str) -> bool:
+    """Atomically prevent duplicate reminders across overlapping dispatcher ticks."""
+    result = (_supabase.table("webinar_registrations")
+              .update({"reminder_sent_at": datetime.now(timezone.utc).isoformat()})
+              .eq("id", registration_id).is_("reminder_sent_at", "null").execute())
+    return bool(result.data)
+
+
+def webinar_attendee(user_id: str) -> Optional[dict]:
+    return (_supabase.table("profiles").select("email,full_name").eq("id", user_id).maybe_single().execute()).data
 
 
 def webinar_registration_by_order(order_id: str) -> Optional[dict]:
@@ -150,10 +174,7 @@ def join_details(webinar_id: str, user_id: str, is_admin: bool = False, mentor_i
         raise ValueError("JOIN_TOO_EARLY")
     if now > starts + timedelta(minutes=int(webinar["duration_minutes"]) + 30):
         raise ValueError("JOIN_CLOSED")
-    meeting_url = webinar.get("meeting_url")
-    if webinar["meeting_provider"] == "jitsi_public":
-        meeting_url = f"https://meet.jit.si/{webinar.get('meeting_room')}"
-    return {"id": webinar["id"], "title": webinar["title"], "meeting_provider": webinar["meeting_provider"], "meeting_url": meeting_url}
+    return {"id": webinar["id"], "title": webinar["title"], "meeting_provider": "google_meet", "meeting_url": webinar.get("meeting_url")}
 
 
 def record_attendance(webinar_id: str, user_id: str, event: str) -> None:

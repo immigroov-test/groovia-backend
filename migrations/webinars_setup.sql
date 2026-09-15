@@ -21,7 +21,7 @@ CREATE TABLE IF NOT EXISTS webinars (
   is_paid boolean NOT NULL DEFAULT false,
   price numeric(12,2) NOT NULL DEFAULT 0 CHECK (price >= 0),
   currency char(3) NOT NULL DEFAULT 'INR',
-  meeting_provider text NOT NULL DEFAULT 'jitsi_public' CHECK (meeting_provider IN ('jitsi_public','google_meet','zoom','teams','custom')),
+  meeting_provider text NOT NULL DEFAULT 'google_meet' CHECK (meeting_provider IN ('google_meet')),
   meeting_room text,
   meeting_url text,
   admin_note text,
@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS webinar_registrations (
   provider_payment_id text UNIQUE,
   joined_at timestamptz,
   left_at timestamptz,
+  reminder_sent_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (webinar_id, user_id)
@@ -55,6 +56,8 @@ CREATE INDEX IF NOT EXISTS webinars_public_idx ON webinars(status, starts_at);
 CREATE INDEX IF NOT EXISTS webinars_mentor_idx ON webinars(mentor_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS webinar_registrations_user_idx ON webinar_registrations(user_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS webinar_registrations_webinar_idx ON webinar_registrations(webinar_id, status);
+
+ALTER TABLE webinar_registrations ADD COLUMN IF NOT EXISTS reminder_sent_at timestamptz;
 
 ALTER TABLE webinars ENABLE ROW LEVEL SECURITY;
 ALTER TABLE webinar_registrations ENABLE ROW LEVEL SECURITY;

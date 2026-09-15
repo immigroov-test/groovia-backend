@@ -9,6 +9,7 @@ import config
 import db
 from core.auth import AuthUser, get_current_user, require_admin
 from core.permissions import require_active_mentor
+from services import mailer
 
 router = APIRouter(tags=["webinars"])
 
@@ -27,8 +28,8 @@ class WebinarBody(BaseModel):
     is_paid: bool = False
     price: float = Field(default=0, ge=0)
     currency: str = "INR"
-    meeting_provider: Literal["jitsi_public", "google_meet", "zoom", "teams", "custom"] = "jitsi_public"
-    meeting_url: Optional[str] = None
+    meeting_provider: Literal["google_meet"] = "google_meet"
+    meeting_url: str
 
     @field_validator("currency")
     @classmethod
@@ -57,14 +58,20 @@ class WebinarBody(BaseModel):
             raise ValueError("Media and meeting links must start with http:// or https://")
         return value
 
+    @field_validator("meeting_url")
+    @classmethod
+    def google_meet_url(cls, value: str) -> str:
+        value = value.strip()
+        if not value.startswith("https://meet.google.com/"):
+            raise ValueError("Enter a valid Google Meet link")
+        return value
+
     def db_fields(self) -> dict:
         data = self.model_dump(mode="json")
         if not data["is_paid"]:
             data["price"] = 0
         elif data["price"] <= 0:
             raise HTTPException(status_code=422, detail="A paid webinar needs a price")
-        if data["meeting_provider"] != "jitsi_public" and not data.get("meeting_url"):
-            raise HTTPException(status_code=422, detail="A meeting URL is required for this provider")
         return data
 
 
@@ -78,6 +85,7 @@ class MentorRequestBody(BaseModel):
     is_paid: bool = False
     price: float = Field(default=0, ge=0)
     currency: str = Field(default="INR", min_length=3, max_length=3)
+    meeting_url: str
 
     @field_validator("starts_at")
     @classmethod
@@ -95,6 +103,26 @@ class MentorRequestBody(BaseModel):
         if len(value) != 3 or not value.isalpha():
             raise ValueError("Currency must be a three-letter code")
         return value
+
+    @field_validator("meeting_url")
+    @classmethod
+    def google_meet_url(cls, value: str) -> str:
+        value = value.strip()
+        if not value.startswith("https://meet.google.com/"):
+            raise ValueError("Enter a valid Google Meet link")
+        return value
+
+
+def _send_confirmation(user: AuthUser, webinar: dict) -> None:
+    try:
+        mailer.send_transactional(user.email, "webinar_registration_confirmed", {
+            "title": webinar.get("title", "Webinar"),
+            "starts_at": webinar.get("starts_at", ""),
+            "join_url": f"{config.FRONTEND_URL}/webinars/{webinar.get('slug')}/join",
+        })
+    except Exception:
+        # Registration/payment is authoritative; an email provider outage must not undo it.
+        pass
 
 
 class DecisionBody(BaseModel):
@@ -134,6 +162,7 @@ def register(webinar_id: str, user: AuthUser = Depends(get_current_user)):
     if webinar.get("is_paid") and registration.get("status") in ("confirmed", "attended"):
         return {"registration": registration, "payment_required": False, "already_registered": True}
     if not webinar.get("is_paid"):
+        _send_confirmation(user, webinar)
         return {"registration": registration, "payment_required": False}
     try:
         order = db.create_webinar_razorpay_order(registration)
@@ -157,7 +186,12 @@ def confirm_payment(body: ConfirmPaymentBody, user: AuthUser = Depends(get_curre
     if not reg or reg.get("user_id") != user.id:
         raise HTTPException(status_code=404, detail="Registration not found")
     try:
-        return db.confirm_razorpay(body.registration_id, body.razorpay_order_id, body.razorpay_payment_id, body.razorpay_signature)
+        was_confirmed = reg.get("status") in ("confirmed", "attended")
+        confirmed = db.confirm_razorpay(body.registration_id, body.razorpay_order_id, body.razorpay_payment_id, body.razorpay_signature)
+        webinar = db.get_webinar(reg["webinar_id"])
+        if webinar and not was_confirmed:
+            _send_confirmation(user, webinar)
+        return confirmed
     except ValueError:
         raise HTTPException(status_code=400, detail="Payment verification failed")
 
@@ -196,7 +230,7 @@ def mentor_list(mentor: dict = Depends(require_active_mentor)):
 @router.post("/mentor/webinars/requests")
 def mentor_request(body: MentorRequestBody, user: AuthUser = Depends(get_current_user), mentor: dict = Depends(require_active_mentor)):
     fields = body.model_dump(mode="json")
-    fields.update({"mentor_id": mentor["id"], "meeting_provider": "jitsi_public", "price": body.price if body.is_paid else 0})
+    fields.update({"mentor_id": mentor["id"], "meeting_provider": "google_meet", "price": body.price if body.is_paid else 0})
     return db.create_webinar(fields, creator_id=user.id, source="mentor_request", status="pending_review")
 
 
@@ -224,8 +258,8 @@ def admin_action(webinar_id: str, action: Literal["approve", "request-changes", 
         raise HTTPException(status_code=404, detail="Webinar not found")
     states = {"approve": "approved", "request-changes": "changes_requested", "reject": "rejected", "publish": "published", "cancel": "cancelled", "complete": "completed"}
     if action == "publish":
-        if webinar.get("meeting_provider") != "jitsi_public" and not webinar.get("meeting_url"):
-            raise HTTPException(status_code=409, detail="Add a meeting URL before publishing")
+        if webinar.get("meeting_provider") != "google_meet" or not webinar.get("meeting_url"):
+            raise HTTPException(status_code=409, detail="Add a Google Meet link before publishing")
         if datetime.fromisoformat(webinar["starts_at"].replace("Z", "+00:00")) <= datetime.now(timezone.utc):
             raise HTTPException(status_code=409, detail="A webinar must start in the future")
     fields = {"status": states[action], "admin_note": body.note}

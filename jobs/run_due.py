@@ -217,6 +217,7 @@ _JOBS = [
     ("process_refunds", db.process_refunds),
     ("reconcile_payments", _reconcile_payments_if_due),
     ("session_reminders", notifications.send_session_reminders),
+    ("webinar_reminders", notifications.send_webinar_reminders),
     ("attendance_checks", notifications.send_attendance_checks),
     ("review_requests", notifications.send_review_requests),
     # FEAT-020: scrub the personal fields of mentors whose 90-day deletion grace has run out. Safe

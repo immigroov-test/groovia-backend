@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError
 from core.auth import AuthUser
 from routers.webinars import WebinarBody, admin_action, admin_create, join, register
+from services import notifications
 
 
 def _user() -> AuthUser:
@@ -16,17 +17,18 @@ def _webinar(**extra):
     return {
         "id": "webinar-1", "status": "published", "is_paid": False,
         "starts_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
-        "meeting_provider": "jitsi_public", "meeting_room": "secret-room", **extra,
+        "slug": "moving-to-canada", "title": "Moving to Canada",
+        "meeting_provider": "google_meet", "meeting_url": "https://meet.google.com/abc-defg-hij", **extra,
     }
 
 
-def test_admin_create_free_webinar_generates_zero_price():
-    body = WebinarBody(title="Moving to Canada", description="A practical introduction", starts_at=datetime.now(timezone.utc) + timedelta(days=2), duration_minutes=60)
+def test_admin_create_free_webinar_uses_google_meet():
+    body = WebinarBody(title="Moving to Canada", description="A practical introduction", starts_at=datetime.now(timezone.utc) + timedelta(days=2), duration_minutes=60, meeting_url="https://meet.google.com/abc-defg-hij")
     with patch.object(db, "create_webinar", return_value={"id": "webinar-1"}) as create:
         result = admin_create(body, user=_user())
     assert result["id"] == "webinar-1"
     assert create.call_args.args[0]["price"] == 0
-    assert create.call_args.args[0]["meeting_provider"] == "jitsi_public"
+    assert create.call_args.args[0]["meeting_provider"] == "google_meet"
 
 
 def test_cannot_create_past_webinar():
@@ -45,6 +47,7 @@ def test_webinar_accepts_public_poster_and_media_urls():
         description="A practical introduction",
         starts_at=datetime.now(timezone.utc) + timedelta(days=2),
         duration_minutes=60,
+        meeting_url="https://meet.google.com/abc-defg-hij",
         banner_url="https://cdn.example.com/poster.jpg",
         media_url="https://www.youtube.com/watch?v=example",
     )
@@ -66,10 +69,34 @@ def test_paid_registration_creates_razorpay_order():
     assert result["order"]["order_id"] == "order-1"
 
 
-def test_join_returns_protected_external_jitsi_url():
-    with patch.object(db, "get_profile_role", return_value="candidate"), patch.object(db, "get_mentor_by_profile_id", return_value=None), patch.object(db, "join_details", return_value={"meeting_url": "https://meet.jit.si/secret-room"}):
+def test_join_returns_protected_external_google_meet_url():
+    with patch.object(db, "get_profile_role", return_value="candidate"), patch.object(db, "get_mentor_by_profile_id", return_value=None), patch.object(db, "join_details", return_value={"meeting_url": "https://meet.google.com/abc-defg-hij"}):
         result = join("webinar-1", user=_user())
-    assert result["meeting_url"] == "https://meet.jit.si/secret-room"
+    assert result["meeting_url"] == "https://meet.google.com/abc-defg-hij"
+
+
+def test_webinar_reminder_uses_masked_join_link():
+    due = [{"id": "reg-1", "user_id": "user-1", "webinars": {
+        "id": "webinar-1", "slug": "moving-to-canada", "title": "Moving to Canada",
+        "starts_at": (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat(),
+    }}]
+    with patch.object(db, "due_webinar_reminders", return_value=due), \
+         patch.object(db, "claim_webinar_reminder", return_value=True), \
+         patch.object(db, "webinar_attendee", return_value={"email": "user@example.com", "full_name": "User"}), \
+         patch("services.mailer.send_transactional") as send:
+        result = notifications.send_webinar_reminders()
+    assert result == {"webinar_reminders_sent": 1}
+    payload = send.call_args.args[2]
+    assert payload["join_url"].endswith("/webinars/moving-to-canada/join")
+    assert "meet.google.com" not in payload["join_url"]
+
+
+def test_webinar_reminder_sends_nothing_when_no_published_webinar_is_due():
+    with patch.object(db, "due_webinar_reminders", return_value=[]), \
+         patch("services.mailer.send_transactional") as send:
+        result = notifications.send_webinar_reminders()
+    assert result == {"webinar_reminders_sent": 0}
+    send.assert_not_called()
 
 
 def test_cannot_publish_past_webinar():

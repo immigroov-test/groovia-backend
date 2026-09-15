@@ -82,6 +82,33 @@ def send_session_reminders() -> dict:
     return {"reminders_sent": sent}
 
 
+def send_webinar_reminders() -> dict:
+    """Send one protected-link reminder shortly before published webinars begin.
+
+    Cancelled webinars never enter the due query, and the reminder is claimed before
+    delivery so overlapping dispatcher ticks cannot send duplicates.
+    """
+    sent = 0
+    for registration in db.due_webinar_reminders():
+        if not db.claim_webinar_reminder(registration["id"]):
+            continue
+        webinar = registration.get("webinars") or {}
+        attendee = db.webinar_attendee(registration["user_id"]) or {}
+        if not attendee.get("email"):
+            continue
+        try:
+            mailer.send_transactional(attendee["email"], "webinar_reminder_15min", {
+                "recipient_name": attendee.get("full_name") or "there",
+                "title": webinar.get("title") or "Webinar",
+                "starts_at": webinar.get("starts_at") or "",
+                "join_url": f"{config.FRONTEND_URL}/webinars/{webinar.get('slug')}/join",
+            })
+            sent += 1
+        except Exception:
+            logger.warning("webinar reminder failed registration=%s", registration["id"])
+    return {"webinar_reminders_sent": sent}
+
+
 def send_review_requests() -> dict:
     """Post-session 'leave a review' email to the mentee (attended, registered accounts only),
     then one reminder ~3 days later if they still haven't reviewed. Links to the session page,

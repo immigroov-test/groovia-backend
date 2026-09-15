@@ -1339,6 +1339,31 @@ def _reschedule_request_approved(d: dict) -> tuple[str, str]:
     return "Your reschedule request was approved", _base(body)
 
 
+def _webinar_registration_confirmed(d: dict) -> tuple[str, str]:
+    title = _e(d.get("title", "Webinar"))
+    starts_at = _e(d.get("starts_at", ""))
+    body = (
+        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Your webinar seat is confirmed</h1>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">You are registered for <strong>{title}</strong>.</p>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Scheduled start: {starts_at}</p>'
+        '<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Use the protected Immigroov link below. The webinar room opens 15 minutes before the scheduled start.</p>'
+        + _btn(d.get("join_url") or config.FRONTEND_URL + "/webinars", "Open webinar room")
+    )
+    return f"Your seat is confirmed: {title}", _base(body)
+
+
+def _webinar_reminder_15min(d: dict) -> tuple[str, str]:
+    name = _e(d.get("recipient_name", "there"))
+    title = _e(d.get("title", "Webinar"))
+    body = (
+        '<h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#0a0a0a">Your webinar starts in 15 minutes</h1>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6">Hi {name},</p>'
+        f'<p style="margin:0 0 16px;font-size:15px;color:#444;line-height:1.6"><strong>{title}</strong> is about to begin.</p>'
+        + _btn(d.get("join_url") or config.FRONTEND_URL + "/webinars", "Join on Immigroov")
+    )
+    return f"Starting in 15 minutes: {title}", _base(body)
+
+
 def _reschedule_request_declined(d: dict) -> tuple[str, str]:
     """The mentor declined. The session stands at its original time, which is the one thing
     the recipient most needs to know - silence here would leave them assuming it moved."""
@@ -1413,6 +1438,8 @@ _TEMPLATES = {
     "auth_recovery": _auth_recovery,
     "auth_generic": _auth_generic,
     "legal_document_updated": _legal_document_updated,
+    "webinar_registration_confirmed": _webinar_registration_confirmed,
+    "webinar_reminder_15min": _webinar_reminder_15min,
 }
 
 
@@ -1446,7 +1473,8 @@ _STREAMS: dict[str, str] = {
         "session_reminder_24h", "session_reminder_1h", "session_reminder_30min",
         "reschedule_request_approved", "reschedule_request_declined",
         "mentor_attendance_check",
-        "payment_failed", "refund_issued", "payout_paid")},
+        "payment_failed", "refund_issued", "payout_paid",
+        "webinar_registration_confirmed", "webinar_reminder_15min")},
     **{k: "account" for k in (
         "welcome_candidate", "welcome_mentor",
         "mentor_application_received", "mentor_approved", "mentor_rejected",
