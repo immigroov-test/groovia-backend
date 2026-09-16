@@ -5,7 +5,15 @@ import db
 import pytest
 from pydantic import ValidationError
 from core.auth import AuthUser
-from routers.webinars import WebinarBody, admin_action, admin_create, join, register
+from routers.webinars import (
+    RegistrationBody,
+    WebinarBody,
+    admin_action,
+    admin_create,
+    admin_update,
+    join,
+    register,
+)
 from services import notifications
 
 
@@ -55,18 +63,35 @@ def test_webinar_accepts_public_poster_and_media_urls():
 
 
 def test_free_registration_confirms_without_payment_order():
-    with patch.object(db, "get_webinar", return_value=_webinar()), patch.object(db, "register", return_value={"id": "reg-1", "status": "confirmed"}):
-        result = register("webinar-1", user=_user())
+    body = RegistrationBody(
+        full_name="Test User", email="attendee@example.com", phone="+91 9999999999"
+    )
+    with patch.object(db, "get_webinar", return_value=_webinar()), \
+         patch.object(db, "register", return_value={"id": "reg-1", "status": "confirmed"}) as reserve, \
+         patch.object(db, "record_consent"):
+        result = register("webinar-1", body, user=_user())
     assert result["payment_required"] is False
     assert result["registration"]["status"] == "confirmed"
+    details = reserve.call_args.args[3]
+    assert details["attendee_email"] == "attendee@example.com"
+    assert details["attendee_phone"] == "+91 9999999999"
+    assert details["marketing_consent"] is False
 
 
 def test_paid_registration_creates_razorpay_order():
     paid = _webinar(is_paid=True)
-    with patch.object(db, "get_webinar", return_value=paid), patch.object(db, "register", return_value={"id": "reg-1", "amount": 499, "currency": "INR"}), patch.object(db, "create_webinar_razorpay_order", return_value={"id": "order-1", "amount": 49900, "currency": "INR"}):
-        result = register("webinar-1", user=_user())
+    body = RegistrationBody(
+        full_name="Test User", email="attendee@example.com", phone="+91 9999999999",
+        marketing_consent=True,
+    )
+    with patch.object(db, "get_webinar", return_value=paid), \
+         patch.object(db, "register", return_value={"id": "reg-1", "amount": 499, "currency": "INR"}), \
+         patch.object(db, "create_webinar_razorpay_order", return_value={"id": "order-1", "amount": 49900, "currency": "INR"}), \
+         patch.object(db, "record_consent") as consent:
+        result = register("webinar-1", body, user=_user())
     assert result["payment_required"] is True
     assert result["order"]["order_id"] == "order-1"
+    assert consent.call_args.kwargs["granted"] is True
 
 
 def test_join_returns_protected_external_google_meet_url():
@@ -107,6 +132,29 @@ def test_cannot_publish_past_webinar():
             assert False, "expected conflict"
         except Exception as exc:
             assert getattr(exc, "status_code", None) == 409
+
+
+def test_published_webinar_must_be_unpublished_before_editing():
+    body = WebinarBody(
+        title="Moving to Canada", description="A practical introduction",
+        starts_at=datetime.now(timezone.utc) + timedelta(days=2),
+        duration_minutes=60,
+        meeting_url="https://meet.google.com/abc-defg-hij",
+    )
+    with patch.object(db, "get_webinar", return_value=_webinar()), \
+         patch.object(db, "update_webinar") as update:
+        with pytest.raises(Exception) as exc:
+            admin_update("webinar-1", body, user=_user())
+    assert getattr(exc.value, "status_code", None) == 409
+    update.assert_not_called()
+
+
+def test_unpublish_returns_webinar_to_approved_state():
+    with patch.object(db, "get_webinar", return_value=_webinar()), \
+         patch.object(db, "update_webinar", return_value={"status": "approved"}) as update:
+        result = admin_action("webinar-1", "unpublish", user=_user())
+    assert result["status"] == "approved"
+    assert update.call_args.args[1]["status"] == "approved"
 
 
 def test_webhook_finalizer_rejects_wrong_amount():

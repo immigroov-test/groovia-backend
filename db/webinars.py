@@ -65,9 +65,19 @@ def get_webinar(webinar_id: str) -> Optional[dict]:
     return (_supabase.table("webinars").select("*").eq("id", webinar_id).maybe_single().execute()).data
 
 
-def register(webinar_id: str, user_id: str, paid: bool) -> dict:
+def register(
+    webinar_id: str,
+    user_id: str,
+    paid: bool,
+    attendee: dict[str, Any],
+) -> dict:
     fn = "webinar_reserve_paid" if paid else "webinar_confirm_free"
-    return _supabase.rpc(fn, {"p_webinar_id": webinar_id, "p_user_id": user_id}).execute().data
+    registration = _supabase.rpc(
+        fn, {"p_webinar_id": webinar_id, "p_user_id": user_id}
+    ).execute().data
+    return (_supabase.table("webinar_registrations")
+            .update({**attendee, "updated_at": datetime.now(timezone.utc).isoformat()})
+            .eq("id", registration["id"]).execute()).data[0]
 
 
 def my_registrations(user_id: str) -> list[dict]:
@@ -88,7 +98,7 @@ def due_webinar_reminders() -> list[dict]:
     """Confirmed attendees for published webinars starting in the next 10-15 minutes."""
     now = datetime.now(timezone.utc)
     rows = (_supabase.table("webinar_registrations")
-            .select("id,user_id,webinars!inner(id,slug,title,starts_at,status)")
+            .select("id,user_id,attendee_email,attendee_full_name,webinars!inner(id,slug,title,starts_at,status)")
             .in_("status", ["confirmed", "attended"])
             .is_("reminder_sent_at", "null")
             .eq("webinars.status", "published")
@@ -180,5 +190,6 @@ def join_details(webinar_id: str, user_id: str, is_admin: bool = False, mentor_i
 def record_attendance(webinar_id: str, user_id: str, event: str) -> None:
     field = "joined_at" if event == "join" else "left_at"
     values = {field: datetime.now(timezone.utc).isoformat(), "updated_at": datetime.now(timezone.utc).isoformat()}
-    if event == "join": values["status"] = "attended"
+    if event == "join":
+        values["status"] = "attended"
     _supabase.table("webinar_registrations").update(values).eq("webinar_id", webinar_id).eq("user_id", user_id).execute()

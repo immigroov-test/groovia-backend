@@ -1,5 +1,7 @@
+import re
 from datetime import datetime, timezone
 from typing import Literal, Optional
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException
@@ -58,6 +60,15 @@ class WebinarBody(BaseModel):
             raise ValueError("Media and meeting links must start with http:// or https://")
         return value
 
+    @field_validator("timezone")
+    @classmethod
+    def valid_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError("Enter a valid IANA timezone") from exc
+        return value
+
     @field_validator("meeting_url")
     @classmethod
     def google_meet_url(cls, value: str) -> str:
@@ -112,12 +123,52 @@ class MentorRequestBody(BaseModel):
             raise ValueError("Enter a valid Google Meet link")
         return value
 
+    @field_validator("timezone")
+    @classmethod
+    def valid_timezone(cls, value: str) -> str:
+        try:
+            ZoneInfo(value)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError("Enter a valid IANA timezone") from exc
+        return value
 
-def _send_confirmation(user: AuthUser, webinar: dict) -> None:
+
+class RegistrationBody(BaseModel):
+    full_name: str = Field(min_length=2, max_length=120)
+    email: str = Field(min_length=3, max_length=320)
+    phone: str = Field(min_length=5, max_length=30)
+    marketing_consent: bool = False
+
+    @field_validator("full_name", "phone")
+    @classmethod
+    def clean_text(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("email")
+    @classmethod
+    def valid_email(cls, value: str) -> str:
+        value = value.strip().lower()
+        if not re.fullmatch(r"[^\s@]+@[^\s@]+\.[^\s@]+", value):
+            raise ValueError("Enter a valid email address")
+        return value
+
+
+def _display_start(webinar: dict) -> str:
+    raw = str(webinar.get("starts_at") or "")
     try:
-        mailer.send_transactional(user.email, "webinar_registration_confirmed", {
+        value = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        zone_name = str(webinar.get("timezone") or "UTC")
+        return f"{value.astimezone(ZoneInfo(zone_name)):%b %d, %Y at %I:%M %p} ({zone_name})"
+    except (ValueError, ZoneInfoNotFoundError):
+        return raw
+
+
+def _send_confirmation(email: str, full_name: str, webinar: dict) -> None:
+    try:
+        mailer.send_transactional(email, "webinar_registration_confirmed", {
+            "recipient_name": full_name or "there",
             "title": webinar.get("title", "Webinar"),
-            "starts_at": webinar.get("starts_at", ""),
+            "starts_at": _display_start(webinar),
             "join_url": f"{config.FRONTEND_URL}/webinars/{webinar.get('slug')}/join",
         })
     except Exception:
@@ -148,21 +199,43 @@ def public_detail(slug: str):
 
 
 @router.post("/webinars/{webinar_id}/register")
-def register(webinar_id: str, user: AuthUser = Depends(get_current_user)):
+def register(
+    webinar_id: str,
+    body: RegistrationBody,
+    user: AuthUser = Depends(get_current_user),
+):
     webinar = db.get_webinar(webinar_id)
     if not webinar or webinar.get("status") != "published":
         raise HTTPException(status_code=404, detail="Webinar not found")
     try:
-        registration = db.register(webinar_id, user.id, bool(webinar.get("is_paid")))
+        registration = db.register(
+            webinar_id,
+            user.id,
+            bool(webinar.get("is_paid")),
+            {
+                "attendee_full_name": body.full_name,
+                "attendee_email": body.email,
+                "attendee_phone": body.phone,
+                "marketing_consent": body.marketing_consent,
+                "marketing_consent_at": datetime.now(timezone.utc).isoformat()
+                if body.marketing_consent else None,
+            },
+        )
     except Exception as exc:
         message = str(exc)
         if "FULL" in message or "CLOSED" in message:
             raise HTTPException(status_code=409, detail="Registration is closed or full")
         raise
+    db.record_consent(
+        kind="marketing:webinar",
+        user_id=user.id,
+        granted=body.marketing_consent,
+        policy_version="webinar-registration-v1",
+    )
     if webinar.get("is_paid") and registration.get("status") in ("confirmed", "attended"):
         return {"registration": registration, "payment_required": False, "already_registered": True}
     if not webinar.get("is_paid"):
-        _send_confirmation(user, webinar)
+        _send_confirmation(body.email, body.full_name, webinar)
         return {"registration": registration, "payment_required": False}
     try:
         order = db.create_webinar_razorpay_order(registration)
@@ -190,7 +263,11 @@ def confirm_payment(body: ConfirmPaymentBody, user: AuthUser = Depends(get_curre
         confirmed = db.confirm_razorpay(body.registration_id, body.razorpay_order_id, body.razorpay_payment_id, body.razorpay_signature)
         webinar = db.get_webinar(reg["webinar_id"])
         if webinar and not was_confirmed:
-            _send_confirmation(user, webinar)
+            _send_confirmation(
+                reg.get("attendee_email") or user.email,
+                reg.get("attendee_full_name") or "there",
+                webinar,
+            )
         return confirmed
     except ValueError:
         raise HTTPException(status_code=400, detail="Payment verification failed")
@@ -246,22 +323,28 @@ def admin_create(body: WebinarBody, user: AuthUser = Depends(require_admin)):
 
 @router.patch("/admin/webinars/{webinar_id}")
 def admin_update(webinar_id: str, body: WebinarBody, user: AuthUser = Depends(require_admin)):
-    if not db.get_webinar(webinar_id):
+    webinar = db.get_webinar(webinar_id)
+    if not webinar:
         raise HTTPException(status_code=404, detail="Webinar not found")
+    if webinar.get("status") in ("published", "live"):
+        raise HTTPException(status_code=409, detail="Unpublish the webinar before editing it")
     return db.update_webinar(webinar_id, body.db_fields())
 
 
 @router.post("/admin/webinars/{webinar_id}/{action}")
-def admin_action(webinar_id: str, action: Literal["approve", "request-changes", "reject", "publish", "cancel", "complete"], body: DecisionBody = DecisionBody(), user: AuthUser = Depends(require_admin)):
+def admin_action(webinar_id: str, action: Literal["approve", "request-changes", "reject", "publish", "unpublish", "cancel", "complete"], body: DecisionBody = DecisionBody(), user: AuthUser = Depends(require_admin)):
     webinar = db.get_webinar(webinar_id)
     if not webinar:
         raise HTTPException(status_code=404, detail="Webinar not found")
-    states = {"approve": "approved", "request-changes": "changes_requested", "reject": "rejected", "publish": "published", "cancel": "cancelled", "complete": "completed"}
+    states = {"approve": "approved", "request-changes": "changes_requested", "reject": "rejected", "publish": "published", "unpublish": "approved", "cancel": "cancelled", "complete": "completed"}
+    if action == "unpublish" and webinar.get("status") != "published":
+        raise HTTPException(status_code=409, detail="Only a published webinar can be unpublished")
     if action == "publish":
         if webinar.get("meeting_provider") != "google_meet" or not webinar.get("meeting_url"):
             raise HTTPException(status_code=409, detail="Add a Google Meet link before publishing")
         if datetime.fromisoformat(webinar["starts_at"].replace("Z", "+00:00")) <= datetime.now(timezone.utc):
             raise HTTPException(status_code=409, detail="A webinar must start in the future")
     fields = {"status": states[action], "admin_note": body.note}
-    if action == "publish": fields["published_at"] = datetime.now(timezone.utc).isoformat()
+    if action == "publish":
+        fields["published_at"] = datetime.now(timezone.utc).isoformat()
     return db.update_webinar(webinar_id, fields)

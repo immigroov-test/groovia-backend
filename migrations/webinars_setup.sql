@@ -47,6 +47,11 @@ CREATE TABLE IF NOT EXISTS webinar_registrations (
   joined_at timestamptz,
   left_at timestamptz,
   reminder_sent_at timestamptz,
+  attendee_full_name text,
+  attendee_email text,
+  attendee_phone text,
+  marketing_consent boolean NOT NULL DEFAULT false,
+  marketing_consent_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (webinar_id, user_id)
@@ -58,6 +63,12 @@ CREATE INDEX IF NOT EXISTS webinar_registrations_user_idx ON webinar_registratio
 CREATE INDEX IF NOT EXISTS webinar_registrations_webinar_idx ON webinar_registrations(webinar_id, status);
 
 ALTER TABLE webinar_registrations ADD COLUMN IF NOT EXISTS reminder_sent_at timestamptz;
+ALTER TABLE webinar_registrations
+  ADD COLUMN IF NOT EXISTS attendee_full_name text,
+  ADD COLUMN IF NOT EXISTS attendee_email text,
+  ADD COLUMN IF NOT EXISTS attendee_phone text,
+  ADD COLUMN IF NOT EXISTS marketing_consent boolean NOT NULL DEFAULT false,
+  ADD COLUMN IF NOT EXISTS marketing_consent_at timestamptz;
 
 ALTER TABLE webinars ENABLE ROW LEVEL SECURITY;
 ALTER TABLE webinar_registrations ENABLE ROW LEVEL SECURITY;

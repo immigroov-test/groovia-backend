@@ -94,11 +94,13 @@ def send_webinar_reminders() -> dict:
             continue
         webinar = registration.get("webinars") or {}
         attendee = db.webinar_attendee(registration["user_id"]) or {}
-        if not attendee.get("email"):
+        recipient_email = registration.get("attendee_email") or attendee.get("email")
+        recipient_name = registration.get("attendee_full_name") or attendee.get("full_name")
+        if not recipient_email:
             continue
         try:
-            mailer.send_transactional(attendee["email"], "webinar_reminder_15min", {
-                "recipient_name": attendee.get("full_name") or "there",
+            mailer.send_transactional(recipient_email, "webinar_reminder_15min", {
+                "recipient_name": recipient_name or "there",
                 "title": webinar.get("title") or "Webinar",
                 "starts_at": webinar.get("starts_at") or "",
                 "join_url": f"{config.FRONTEND_URL}/webinars/{webinar.get('slug')}/join",
