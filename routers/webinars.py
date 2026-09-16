@@ -107,7 +107,7 @@ def register(webinar_id: str, user: AuthUser = Depends(get_current_user)):
     if not webinar.get("is_paid"):
         return {"registration": registration, "payment_required": False}
     try:
-        order = db.create_razorpay_order(registration)
+        order = db.create_webinar_razorpay_order(registration)
     except httpx.HTTPError:
         raise HTTPException(status_code=502, detail="Could not create payment order")
     return {"registration": registration, "payment_required": True, "order": {

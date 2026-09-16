@@ -1665,32 +1665,6 @@ def reset_mentor_strikes(mentor_id: str) -> dict[str, Any]:
     return {"id": mentor_id, "no_show_strikes": 0}
 
 
-def upsert_ai_event(
-    *,
-    thread_id: Optional[str],
-    intent: Optional[str],
-    revision_count: int,
-    tool_calls: int,
-    latency_ms: int,
-    model: str,
-    quality_failure: bool,
-) -> None:
-    """Append one row to ai_events for offline LLM quality analysis."""
-    try:
-        _supabase.table("ai_events").insert({
-            "thread_id": thread_id,
-            "intent": intent,
-            "revision_count": revision_count,
-            "tool_calls": tool_calls,
-            "latency_ms": latency_ms,
-            "model": model,
-            "quality_failure": quality_failure,
-        }).execute()
-    except Exception:
-        logger.exception("Failed to log ai_event (thread=%s)", thread_id)
-
-
-
 # ── FEAT-020: mentor-initiated deactivation / deletion ────────────────────────
 # Two self-service states, both distinct from the admin-imposed 'suspended':
 #   'deactivated'      - a pause. Hidden from browse, reactivate whenever, nothing is deleted.
