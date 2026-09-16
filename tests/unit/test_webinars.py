@@ -60,7 +60,7 @@ def test_free_registration_confirms_without_payment_order():
 
 def test_paid_registration_creates_razorpay_order():
     paid = _webinar(is_paid=True)
-    with patch.object(db, "get_webinar", return_value=paid), patch.object(db, "register", return_value={"id": "reg-1", "amount": 499, "currency": "INR"}), patch.object(db, "create_razorpay_order", return_value={"id": "order-1", "amount": 49900, "currency": "INR"}):
+    with patch.object(db, "get_webinar", return_value=paid), patch.object(db, "register", return_value={"id": "reg-1", "amount": 499, "currency": "INR"}), patch.object(db, "create_webinar_razorpay_order", return_value={"id": "order-1", "amount": 49900, "currency": "INR"}):
         result = register("webinar-1", user=_user())
     assert result["payment_required"] is True
     assert result["order"]["order_id"] == "order-1"

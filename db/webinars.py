@@ -107,7 +107,9 @@ def fail_webinar_payment(registration_id: str) -> None:
     _supabase.table("webinar_registrations").update({"status": "cancelled", "updated_at": datetime.now(timezone.utc).isoformat()}).eq("id", registration_id).eq("status", "pending_payment").execute()
 
 
-def create_razorpay_order(registration: dict) -> dict:
+# Not create_razorpay_order: db/__init__ star-imports every module into one namespace, and a
+# function by that name here shadowed the booking one, which broke every paid booking.
+def create_webinar_razorpay_order(registration: dict) -> dict:
     amount = round(float(registration["amount"]) * (1 if registration["currency"] in ("JPY", "KRW", "VND") else 100))
     payload = {"amount": amount, "currency": registration["currency"], "receipt": f"webinar_{registration['id']}", "notes": {"registration_id": registration["id"]}}
     if config.MOCK_SERVICES:
