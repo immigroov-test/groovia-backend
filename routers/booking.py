@@ -392,6 +392,9 @@ def reschedule_slots(
     # "see all my available times" option). offer = {id, range_start, range_end} or None.
     offer = db.get_active_mentor_proposal(booking_id)
     try:
+        # The customer's own calendar view, including "see all my available times" beside a mentor's
+        # proposal. The mentor's minimum notice applies here, as it does when accepting outside the
+        # proposed range; the in-range list, where it is waived, is proposal_slots below.
         slots = db.get_available_slots(target["mentor_id"], target["service_id"], str(p_from), str(p_to),
                                        require_active=False)
         return {
@@ -448,6 +451,7 @@ def proposal_slots(booking_id: str, user: AuthUser = Depends(get_current_user)):
         all_slots = db.get_available_slots(
             target["mentor_id"], target["service_id"], str(r_start.date()), str(r_end.date()),
             require_active=False,
+            ignore_notice=True,   # the mentor chose this range; their notice rule is waived inside it
         )
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))

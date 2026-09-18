@@ -20,8 +20,13 @@ def get_available_slots(
     p_from: str,
     p_to: str,
     require_active: bool = True,
+    ignore_notice: bool = False,
 ) -> list[dict[str, Any]]:
     """Call the get_available_slots PostgreSQL RPC and return results as a list of dicts.
+
+    ignore_notice=True only when the MENTOR chose the time (the mentee is looking at a range the
+    mentor proposed); the mentor's minimum notice is a rule against customers booking at short
+    notice, not against the mentor moving their own session.
 
     require_active=False for a booking that ALREADY exists (reschedule, or accepting a
     mentor's proposed range). A booking outlives the catalogue entry it came from, so a
@@ -32,6 +37,7 @@ def get_available_slots(
         "p_from":           p_from,
         "p_to":             p_to,
         "p_require_active": require_active,
+        "p_ignore_notice":  ignore_notice,
     }).execute()
     if not res.data:
         return []
