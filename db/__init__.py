@@ -12,6 +12,7 @@ from .reviews import *
 from .legal import *
 from .webinars import *
 from .blog import *
+from .careers import *
 # BUG-162: imported as a module, not star-imported - it talks to a DIFFERENT Supabase project and
 # its generic names (list_bugs, enabled) should stay behind `db.bug_board.` rather than landing in
 # the same namespace as the platform's own helpers.

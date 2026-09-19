@@ -25,6 +25,7 @@ from routers import auth as auth_router
 from routers import availability as availability_router
 from routers import booking as booking_router
 from routers import chat as chat_router
+from routers import careers as careers_router
 from routers import consent as consent_router
 from routers import contact as contact_router
 from routers import legal as legal_router
@@ -169,6 +170,7 @@ api.include_router(auth_router.router)
 api.include_router(availability_router.router)
 api.include_router(booking_router.router)
 api.include_router(chat_router.router)
+api.include_router(careers_router.router)
 api.include_router(consent_router.router)
 api.include_router(contact_router.router)
 api.include_router(legal_router.router)
