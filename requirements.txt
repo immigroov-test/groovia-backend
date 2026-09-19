@@ -27,3 +27,4 @@ cryptography==44.0.0
 tenacity==9.0.0
 python-json-logger==3.2.1
 boto3
+tzdata>=2025.2

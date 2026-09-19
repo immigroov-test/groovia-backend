@@ -1,5 +1,5 @@
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Literal, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -63,10 +63,11 @@ class WebinarBody(BaseModel):
     @field_validator("timezone")
     @classmethod
     def valid_timezone(cls, value: str) -> str:
+        value = value.strip()
         try:
             ZoneInfo(value)
         except ZoneInfoNotFoundError as exc:
-            raise ValueError("Enter a valid IANA timezone") from exc
+            raise ValueError("Select a valid event timezone") from exc
         return value
 
     @field_validator("meeting_url")
@@ -126,10 +127,11 @@ class MentorRequestBody(BaseModel):
     @field_validator("timezone")
     @classmethod
     def valid_timezone(cls, value: str) -> str:
+        value = value.strip()
         try:
             ZoneInfo(value)
         except ZoneInfoNotFoundError as exc:
-            raise ValueError("Enter a valid IANA timezone") from exc
+            raise ValueError("Select a valid event timezone") from exc
         return value
 
 
@@ -328,6 +330,8 @@ def admin_update(webinar_id: str, body: WebinarBody, user: AuthUser = Depends(re
         raise HTTPException(status_code=404, detail="Webinar not found")
     if webinar.get("status") in ("published", "live"):
         raise HTTPException(status_code=409, detail="Unpublish the webinar before editing it")
+    if datetime.fromisoformat(webinar["starts_at"].replace("Z", "+00:00")) <= datetime.now(timezone.utc):
+        raise HTTPException(status_code=409, detail="Past webinars cannot be edited")
     return db.update_webinar(webinar_id, body.db_fields())
 
 
@@ -339,6 +343,11 @@ def admin_action(webinar_id: str, action: Literal["approve", "request-changes", 
     states = {"approve": "approved", "request-changes": "changes_requested", "reject": "rejected", "publish": "published", "unpublish": "approved", "cancel": "cancelled", "complete": "completed"}
     if action == "unpublish" and webinar.get("status") != "published":
         raise HTTPException(status_code=409, detail="Only a published webinar can be unpublished")
+    if action == "cancel":
+        starts_at = datetime.fromisoformat(webinar["starts_at"].replace("Z", "+00:00"))
+        ends_at = starts_at + timedelta(minutes=int(webinar.get("duration_minutes") or 0))
+        if ends_at <= datetime.now(timezone.utc):
+            raise HTTPException(status_code=409, detail="An ended webinar cannot be cancelled")
     if action == "publish":
         if webinar.get("meeting_provider") != "google_meet" or not webinar.get("meeting_url"):
             raise HTTPException(status_code=409, detail="Add a Google Meet link before publishing")

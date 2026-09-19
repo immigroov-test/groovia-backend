@@ -149,6 +149,41 @@ def test_published_webinar_must_be_unpublished_before_editing():
     update.assert_not_called()
 
 
+def test_past_webinar_cannot_be_rescheduled_by_editing():
+    body = WebinarBody(
+        title="Moving to Canada", description="A practical introduction",
+        starts_at=datetime.now(timezone.utc) + timedelta(days=2),
+        duration_minutes=60,
+        timezone="Asia/Kolkata",
+        meeting_url="https://meet.google.com/abc-defg-hij",
+    )
+    past = _webinar(
+        status="draft",
+        starts_at=(datetime.now(timezone.utc) - timedelta(hours=1)).isoformat(),
+    )
+    with patch.object(db, "get_webinar", return_value=past), \
+         patch.object(db, "update_webinar") as update:
+        with pytest.raises(Exception) as exc:
+            admin_update("webinar-1", body, user=_user())
+    assert getattr(exc.value, "status_code", None) == 409
+    assert "Past webinars" in str(getattr(exc.value, "detail", ""))
+    update.assert_not_called()
+
+
+def test_ended_webinar_cannot_be_cancelled():
+    ended = _webinar(
+        starts_at=(datetime.now(timezone.utc) - timedelta(hours=2)).isoformat(),
+        duration_minutes=60,
+    )
+    with patch.object(db, "get_webinar", return_value=ended), \
+         patch.object(db, "update_webinar") as update:
+        with pytest.raises(Exception) as exc:
+            admin_action("webinar-1", "cancel", user=_user())
+    assert getattr(exc.value, "status_code", None) == 409
+    assert "ended webinar" in str(getattr(exc.value, "detail", ""))
+    update.assert_not_called()
+
+
 def test_unpublish_returns_webinar_to_approved_state():
     with patch.object(db, "get_webinar", return_value=_webinar()), \
          patch.object(db, "update_webinar", return_value={"status": "approved"}) as update:
